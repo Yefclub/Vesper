@@ -98,7 +98,12 @@ impl DualChannelRecorder {
         total
     }
 
-    pub fn start(&self, out_path: PathBuf) -> Result<(), CaptureError> {
+    pub fn start(
+        &self,
+        out_path: PathBuf,
+        mic_device_id: Option<String>,
+        system_device_id: Option<String>,
+    ) -> Result<(), CaptureError> {
         if self.running.load(Ordering::SeqCst) {
             return Err(CaptureError::AlreadyRecording);
         }
@@ -127,6 +132,8 @@ impl DualChannelRecorder {
         let inner_sys = self.inner.clone();
         let stop_sys = self.stop_flag.clone();
         let paused_sys = self.paused.clone();
+        let mic_id = mic_device_id.clone();
+        let sys_id = system_device_id.clone();
 
         // —— Microphone (Me) ——
         let mic_handle = thread::Builder::new()
@@ -134,6 +141,7 @@ impl DualChannelRecorder {
             .spawn(move || {
                 let cfg = StreamConfig {
                     kind: SourceKind::Mic,
+                    device_id: mic_id,
                     output: OutputFormat {
                         sample_rate,
                         channels: 1,
@@ -176,6 +184,7 @@ impl DualChannelRecorder {
             .spawn(move || {
                 let cfg = StreamConfig {
                     kind: SourceKind::SystemLoopback,
+                    device_id: sys_id,
                     output: OutputFormat {
                         sample_rate,
                         channels: 1,

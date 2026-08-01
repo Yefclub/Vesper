@@ -40,6 +40,11 @@ export interface AppSettings {
   reasoning_enabled: boolean;
   auto_summarize: boolean;
   language: string;
+  ui_locale: string;
+  onboarding_complete: boolean;
+  mic_device_id?: string | null;
+  system_device_id?: string | null;
+  compute_backend: string;
 }
 
 export interface ChannelLevels {
@@ -84,6 +89,35 @@ export interface ModelInfo {
   download_url?: string | null;
 }
 
+export interface AudioDevice {
+  id: string;
+  name: string;
+  kind: "mic" | "system";
+  is_default: boolean;
+}
+
+export interface StartGate {
+  allowed: boolean;
+  reason?: string | null;
+  reason_key?: string | null;
+}
+
+export interface OrModel {
+  id: string;
+  name: string;
+  kind: string;
+}
+
+export interface CapabilityReport {
+  cpu_cores: number;
+  cuda_available: boolean;
+  cuda_device_name?: string | null;
+  recommended_stt_model: string;
+  recommended_llm_model: string;
+  recommended_backend: string;
+  notes: string[];
+}
+
 export const api = {
   listMeetings: () => invoke<MeetingRecord[]>("list_meetings"),
   getMeeting: (id: string) => invoke<MeetingRecord | null>("get_meeting", { id }),
@@ -92,10 +126,18 @@ export const api = {
   search: (query: string) => invoke<SearchHit[]>("search_meetings_cmd", { query }),
   getSettings: () => invoke<AppSettings>("get_settings"),
   saveSettings: (settings: AppSettings) => invoke<AppSettings>("save_settings", { settings }),
+  completeOnboarding: (settings: AppSettings) =>
+    invoke<AppSettings>("complete_onboarding", { settings }),
   switchStt: (provider: string) => invoke<AppSettings>("switch_stt_provider", { provider }),
   switchLlm: (provider: string) => invoke<AppSettings>("switch_llm_provider", { provider }),
   setReasoning: (enabled: boolean) => invoke<AppSettings>("set_reasoning", { enabled }),
   recorderStatus: () => invoke<RecorderStatus>("recorder_status"),
+  canRecord: () => invoke<StartGate>("can_record"),
+  listDevices: () => invoke<AudioDevice[]>("list_audio_devices_cmd"),
+  i18nCatalog: (locale: string) =>
+    invoke<Record<string, string>>("get_i18n_catalog", { locale }),
+  capabilities: () => invoke<CapabilityReport>("get_capabilities"),
+  openrouterSttModels: () => invoke<OrModel[]>("list_openrouter_stt_models"),
   startRecording: (title?: string) => invoke<MeetingRecord>("start_recording", { title }),
   pauseRecording: () => invoke<RecorderStatus>("pause_recording"),
   resumeRecording: () => invoke<RecorderStatus>("resume_recording"),

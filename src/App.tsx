@@ -26,19 +26,66 @@ import {
   ModelInfo,
   RecorderStatus,
   SearchHit,
+  StartGate,
 } from "./lib/api";
+import { I18nProvider, useI18n } from "./lib/i18n";
 import { LevelMeter } from "./components/LevelMeter";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { Onboarding } from "./components/Onboarding";
+import logo from "./assets/logo.png";
 
 type Tab = "transcript" | "summary" | "chat";
 
 export default function App() {
+  const [bootLocale, setBootLocale] = useState("en");
+  const [ready, setReady] = useState(false);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+
+  useEffect(() => {
+    api
+      .getSettings()
+      .then((s) => {
+        setSettings(s);
+        setBootLocale(s.ui_locale || "en");
+      })
+      .catch(() => {
+        setSettings(null);
+      })
+      .finally(() => setReady(true));
+  }, []);
+
+  if (!ready || !settings) {
+    return (
+      <div className="flex h-full items-center justify-center bg-background text-muted">
+        Loading Vesper…
+      </div>
+    );
+  }
+
+  return (
+    <I18nProvider initialLocale={bootLocale}>
+      <AppShell
+        initialSettings={settings}
+        onSettingsChange={setSettings}
+      />
+    </I18nProvider>
+  );
+}
+
+function AppShell({
+  initialSettings,
+  onSettingsChange,
+}: {
+  initialSettings: AppSettings;
+  onSettingsChange: (s: AppSettings) => void;
+}) {
+  const { t, setLocale } = useI18n();
   const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<LiveTranscript>({ segments: [] });
   const [status, setStatus] = useState<RecorderStatus | null>(null);
-  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [tab, setTab] = useState<Tab>("transcript");
@@ -49,16 +96,27 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [updateNote, setUpdateNote] = useState<string | null>(null);
+  const [gate, setGate] = useState<StartGate>({ allowed: false });
+  const [showOnboarding, setShowOnboarding] = useState(
+    !initialSettings.onboarding_complete,
+  );
 
   const selected = useMemo(
     () => meetings.find((m) => m.id === selectedId) ?? null,
     [meetings, selectedId],
   );
 
+  const refreshGate = useCallback(async () => {
+    try {
+      setGate(await api.canRecord());
+    } catch {
+      setGate({ allowed: false, reason: "Gate unavailable" });
+    }
+  }, []);
+
   const refreshMeetings = useCallback(async () => {
     try {
-      const list = await api.listMeetings();
-      setMeetings(list);
+      setMeetings(await api.listMeetings());
     } catch (e) {
       setError(String(e));
     }
@@ -67,12 +125,12 @@ export default function App() {
   const loadMeeting = useCallback(async (id: string) => {
     setSelectedId(id);
     try {
-      const [t, c, m] = await Promise.all([
+      const [tr, c, m] = await Promise.all([
         api.getTranscript(id),
         api.listChat(id),
         api.getMeeting(id),
       ]);
-      setTranscript(t);
+      setTranscript(tr);
       setChat(c);
       if (m) {
         setMeetings((prev) => {
@@ -89,13 +147,12 @@ export default function App() {
     (async () => {
       try {
         await refreshMeetings();
-        setSettings(await api.getSettings());
         setModels(await api.listModels());
         setStatus(await api.recorderStatus());
+        await refreshGate();
       } catch (e) {
         setError(String(e));
       }
-      // Auto-update check (silent when no update / offline)
       try {
         const update = await check();
         if (update) {
@@ -105,10 +162,10 @@ export default function App() {
           await relaunch();
         }
       } catch {
-        // No signed update server yet — ignore.
+        /* no release endpoint yet */
       }
     })();
-  }, [refreshMeetings]);
+  }, [refreshMeetings, refreshGate]);
 
   useEffect(() => {
     let unsubs: Array<() => void> = [];
@@ -143,14 +200,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Poll levels + live STT while recording
   useEffect(() => {
     if (!status?.recording) return;
     const id = window.setInterval(async () => {
       try {
         setStatus(await api.recorderStatus());
-        const t = await api.pollLiveStt();
-        setTranscript(t);
+        setTranscript(await api.pollLiveStt());
       } catch {
         /* keep UI alive */
       }
@@ -162,6 +217,12 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
+      const g = await api.canRecord();
+      setGate(g);
+      if (!g.allowed) {
+        setError(g.reason || t("gate.local_stt"));
+        return;
+      }
       const m = await api.startRecording();
       setStatus(await api.recorderStatus());
       setSelectedId(m.id);
@@ -185,6 +246,7 @@ export default function App() {
       await refreshMeetings();
       await loadMeeting(m.id);
       setTab("summary");
+      await refreshGate();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -248,7 +310,7 @@ export default function App() {
     try {
       const file = await open({
         multiple: false,
-        filters: [{ name: "Audio", extensions: ["wav", "mp3", "m4a", "webm"] }],
+        filters: [{ name: "Audio", extensions: ["wav", "mp3", "m4a", "webm", "ogg", "flac"] }],
       });
       if (!file || Array.isArray(file)) return;
       setBusy(true);
@@ -290,8 +352,24 @@ export default function App() {
     }
   }
 
+  const recordBlocked = !gate.allowed && !status?.recording;
+
   return (
     <div className="flex h-full bg-background text-foreground">
+      {showOnboarding && (
+        <Onboarding
+          settings={settings}
+          onDone={async (s) => {
+            setSettings(s);
+            onSettingsChange(s);
+            setLocale(s.ui_locale);
+            setShowOnboarding(false);
+            setModels(await api.listModels());
+            await refreshGate();
+          }}
+        />
+      )}
+
       <Sidebar
         meetings={meetings}
         selectedId={selectedId}
@@ -305,61 +383,67 @@ export default function App() {
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
-        {/* Top bar / recorder */}
         <header className="flex items-center gap-4 border-b border-border bg-surface px-6 py-4">
           <div className="flex items-center gap-2">
+            <img src={logo} alt="" className="h-8 w-8 rounded-lg" />
             <div className="text-lg font-semibold tracking-tight">
               <span className="bg-gradient-to-r from-accent to-accent-2 bg-clip-text text-transparent">
-                Vesper
+                {t("app.name")}
               </span>
             </div>
             <span className="rounded-full bg-surface-3 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted">
-              private
+              {t("app.tagline")}
             </span>
           </div>
 
-          <div className="mx-auto flex items-center gap-3">
-            {!status?.recording ? (
-              <button
-                data-testid="btn-record"
-                disabled={busy}
-                onClick={handleStart}
-                className="flex items-center gap-2 rounded-full bg-accent px-5 py-2 text-sm font-medium text-black transition hover:brightness-110 disabled:opacity-50"
-              >
-                <Mic size={16} /> Record
-              </button>
-            ) : (
-              <>
+          <div className="mx-auto flex flex-col items-center gap-1">
+            <div className="flex items-center gap-3">
+              {!status?.recording ? (
                 <button
-                  data-testid="btn-pause"
-                  onClick={handlePauseResume}
-                  className="flex items-center gap-2 rounded-full bg-surface-3 px-4 py-2 text-sm text-foreground hover:bg-border"
+                  data-testid="btn-record"
+                  disabled={busy || recordBlocked}
+                  title={recordBlocked ? gate.reason || undefined : undefined}
+                  onClick={handleStart}
+                  className="flex items-center gap-2 rounded-full bg-accent px-5 py-2 text-sm font-medium text-black transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  {status.paused ? <Play size={16} /> : <Pause size={16} />}
-                  {status.paused ? "Resume" : "Pause"}
+                  <Mic size={16} /> {t("record.start")}
                 </button>
-                <button
-                  data-testid="btn-stop"
-                  onClick={handleStop}
-                  className="flex items-center gap-2 rounded-full bg-danger/20 px-4 py-2 text-sm text-danger hover:bg-danger/30"
-                >
-                  <Square size={14} /> Stop
-                </button>
-                <span className="font-mono text-sm text-muted" data-testid="elapsed">
-                  {formatDuration(status.elapsed_ms)}
-                </span>
-              </>
+              ) : (
+                <>
+                  <button
+                    data-testid="btn-pause"
+                    onClick={handlePauseResume}
+                    className="flex items-center gap-2 rounded-full bg-surface-3 px-4 py-2 text-sm text-foreground hover:bg-border"
+                  >
+                    {status.paused ? <Play size={16} /> : <Pause size={16} />}
+                    {status.paused ? t("record.resume") : t("record.pause")}
+                  </button>
+                  <button
+                    data-testid="btn-stop"
+                    onClick={handleStop}
+                    className="flex items-center gap-2 rounded-full bg-danger/20 px-4 py-2 text-sm text-danger hover:bg-danger/30"
+                  >
+                    <Square size={14} /> {t("record.stop")}
+                  </button>
+                  <span className="font-mono text-sm text-muted" data-testid="elapsed">
+                    {formatDuration(status.elapsed_ms)}
+                  </span>
+                </>
+              )}
+            </div>
+            {recordBlocked && gate.reason && (
+              <p className="max-w-md text-center text-[11px] text-muted" data-testid="record-gate">
+                {gate.reason}
+              </p>
             )}
           </div>
 
           <div className="flex items-center gap-3">
-            {status?.recording && (
-              <LevelMeter levels={status.levels} />
-            )}
+            {status?.recording && <LevelMeter levels={status.levels} />}
             <button
               onClick={() => setShowSettings(true)}
               className="rounded-lg p-2 text-muted hover:bg-surface-3 hover:text-foreground"
-              title="Settings"
+              title={t("nav.settings")}
             >
               <Settings size={18} />
             </button>
@@ -380,7 +464,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Content */}
         <div className="flex min-h-0 flex-1 flex-col">
           {selected ? (
             <>
@@ -417,7 +500,10 @@ export default function App() {
                     DOCX
                   </button>
                   <button
-                    onClick={() => selectedId && api.retranscribe(selectedId).then((m) => loadMeeting(m.id))}
+                    onClick={() =>
+                      selectedId &&
+                      api.retranscribe(selectedId).then((m) => loadMeeting(m.id))
+                    }
                     className="flex items-center gap-1 rounded-lg bg-surface-3 px-3 py-1.5 text-xs hover:bg-border"
                   >
                     <FileAudio size={14} /> Retranscribe
@@ -428,9 +514,9 @@ export default function App() {
               <div className="flex gap-1 border-b border-border px-6">
                 {(
                   [
-                    ["transcript", "Transcript"],
-                    ["summary", "Summary"],
-                    ["chat", "Chat"],
+                    ["transcript", t("tab.transcript")],
+                    ["summary", t("tab.summary")],
+                    ["chat", t("tab.chat")],
                   ] as const
                 ).map(([id, label]) => (
                   <button
@@ -463,9 +549,7 @@ export default function App() {
                           <div
                             key={s.id}
                             className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-                              s.speaker === "me"
-                                ? "bubble-me ml-auto"
-                                : "bubble-others"
+                              s.speaker === "me" ? "bubble-me ml-auto" : "bubble-others"
                             }`}
                           >
                             <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted">
@@ -474,7 +558,9 @@ export default function App() {
                                   s.speaker === "me" ? "text-me" : "text-others"
                                 }
                               >
-                                {s.speaker === "me" ? "Me" : "Others"}
+                                {s.speaker === "me"
+                                  ? t("speaker.me")
+                                  : t("speaker.others")}
                               </span>
                               <span>{formatTs(s.start_ms)}</span>
                             </div>
@@ -483,8 +569,8 @@ export default function App() {
                         ))
                       ) : (
                         <Empty
-                          title="No transcript yet"
-                          body="Hit Record to capture dual-channel audio. Live lines appear here as Me / Others."
+                          title={t("empty.transcript")}
+                          body={t("empty.transcript_body")}
                         />
                       )}
                     </motion.div>
@@ -498,20 +584,9 @@ export default function App() {
                       className="mx-auto max-w-3xl space-y-6"
                       data-testid="summary-panel"
                     >
-                      <Section title="Summary" body={selected.summary || "Not generated yet."} />
+                      <Section title="Summary" body={selected.summary || "—"} />
                       <Section title="Key points" body={selected.key_points || "—"} />
                       <Section title="Action items" body={selected.action_items || "—"} />
-                      <div className="flex flex-wrap gap-2">
-                        {["general", "standup", "one_on_one", "client_call"].map((t) => (
-                          <button
-                            key={t}
-                            onClick={() => handleSummarize(t)}
-                            className="rounded-full border border-border px-3 py-1 text-xs text-muted hover:border-accent hover:text-accent"
-                          >
-                            {t.replace("_", " ")}
-                          </button>
-                        ))}
-                      </div>
                     </motion.div>
                   )}
 
@@ -524,12 +599,6 @@ export default function App() {
                       data-testid="chat-panel"
                     >
                       <div className="flex-1 space-y-3 overflow-y-auto pb-4">
-                        {chat.length === 0 && (
-                          <Empty
-                            title="Ask this meeting"
-                            body="Questions stay on-device with the local model, or use OpenRouter when configured."
-                          />
-                        )}
                         {chat.map((m, i) => (
                           <div
                             key={i}
@@ -548,7 +617,7 @@ export default function App() {
                           value={question}
                           onChange={(e) => setQuestion(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && handleChat()}
-                          placeholder="Ask about this meeting…"
+                          placeholder="…"
                           className="flex-1 rounded-xl border border-border bg-surface-2 px-4 py-2.5 text-sm outline-none focus:border-accent"
                         />
                         <button
@@ -566,16 +635,13 @@ export default function App() {
             </>
           ) : (
             <div className="flex flex-1 items-center justify-center p-8">
-              <Empty
-                title="Ready when you are"
-                body="Start a recording, import audio, or open a past meeting from the sidebar. Everything stays on this machine."
-              />
+              <Empty title={t("empty.ready")} body={t("empty.ready_body")} />
             </div>
           )}
         </div>
       </main>
 
-      {showSettings && settings && (
+      {showSettings && (
         <SettingsPanel
           settings={settings}
           models={models}
@@ -583,9 +649,14 @@ export default function App() {
           onSave={async (s) => {
             const next = await api.saveSettings(s);
             setSettings(next);
+            onSettingsChange(next);
             setModels(await api.listModels());
+            await refreshGate();
           }}
-          onRefreshModels={async () => setModels(await api.listModels())}
+          onRefreshModels={async () => {
+            setModels(await api.listModels());
+            await refreshGate();
+          }}
         />
       )}
     </div>

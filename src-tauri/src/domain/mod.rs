@@ -1,5 +1,8 @@
+pub mod capabilities;
 pub mod chat;
 pub mod export;
+pub mod gate;
+pub mod i18n;
 pub mod job;
 pub mod search;
 pub mod settings;

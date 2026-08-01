@@ -43,9 +43,10 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-                let shortcut: Shortcut = "cmd_or_ctrl+shift+r"
+                // global-hotkey syntax: modifiers first, then Code (e.g. KeyR)
+                let shortcut: Shortcut = "Ctrl+Shift+KeyR"
                     .parse()
-                    .expect("invalid shortcut");
+                    .map_err(|e| format!("invalid shortcut: {e}"))?;
                 let handle = app.handle().clone();
                 app.global_shortcut().on_shortcut(shortcut, move |_app, _sc, event| {
                     if event.state == ShortcutState::Pressed {
@@ -112,6 +113,13 @@ pub fn run() {
             commands::delete_meeting,
             commands::search_meetings_cmd,
             commands::recorder_status,
+            commands::can_record,
+            commands::list_audio_devices_cmd,
+            commands::get_i18n_catalog,
+            commands::translate_key,
+            commands::get_capabilities,
+            commands::list_openrouter_stt_models,
+            commands::complete_onboarding,
             commands::start_recording,
             commands::pause_recording,
             commands::resume_recording,

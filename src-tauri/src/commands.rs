@@ -1,8 +1,12 @@
 use crate::audio::capture::{read_dual_wav, DualChannelRecorder};
 use crate::audio::decode::decode_audio_file;
+use crate::audio::devices::{list_audio_devices, AudioDevice};
 use crate::db::Database;
+use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::chat::ChatMessage;
 use crate::domain::export::{export_meeting, ExportFormat};
+use crate::domain::gate::{can_start_recording, StartGate};
+use crate::domain::i18n::{catalog, t, Locale};
 use crate::domain::job::{MeetingEvent, MeetingRecord, MeetingStatus};
 use crate::domain::search::SearchHit;
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
@@ -11,6 +15,10 @@ use crate::domain::transcript::LiveTranscript;
 use crate::llm::service::LlmService;
 use crate::models::{download_model_with_progress, list_models, DownloadProgress, ModelInfo};
 use crate::paths::{ensure_app_dirs, recordings_dir};
+use crate::stt::catalog::{
+    default_stt_models, fetch_openrouter_stt_models, OrModel,
+};
+use crate::stt::local::LocalSttEngine;
 use crate::stt::pipeline::{apply_stt_chunks, SttService};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -165,6 +173,77 @@ pub fn recorder_status(state: State<'_, Arc<AppState>>) -> RecorderStatus {
     status_of(&state)
 }
 
+fn local_stt_ready(settings: &AppSettings) -> bool {
+    LocalSttEngine::new().is_model_ready(&settings.local_stt_model)
+}
+
+#[tauri::command]
+pub fn can_record(state: State<'_, Arc<AppState>>) -> StartGate {
+    let s = state.settings.lock().clone();
+    can_start_recording(&s, local_stt_ready(&s), s.onboarding_complete)
+}
+
+#[tauri::command]
+pub fn list_audio_devices_cmd() -> Result<Vec<AudioDevice>, String> {
+    list_audio_devices()
+}
+
+#[tauri::command]
+pub fn get_i18n_catalog(locale: String) -> std::collections::HashMap<String, String> {
+    catalog(Locale::from_code(&locale))
+}
+
+#[tauri::command]
+pub fn translate_key(locale: String, key: String) -> String {
+    t(Locale::from_code(&locale), &key)
+}
+
+#[tauri::command]
+pub fn get_capabilities() -> CapabilityReport {
+    detect_capabilities()
+}
+
+#[tauri::command]
+pub async fn list_openrouter_stt_models(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<OrModel>, String> {
+    let key = state
+        .settings
+        .lock()
+        .openrouter_api_key
+        .clone()
+        .unwrap_or_default();
+    if key.is_empty() || key.contains('…') {
+        return Ok(default_stt_models());
+    }
+    fetch_openrouter_stt_models(&key).await
+}
+
+#[tauri::command]
+pub fn complete_onboarding(
+    state: State<'_, Arc<AppState>>,
+    mut settings: AppSettings,
+) -> Result<AppSettings, String> {
+    {
+        let current = state.settings.lock();
+        if let Some(k) = &settings.openrouter_api_key {
+            if k.contains('…') || k == "****" {
+                settings.openrouter_api_key = current.openrouter_api_key.clone();
+            }
+        }
+    }
+    settings.onboarding_complete = true;
+    settings.validate_models().map_err(|e| e.to_string())?;
+    // If local STT selected, require model ready
+    let gate = can_start_recording(&settings, local_stt_ready(&settings), true);
+    if !gate.allowed && settings.stt_provider == SttProvider::Local {
+        // Allow finishing onboarding but user must still download model before record
+    }
+    state.db.save_settings(&settings)?;
+    *state.settings.lock() = settings.clone();
+    Ok(settings.public_view())
+}
+
 #[tauri::command]
 pub fn start_recording(
     state: State<'_, Arc<AppState>>,
@@ -173,13 +252,27 @@ pub fn start_recording(
     if state.recorder.is_recording() {
         return Err("already recording".into());
     }
+    let settings = state.settings.lock().clone();
+    let gate = can_start_recording(&settings, local_stt_ready(&settings), settings.onboarding_complete);
+    if !gate.allowed {
+        return Err(gate
+            .reason
+            .unwrap_or_else(|| "Cannot start recording".into()));
+    }
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let title = title
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| format!("Meeting {}", chrono::Local::now().format("%Y-%m-%d %H:%M")));
     let audio_path = recordings_dir().join(format!("{id}.wav"));
-    state.recorder.start(audio_path.clone()).map_err(|e| e.to_string())?;
+    state
+        .recorder
+        .start(
+            audio_path.clone(),
+            settings.mic_device_id.clone(),
+            settings.system_device_id.clone(),
+        )
+        .map_err(|e| e.to_string())?;
     let mut status = MeetingStatus::Idle;
     status = status
         .transition(MeetingEvent::StartRecording)

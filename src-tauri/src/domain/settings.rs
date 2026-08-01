@@ -1,3 +1,4 @@
+use crate::domain::i18n::Locale;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -28,7 +29,29 @@ pub struct AppSettings {
     pub local_llm_model: String,
     pub reasoning_enabled: bool,
     pub auto_summarize: bool,
+    /// Transcription language hint (`auto`, `en`, `pt`, …)
     pub language: String,
+    /// UI locale: `en` | `pt-BR`
+    #[serde(default = "default_ui_locale")]
+    pub ui_locale: String,
+    #[serde(default)]
+    pub onboarding_complete: bool,
+    /// Selected microphone device id (flexaudio stable id)
+    #[serde(default)]
+    pub mic_device_id: Option<String>,
+    /// Selected system/loopback device id
+    #[serde(default)]
+    pub system_device_id: Option<String>,
+    /// Preferred compute backend: `cpu` | `cuda` | `auto`
+    #[serde(default = "default_backend")]
+    pub compute_backend: String,
+}
+
+fn default_ui_locale() -> String {
+    "en".into()
+}
+fn default_backend() -> String {
+    "auto".into()
 }
 
 impl Default for AppSettings {
@@ -44,6 +67,11 @@ impl Default for AppSettings {
             reasoning_enabled: false,
             auto_summarize: true,
             language: "auto".into(),
+            ui_locale: "en".into(),
+            onboarding_complete: false,
+            mic_device_id: None,
+            system_device_id: None,
+            compute_backend: "auto".into(),
         }
     }
 }
@@ -57,6 +85,10 @@ pub enum SettingsError {
 }
 
 impl AppSettings {
+    pub fn locale(&self) -> Locale {
+        Locale::from_code(&self.ui_locale)
+    }
+
     pub fn switch_stt(&mut self, provider: SttProvider) -> Result<(), SettingsError> {
         if provider == SttProvider::OpenRouter {
             self.require_openrouter_key()?;
@@ -95,7 +127,6 @@ impl AppSettings {
         Ok(())
     }
 
-    /// Redacted view for UI (never return full API key).
     pub fn public_view(&self) -> AppSettings {
         let mut v = self.clone();
         if let Some(k) = &self.openrouter_api_key {
@@ -119,6 +150,7 @@ mod tests {
         assert_eq!(s.stt_provider, SttProvider::Local);
         assert_eq!(s.llm_provider, LlmProvider::Local);
         assert!(!s.reasoning_enabled);
+        assert!(!s.onboarding_complete);
     }
 
     #[test]
@@ -144,5 +176,20 @@ mod tests {
         s.openrouter_api_key = Some("sk-abcdefghij".into());
         let p = s.public_view();
         assert_ne!(p.openrouter_api_key.as_deref(), Some("sk-abcdefghij"));
+    }
+
+    #[test]
+    fn device_ids_roundtrip_serde() {
+        let mut s = AppSettings::default();
+        s.mic_device_id = Some("mic-1".into());
+        s.system_device_id = Some("sys-1".into());
+        s.onboarding_complete = true;
+        s.ui_locale = "pt-BR".into();
+        let j = serde_json::to_string(&s).unwrap();
+        let s2: AppSettings = serde_json::from_str(&j).unwrap();
+        assert_eq!(s2.mic_device_id.as_deref(), Some("mic-1"));
+        assert_eq!(s2.system_device_id.as_deref(), Some("sys-1"));
+        assert!(s2.onboarding_complete);
+        assert_eq!(s2.locale(), Locale::PtBr);
     }
 }

@@ -1,0 +1,409 @@
+import { useEffect, useState } from "react";
+import {
+  api,
+  AppSettings,
+  AudioDevice,
+  CapabilityReport,
+  ModelInfo,
+  OrModel,
+} from "../lib/api";
+import { useI18n } from "../lib/i18n";
+import logo from "../assets/logo.png";
+
+interface Props {
+  settings: AppSettings;
+  onDone: (s: AppSettings) => void;
+}
+
+export function Onboarding({ settings, onDone }: Props) {
+  const { t, setLocale } = useI18n();
+  const [step, setStep] = useState(0);
+  const [draft, setDraft] = useState<AppSettings>({ ...settings });
+  const [devices, setDevices] = useState<AudioDevice[]>([]);
+  const [caps, setCaps] = useState<CapabilityReport | null>(null);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [sttOr, setSttOr] = useState<OrModel[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [d, c, m] = await Promise.all([
+          api.listDevices().catch(() => [] as AudioDevice[]),
+          api.capabilities(),
+          api.listModels(),
+        ]);
+        setDevices(d);
+        setCaps(c);
+        setModels(m);
+        setDraft((prev) => ({
+          ...prev,
+          local_stt_model: prev.local_stt_model || c.recommended_stt_model,
+          local_llm_model: prev.local_llm_model || c.recommended_llm_model,
+          compute_backend: c.recommended_backend,
+          mic_device_id:
+            prev.mic_device_id ||
+            d.find((x) => x.kind === "mic" && x.is_default)?.id ||
+            d.find((x) => x.kind === "mic")?.id ||
+            null,
+          system_device_id:
+            prev.system_device_id ||
+            d.find((x) => x.kind === "system" && x.is_default)?.id ||
+            d.find((x) => x.kind === "system")?.id ||
+            null,
+        }));
+      } catch (e) {
+        setErr(String(e));
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (draft.stt_provider === "openrouter" && draft.openrouter_api_key) {
+      api.openrouterSttModels().then(setSttOr).catch(() => setSttOr([]));
+    }
+  }, [draft.stt_provider, draft.openrouter_api_key]);
+
+  const mics = devices.filter((d) => d.kind === "mic");
+  const systems = devices.filter((d) => d.kind === "system");
+  const sttModels = models.filter((m) => m.kind === "stt");
+
+  async function finish() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const next = await api.completeOnboarding({
+        ...draft,
+        onboarding_complete: true,
+      });
+      onDone(next);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const steps = 5;
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-background p-6"
+      data-testid="onboarding"
+    >
+      <div className="w-full max-w-lg rounded-3xl border border-border bg-surface p-6 shadow-2xl">
+        <div className="mb-6 flex items-center gap-3">
+          <img src={logo} alt="Vesper" className="h-12 w-12 rounded-2xl" />
+          <div>
+            <h1 className="text-xl font-semibold">{t("onboarding.title")}</h1>
+            <p className="text-xs text-muted">
+              {step + 1}/{steps}
+            </p>
+          </div>
+        </div>
+
+        {step === 0 && (
+          <section className="space-y-3">
+            <h2 className="text-sm font-medium">{t("onboarding.language")}</h2>
+            <div className="flex gap-2">
+              {[
+                { code: "en", label: "English" },
+                { code: "pt-BR", label: "Português (BR)" },
+              ].map((l) => (
+                <button
+                  key={l.code}
+                  type="button"
+                  onClick={() => {
+                    setDraft((d) => ({ ...d, ui_locale: l.code }));
+                    setLocale(l.code);
+                  }}
+                  className={`flex-1 rounded-xl border px-3 py-3 text-sm ${
+                    draft.ui_locale === l.code
+                      ? "border-accent bg-accent/10 text-accent"
+                      : "border-border hover:bg-surface-3"
+                  }`}
+                >
+                  {l.label}
+                </button>
+              ))}
+            </div>
+            {caps && (
+              <p className="text-xs text-muted">
+                {t("cap.recommended")}: {caps.recommended_backend.toUpperCase()} ·{" "}
+                {caps.recommended_stt_model}
+                {caps.cuda_available
+                  ? ` · CUDA (${caps.cuda_device_name})`
+                  : " · CPU"}
+              </p>
+            )}
+          </section>
+        )}
+
+        {step === 1 && (
+          <section className="space-y-4">
+            <h2 className="text-sm font-medium">{t("onboarding.stt_path")}</h2>
+            <SelectPath
+              value={draft.stt_provider}
+              onChange={(v) =>
+                setDraft((d) => ({
+                  ...d,
+                  stt_provider: v as AppSettings["stt_provider"],
+                }))
+              }
+            />
+            {draft.stt_provider === "openrouter" ? (
+              <>
+                <label className="block text-sm">
+                  <span className="mb-1 block text-xs text-muted">
+                    {t("onboarding.api_key")}
+                  </span>
+                  <input
+                    type="password"
+                    className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                    value={draft.openrouter_api_key ?? ""}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        openrouter_api_key: e.target.value,
+                      }))
+                    }
+                    placeholder="sk-or-…"
+                  />
+                </label>
+                <label className="block text-sm">
+                  <span className="mb-1 block text-xs text-muted">
+                    {t("settings.pick_stt_model")}
+                  </span>
+                  <select
+                    className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                    value={draft.openrouter_stt_model}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        openrouter_stt_model: e.target.value,
+                      }))
+                    }
+                  >
+                    {(sttOr.length
+                      ? sttOr
+                      : [
+                          {
+                            id: "openai/gpt-4o-mini-transcribe",
+                            name: "GPT-4o Mini Transcribe",
+                          },
+                        ]
+                    ).map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name || m.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-xs text-muted">{t("onboarding.local_models")}</p>
+                {sttModels.map((m) => (
+                  <label
+                    key={m.id}
+                    className={`flex cursor-pointer items-center justify-between rounded-xl border px-3 py-2 text-sm ${
+                      draft.local_stt_model === m.id
+                        ? "border-accent"
+                        : "border-border"
+                    }`}
+                  >
+                    <span>
+                      <input
+                        type="radio"
+                        className="mr-2"
+                        checked={draft.local_stt_model === m.id}
+                        onChange={() =>
+                          setDraft((d) => ({ ...d, local_stt_model: m.id }))
+                        }
+                      />
+                      {m.label}
+                    </span>
+                    <span className="text-xs text-muted">
+                      {m.ready ? "✓" : "—"}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {step === 2 && (
+          <section className="space-y-4">
+            <h2 className="text-sm font-medium">{t("onboarding.llm_path")}</h2>
+            <SelectPath
+              value={draft.llm_provider}
+              onChange={(v) =>
+                setDraft((d) => ({
+                  ...d,
+                  llm_provider: v as AppSettings["llm_provider"],
+                }))
+              }
+            />
+            {draft.llm_provider === "openrouter" && (
+              <label className="block text-sm">
+                <span className="mb-1 block text-xs text-muted">
+                  {t("settings.pick_llm_model")}
+                </span>
+                <input
+                  className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                  value={draft.openrouter_llm_model}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      openrouter_llm_model: e.target.value,
+                    }))
+                  }
+                />
+              </label>
+            )}
+          </section>
+        )}
+
+        {step === 3 && (
+          <section className="space-y-4" data-testid="device-pickers">
+            <h2 className="text-sm font-medium">{t("onboarding.devices")}</h2>
+            <label className="block text-sm">
+              <span className="mb-1 block text-xs text-muted">
+                {t("onboarding.mic")}
+              </span>
+              <select
+                data-testid="select-mic"
+                className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                value={draft.mic_device_id ?? ""}
+                onChange={(e) =>
+                  setDraft((d) => ({
+                    ...d,
+                    mic_device_id: e.target.value || null,
+                  }))
+                }
+              >
+                {mics.length === 0 && <option value="">Default mic</option>}
+                {mics.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                    {d.is_default ? " ★" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block text-xs text-muted">
+                {t("onboarding.system")}
+              </span>
+              <select
+                data-testid="select-system"
+                className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                value={draft.system_device_id ?? ""}
+                onChange={(e) =>
+                  setDraft((d) => ({
+                    ...d,
+                    system_device_id: e.target.value || null,
+                  }))
+                }
+              >
+                {systems.length === 0 && (
+                  <option value="">Default system audio</option>
+                )}
+                {systems.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                    {d.is_default ? " ★" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </section>
+        )}
+
+        {step === 4 && (
+          <section className="space-y-3 text-sm">
+            <h2 className="font-medium">{t("settings.capabilities")}</h2>
+            {caps && (
+              <ul className="space-y-1 text-muted">
+                <li>
+                  CPU cores: {caps.cpu_cores} · {t("cap.cuda")}:{" "}
+                  {caps.cuda_available ? caps.cuda_device_name : "—"}
+                </li>
+                {caps.notes.map((n, i) => (
+                  <li key={i}>• {n}</li>
+                ))}
+              </ul>
+            )}
+            <p className="text-xs text-muted">
+              STT: {draft.stt_provider} · LLM: {draft.llm_provider} · locale:{" "}
+              {draft.ui_locale}
+            </p>
+          </section>
+        )}
+
+        {err && <p className="mt-3 text-xs text-danger">{err}</p>}
+
+        <div className="mt-6 flex justify-between">
+          <button
+            type="button"
+            disabled={step === 0}
+            onClick={() => setStep((s) => Math.max(0, s - 1))}
+            className="rounded-xl px-4 py-2 text-sm text-muted hover:bg-surface-3 disabled:opacity-30"
+          >
+            {t("onboarding.back")}
+          </button>
+          {step < steps - 1 ? (
+            <button
+              type="button"
+              onClick={() => setStep((s) => s + 1)}
+              className="rounded-xl bg-accent px-5 py-2 text-sm font-medium text-black"
+            >
+              {t("onboarding.next")}
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={finish}
+              className="rounded-xl bg-accent px-5 py-2 text-sm font-medium text-black disabled:opacity-50"
+            >
+              {t("onboarding.finish")}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SelectPath({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="flex gap-2">
+      {[
+        { v: "local", l: "Local" },
+        { v: "openrouter", l: "OpenRouter" },
+      ].map((o) => (
+        <button
+          key={o.v}
+          type="button"
+          onClick={() => onChange(o.v)}
+          className={`flex-1 rounded-xl border px-3 py-2 text-sm ${
+            value === o.v
+              ? "border-accent bg-accent/10"
+              : "border-border hover:bg-surface-3"
+          }`}
+        >
+          {o.l}
+        </button>
+      ))}
+    </div>
+  );
+}

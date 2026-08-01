@@ -1,5 +1,6 @@
 import { FileUp, Settings, Trash2 } from "lucide-react";
 import { MeetingRecord, SearchHit } from "../lib/api";
+import { useI18n } from "../lib/i18n";
 
 interface Props {
   meetings: MeetingRecord[];
@@ -24,6 +25,7 @@ export function Sidebar({
   onOpenSettings,
   onImport,
 }: Props) {
+  const { t } = useI18n();
   const showingHits = query.trim().length > 0;
 
   return (
@@ -34,7 +36,7 @@ export function Sidebar({
       <div className="border-b border-border p-4">
         <div className="mb-3 flex items-center justify-between">
           <span className="text-xs font-semibold uppercase tracking-wider text-muted">
-            Meetings
+            {t("nav.meetings")}
           </span>
           <div className="flex gap-1">
             <button
@@ -57,7 +59,7 @@ export function Sidebar({
           data-testid="search-input"
           value={query}
           onChange={(e) => onSearch(e.target.value)}
-          placeholder="Search meetings…"
+          placeholder={t("nav.search")}
           className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
         />
       </div>
