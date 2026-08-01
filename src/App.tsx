@@ -32,6 +32,7 @@ import { Button, FOCUS } from "./components/Button";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { RecordDock } from "./components/RecordDock";
+import { RecordTransport } from "./components/RecordTransport";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Onboarding } from "./components/Onboarding";
@@ -445,8 +446,10 @@ function AppShell({
             block pushed the record control off-centre — and it moved again
             whenever the recording state changed the width of either side. The
             centre column is now anchored to the header, and its contents can grow
-            and shrink without dragging anything with them. */}
-        <header className="grid grid-cols-[1fr_auto_1fr] items-center gap-4 border-b border-border bg-background px-6 py-4">
+            and shrink without dragging anything with them. The height is fixed
+            for the same reason: the transport is the widest thing that lands in
+            the centre column, and it must not be able to grow the header. */}
+        <header className="grid h-14 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 border-b border-border bg-background px-6">
           <div className="flex items-center gap-2">
             <img src={logo} alt="" className="h-8 w-8 rounded-md" />
             {/* Flat, not a gradient: the gradient made the brightest, most
@@ -455,19 +458,23 @@ function AppShell({
             <span className="text-lg font-semibold text-fg">{t("app.name")}</span>
           </div>
 
-          {/* Centre column reserved for status. The recording controls moved to
-              the dock at the bottom of the content column, where nothing beside
-              them can change their position. */}
+          {/* Centre column: the transport for a recording in progress. It used
+              to be a badge that only said "Recording" while Stop lived in the
+              dock — which is on the empty screen, and starting a recording
+              leaves that screen. The controls follow the state they control. */}
           <div className="flex items-center justify-center">
-            {status?.recording && (
-              <span
-                data-testid="recording-badge"
-                className="flex items-center gap-2 rounded-full bg-danger/10 px-3 py-1 text-xs text-danger"
-              >
-                <span className="h-1.5 w-1.5 rounded-full bg-danger" aria-hidden />
-                {status.paused ? t("record.paused_badge") : t("record.recording_badge")}
-              </span>
-            )}
+            <AnimatePresence>
+              {status?.recording && (
+                <motion.div key="transport" {...fadeRise}>
+                  <RecordTransport
+                    status={status}
+                    busy={busy}
+                    onStop={handleStop}
+                    onPauseResume={handlePauseResume}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
 
           <div className="flex items-center justify-end gap-3">
@@ -592,7 +599,7 @@ function AppShell({
                 id={`content-panel-${tab}`}
                 role="tabpanel"
                 aria-labelledby={`content-tab-${tab}`}
-                className="min-h-0 flex-1 overflow-y-auto px-6 pb-36 pt-4"
+                className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-4"
               >
                 <AnimatePresence mode="wait">
                   {tab === "transcript" && (
@@ -701,18 +708,24 @@ function AppShell({
             </div>
           )}
 
-          <RecordDock
-            status={status}
-            gate={gate}
-            busy={busy}
-            devices={devices}
-            micDeviceId={settings.mic_device_id}
-            systemDeviceId={settings.system_device_id}
-            onStart={requestStart}
-            onStop={handleStop}
-            onPauseResume={handlePauseResume}
-            onOpenSettings={() => setShowSettings(true)}
-          />
+          {/* The empty screen only. With a meeting open the transcript, the
+              summary and the chat own this column, and a Record button hanging
+              over them offers to start a second recording on top of the one the
+              header is already showing. */}
+          <AnimatePresence>
+            {!selected && !status?.recording && (
+              <RecordDock
+                key="dock"
+                gate={gate}
+                busy={busy}
+                devices={devices}
+                micDeviceId={settings.mic_device_id}
+                systemDeviceId={settings.system_device_id}
+                onStart={requestStart}
+                onOpenSettings={() => setShowSettings(true)}
+              />
+            )}
+          </AnimatePresence>
         </div>
       </main>
 

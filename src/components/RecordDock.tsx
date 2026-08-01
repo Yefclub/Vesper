@@ -1,49 +1,41 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Mic, Pause, Play, Settings, Square } from "lucide-react";
-import { AudioDevice, RecorderStatus, StartGate, formatDuration } from "../lib/api";
+import { Mic, Settings } from "lucide-react";
+import { AudioDevice, StartGate } from "../lib/api";
 import { useI18n } from "../lib/i18n";
-import { transition } from "../lib/motion";
+import { distance, transition } from "../lib/motion";
 import { Button, FOCUS } from "./Button";
-import { LevelMeter } from "./LevelMeter";
 
 interface Props {
-  status: RecorderStatus | null;
   gate: StartGate;
   busy: boolean;
   devices: AudioDevice[];
   micDeviceId?: string | null;
   systemDeviceId?: string | null;
   onStart: () => void;
-  onStop: () => void;
-  onPauseResume: () => void;
   onOpenSettings: () => void;
 }
 
 /**
- * The recording control, anchored to the bottom of the content column.
+ * The control that starts a recording, anchored to the bottom of the empty
+ * screen — the only screen it appears on.
  *
- * It used to live in the header, centred with `mx-auto` inside a flex row — which
- * centres between siblings, not in the container, so it sat off to one side and
- * moved again whenever the recording state changed the width of either
- * neighbour. Down here it owns its own position: nothing above or beside it can
- * push it, and the idle, hover and recording states all render into the same
- * anchored box.
+ * It owns its own position: nothing above or beside it can push it. Once a
+ * recording is running the transport moves to the header, where it outlives the
+ * empty screen this dock lives on, and the dock leaves downward, towards the
+ * edge it sits against.
  *
  * Depth comes from surface lightness and a border rather than a shadow. Shadows
  * read poorly on a near-black background, and the app should pick one technique
  * and keep it.
  */
 export function RecordDock({
-  status,
   gate,
   busy,
   devices,
   micDeviceId,
   systemDeviceId,
   onStart,
-  onStop,
-  onPauseResume,
   onOpenSettings,
 }: Props) {
   const { t } = useI18n();
@@ -52,8 +44,7 @@ export function RecordDock({
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const expanded = hovered || focused;
-  const recording = status?.recording ?? false;
-  const blocked = !gate.allowed && !recording;
+  const blocked = !gate.allowed;
   // The translated key wins. The backend also ships an English sentence for
   // callers without a catalog, but in the app that sentence is the fallback,
   // not the answer — it was reaching the screen in English.
@@ -65,7 +56,14 @@ export function RecordDock({
     t("dock.system_default");
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center pb-6">
+    // Leaves downward, towards the edge it is anchored to, so the eye is sent
+    // where the dock lives rather than being asked to watch it dissolve in
+    // place. Mounted inside an AnimatePresence, which is what runs the exit.
+    <motion.div
+      exit={{ opacity: 0, y: distance.md }}
+      transition={transition.base}
+      className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center pb-6"
+    >
       {/* The live region is mounted for the whole life of the dock, empty until
           there is something to say. A region inserted into the DOM together with
           its text is announced unreliably — screen readers only watch regions
@@ -128,7 +126,7 @@ export function RecordDock({
           bought the centring at the cost of a visible dead area next to Gravar.
           `items-start` keeps the gear level with the control row instead of
           drifting down when the device panel expands below. */}
-      <div className={`flex items-start gap-3 ${recording ? "" : "pl-[66px]"}`}>
+      <div className="flex items-start gap-3 pl-[66px]">
         <motion.div
           layout
           transition={transition.base}
@@ -144,44 +142,14 @@ export function RecordDock({
           className="pointer-events-auto overflow-hidden rounded-lg border border-border bg-surface-2/95 backdrop-blur-md"
         >
           <div className="flex items-center justify-center gap-3 px-3 py-2">
-            {!recording && (
-              <Button
-                size="md"
-                data-testid="btn-record"
-                disabled={busy || blocked}
-                onClick={onStart}
-              >
-                <Mic size={16} aria-hidden /> {t("record.start")}
-              </Button>
-            )}
-            {recording && (
-              <>
-                <button
-                  data-testid="btn-stop"
-                  onClick={onStop}
-                  className="flex items-center gap-2 rounded-md bg-danger/15 px-4 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger/25 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-danger)]"
-                >
-                  <Square size={14} aria-hidden /> {t("record.stop")}
-                </button>
-                <button
-                  data-testid="btn-pause"
-                  onClick={onPauseResume}
-                  aria-label={status?.paused ? t("record.resume") : t("record.pause")}
-                  className="rounded-md bg-surface-3 p-2 text-fg transition-colors hover:bg-hover focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
-                >
-                  {status?.paused ? <Play size={16} /> : <Pause size={16} />}
-                </button>
-                {/* tabular-nums so the elapsed time does not shift the controls
-                    beside it every time a digit changes width. */}
-                <span
-                  data-testid="elapsed"
-                  className="min-w-[7ch] text-center text-sm tabular-nums text-fg-muted"
-                >
-                  {formatDuration(status?.elapsed_ms ?? 0)}
-                </span>
-                {status && <LevelMeter levels={status.levels} />}
-              </>
-            )}
+            <Button
+              size="md"
+              data-testid="btn-record"
+              disabled={busy || blocked}
+              onClick={onStart}
+            >
+              <Mic size={16} aria-hidden /> {t("record.start")}
+            </Button>
           </div>
 
           {/* The lower panel is the device readout and nothing else now. The
@@ -219,23 +187,21 @@ export function RecordDock({
             p-2 either side of a 36px control is the same 54px the record row
             comes to. The 66px of padding on the row above is this pill plus the
             gap, so the dock — and Gravar inside it — keeps the screen's axis. */}
-        {!recording && (
-          <button
-            data-testid="btn-dock-settings"
-            onClick={onOpenSettings}
-            title={t("nav.settings")}
-            aria-label={t("nav.settings")}
-            className={`group pointer-events-auto rounded-lg border border-border bg-surface-2/95 p-2 backdrop-blur-md ${FOCUS}`}
-          >
-            {/* group-hover, not hover: the padding is part of the target, and a
-                hover that only lights up on the inner square feels dead at the
-                pill's edges. */}
-            <span className="flex h-9 w-9 items-center justify-center rounded-md bg-surface-3 text-fg-muted transition-colors group-hover:bg-hover group-hover:text-fg">
-              <Settings size={16} />
-            </span>
-          </button>
-        )}
+        <button
+          data-testid="btn-dock-settings"
+          onClick={onOpenSettings}
+          title={t("nav.settings")}
+          aria-label={t("nav.settings")}
+          className={`group pointer-events-auto rounded-lg border border-border bg-surface-2/95 p-2 backdrop-blur-md ${FOCUS}`}
+        >
+          {/* group-hover, not hover: the padding is part of the target, and a
+              hover that only lights up on the inner square feels dead at the
+              pill's edges. */}
+          <span className="flex h-9 w-9 items-center justify-center rounded-md bg-surface-3 text-fg-muted transition-colors group-hover:bg-hover group-hover:text-fg">
+            <Settings size={16} />
+          </span>
+        </button>
       </div>
-    </div>
+    </motion.div>
   );
 }
