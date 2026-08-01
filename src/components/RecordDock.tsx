@@ -51,9 +51,19 @@ const gearIn: Variants = {
   expanded: { opacity: 1, scale: 1 },
 };
 
+/**
+ * Width as well as height.
+ *
+ * `height: 0` hides the readout but leaves it setting the shell's *intrinsic
+ * width*: a pill holding one 110px button rendered 455px wide, because two
+ * device names were measuring it from inside a zero-height box. Collapsing the
+ * width too puts the shell back on the control row, which is the whole point of
+ * a dock that is only Record at rest. Still width/height/opacity only, so
+ * `MotionConfig reducedMotion="user"` snaps all of it.
+ */
 const panel: Variants = {
-  collapsed: { height: 0, opacity: 0 },
-  expanded: { height: "auto", opacity: 1 },
+  collapsed: { height: 0, width: 0, opacity: 0 },
+  expanded: { height: "auto", width: "auto", opacity: 1 },
 };
 
 /**
@@ -220,7 +230,9 @@ export function RecordDock({
             variants={panel}
             className="overflow-hidden border-t border-border/60"
           >
-            <div className="flex items-center justify-center gap-4 px-4 py-2 text-2xs text-fg-muted">
+            {/* w-max so the row keeps its natural width while the box around it
+                animates from zero, instead of reflowing the names on every frame. */}
+            <div className="flex w-max items-center justify-center gap-4 px-4 py-2 text-2xs text-fg-muted">
               <span className="flex items-center gap-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-me" aria-hidden />
                 <span className="max-w-[14rem] truncate">

@@ -931,20 +931,12 @@ function AppShell({
                 title={t("empty.ready")}
                 body={t("empty.ready_body")}
                 action={
+                  // No Record here. The dock at the foot of this same screen is
+                  // the record button — putting a second one in the middle gave
+                  // the empty screen two primary actions that do the same thing,
+                  // eight hundred pixels apart. The shortcut still belongs here,
+                  // where there is room to name it.
                   <div className="flex items-center justify-center gap-3">
-                    {/* The dock's guard, repeated: `New meeting` is reachable
-                        during a recording, so this screen can sit on top of one
-                        and a second Record would offer to start another. */}
-                    {!status?.recording && (
-                      <>
-                        <Button size="md" onClick={requestStart} disabled={busy}>
-                          {t("record.start")}
-                        </Button>
-                        <kbd className="inline-flex h-6 items-center rounded-xs border border-border bg-surface-2 px-2 text-2xs text-fg-subtle">
-                          {RECORD_SHORTCUT}
-                        </kbd>
-                      </>
-                    )}
                     <Button
                       size="md"
                       variant="secondary"
@@ -953,6 +945,14 @@ function AppShell({
                     >
                       {t("nav.import")}
                     </Button>
+                    {!status?.recording && (
+                      <span className="flex items-center gap-2 text-2xs text-fg-subtle">
+                        {t("record.start")}
+                        <kbd className="inline-flex h-6 items-center rounded-xs border border-border bg-surface-2 px-2 font-sans text-2xs">
+                          {RECORD_SHORTCUT}
+                        </kbd>
+                      </span>
+                    )}
                   </div>
                 }
               />
