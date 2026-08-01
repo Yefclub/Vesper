@@ -13,6 +13,19 @@ pub struct Database {
     data_dir: PathBuf,
 }
 
+/// Where the API key is safe to leave when settings are written.
+///
+/// Exists so the dangerous case cannot be reached by forgetting: the row may only
+/// drop the key once something else is holding it. `KeepInRow` is not a
+/// preference — it is the legacy plaintext home, kept alive purely so a machine
+/// whose keychain refuses to cooperate does not end up with the user's credential
+/// stored nowhere at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyHome {
+    Keychain,
+    KeepInRow,
+}
+
 impl Database {
     pub fn open(data_dir: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
@@ -286,12 +299,16 @@ impl Database {
         Ok(search_meetings(&docs, query, limit))
     }
 
-    /// Persists settings **without** the API key — that lives in the OS keychain.
-    /// Stripping it here rather than at the call sites means no future caller can
-    /// reintroduce the plaintext copy by forgetting.
-    pub fn save_settings(&self, settings: &AppSettings) -> Result<(), String> {
+    /// Persists settings, dropping the API key when the keychain is holding it.
+    pub fn save_settings_with(
+        &self,
+        settings: &AppSettings,
+        home: KeyHome,
+    ) -> Result<(), String> {
         let mut on_disk = settings.clone();
-        on_disk.openrouter_api_key = None;
+        if home == KeyHome::Keychain {
+            on_disk.openrouter_api_key = None;
+        }
         let json = serde_json::to_string(&on_disk).map_err(|e| e.to_string())?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -459,7 +476,7 @@ mod tests {
         assert_eq!(hits.len(), 1);
         let mut settings = AppSettings::default();
         settings.language = "pt".into();
-        db.save_settings(&settings).unwrap();
+        db.save_settings_with(&settings, KeyHome::Keychain).unwrap();
         let s2 = db.load_settings().unwrap();
         assert_eq!(s2.language, "pt");
     }
@@ -470,7 +487,7 @@ mod tests {
         let db = Database::open(dir.path()).unwrap();
         let mut settings = AppSettings::default();
         settings.openrouter_api_key = Some("sk-or-must-not-be-written".into());
-        db.save_settings(&settings).unwrap();
+        db.save_settings_with(&settings, KeyHome::Keychain).unwrap();
 
         let stored: String = {
             let conn = db.conn.lock().unwrap();
@@ -482,6 +499,26 @@ mod tests {
             "settings row still carries the key: {stored}"
         );
         assert!(db.load_settings().unwrap().openrouter_api_key.is_none());
+    }
+
+    #[test]
+    fn keep_in_row_leaves_the_key_where_the_keychain_could_not_take_it() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut settings = AppSettings::default();
+        settings.openrouter_api_key = Some("sk-or-nowhere-else-to-go".into());
+
+        // The keychain refused. Stripping the row here would leave the user's key
+        // stored nowhere at all.
+        db.save_settings_with(&settings, KeyHome::KeepInRow).unwrap();
+        assert_eq!(
+            db.legacy_api_key().unwrap().as_deref(),
+            Some("sk-or-nowhere-else-to-go")
+        );
+
+        // Once the keychain takes it, the row lets go.
+        db.save_settings_with(&settings, KeyHome::Keychain).unwrap();
+        assert_eq!(db.legacy_api_key().unwrap(), None);
     }
 
     #[test]

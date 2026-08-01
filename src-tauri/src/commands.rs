@@ -1,7 +1,7 @@
 use crate::audio::capture::{read_dual_wav, DualChannelRecorder};
 use crate::audio::decode::decode_audio_file;
 use crate::audio::devices::{list_audio_devices, AudioDevice};
-use crate::db::Database;
+use crate::db::{Database, KeyHome};
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::chat::ChatMessage;
 use crate::domain::export::{export_meeting, ExportFormat};
@@ -25,6 +25,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
@@ -35,6 +36,9 @@ pub struct AppState {
     pub settings: Mutex<AppSettings>,
     pub live: Mutex<HashMap<String, LiveTranscript>>,
     pub active_meeting: Mutex<Option<String>>,
+    /// Whether the API key is known to be in the OS keychain. False means a
+    /// legacy row still holds it and the migration has yet to succeed.
+    pub key_in_keychain: AtomicBool,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -45,13 +49,15 @@ impl AppState {
         let data = crate::paths::app_data_dir();
         let db = Database::open(&data)?;
         let mut settings = db.load_settings().unwrap_or_default();
-        settings.openrouter_api_key = load_or_migrate_api_key(&db);
+        let (key, in_keychain) = load_or_migrate_api_key(&db);
+        settings.openrouter_api_key = key;
         Ok(Self {
             db,
             recorder: DualChannelRecorder::new(),
             settings: Mutex::new(settings),
             live: Mutex::new(HashMap::new()),
             active_meeting: Mutex::new(None),
+            key_in_keychain: AtomicBool::new(in_keychain),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -61,28 +67,28 @@ impl AppState {
 /// Resolves the API key at startup, moving it out of the database on the first
 /// run of a build that stores it in the keychain.
 ///
-/// The database row is only cleared once the keychain has taken the value. If the
-/// keychain is unavailable the key stays where it is and the app keeps working —
-/// losing the user's credential to be tidy would be a worse outcome than leaving
-/// it one more session in the old place.
-fn load_or_migrate_api_key(db: &Database) -> Option<String> {
+/// Returns the key and whether the keychain is the one holding it. The database
+/// row is only cleared once the keychain has taken the value; if the keychain is
+/// unavailable the key stays where it is and the app keeps working. Losing the
+/// user's credential to be tidy would be the worse outcome.
+fn load_or_migrate_api_key(db: &Database) -> (Option<String>, bool) {
     match db.legacy_api_key() {
         Ok(Some(legacy)) => match crate::secrets::store_openrouter_key(&legacy) {
             Ok(()) => {
                 if let Err(e) = db.clear_legacy_api_key() {
                     tracing::warn!("key moved to the keychain but the old copy remains: {e}");
                 }
-                Some(legacy)
+                (Some(legacy), true)
             }
             Err(e) => {
                 tracing::warn!("keychain unavailable, key stays in the database: {e}");
-                Some(legacy)
+                (Some(legacy), false)
             }
         },
-        Ok(None) => crate::secrets::openrouter_key(),
+        Ok(None) => (crate::secrets::openrouter_key(), true),
         Err(e) => {
             tracing::warn!("could not read stored settings: {e}");
-            crate::secrets::openrouter_key()
+            (crate::secrets::openrouter_key(), true)
         }
     }
 }
@@ -131,29 +137,39 @@ fn persist_settings(
         normalised_key(&current.openrouter_api_key)
     };
     settings.validate_models().map_err(|e| e.to_string())?;
-    // Keychain first, and nothing else happens if it refuses.
-    //
-    // The database write strips the key, which on an installation whose migration
-    // never completed is still the only durable copy. Saving the row first and
-    // failing the keychain afterwards would erase the user's key from both places
-    // at once, on an unrelated settings change.
-    //
-    // The reverse risk is real but much smaller: if the database write fails after
-    // the keychain accepted the key, the next launch pairs a stored credential with
-    // older settings. The user saw an error and nothing was lost.
-    // Touch the keychain only when the key actually changed. Every settings write
-    // funnels through here — switching provider, toggling reasoning — and none of
-    // those should fail because the keychain happens to be locked, nor rewrite a
-    // credential that nobody edited. Whether a key exists is known from our own
-    // state, the one source that stays honest while the keychain cannot answer.
+    // The key must be somewhere durable before the row is allowed to drop it, and
+    // there are two candidate homes while a migration is outstanding. Decide which
+    // one is holding it first, then write the row accordingly — `KeyHome` exists so
+    // that decision cannot be skipped.
     let next = normalised_key(&settings.openrouter_api_key);
-    if next != previous {
-        match &next {
-            Some(key) => crate::secrets::store_openrouter_key(key)?,
-            None => crate::secrets::clear_openrouter_key()?,
+    let changed = next != previous;
+    let mut home = KeyHome::Keychain;
+
+    match &next {
+        None if changed => crate::secrets::clear_openrouter_key()?,
+        None => {}
+        Some(key) => {
+            // Write when the user changed it, and also when a previous run could
+            // not migrate it — otherwise an unrelated save would strip the row
+            // that is still the only durable copy.
+            let already_safe = !changed && state.key_in_keychain.load(Ordering::Relaxed);
+            if !already_safe {
+                match crate::secrets::store_openrouter_key(key) {
+                    Ok(()) => state.key_in_keychain.store(true, Ordering::Relaxed),
+                    // The user typed this key, so tell them it will not be kept.
+                    Err(e) if changed => return Err(e),
+                    // They were doing something else entirely; keep the key where
+                    // it already is rather than failing an unrelated action.
+                    Err(e) => {
+                        tracing::warn!("keychain still unavailable, key stays in the row: {e}");
+                        home = KeyHome::KeepInRow;
+                    }
+                }
+            }
         }
     }
-    state.db.save_settings(&settings)?;
+
+    state.db.save_settings_with(&settings, home)?;
     *state.settings.lock() = settings.clone();
     Ok(settings)
 }
