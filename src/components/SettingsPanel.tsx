@@ -1,7 +1,14 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { motion } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
-import { X } from "lucide-react";
+import { Check, TriangleAlert, X } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -15,14 +22,16 @@ import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
 import { Button, FOCUS } from "./Button";
 import { ModelPicker } from "./ModelPicker";
+import { LOCALES, PROVIDERS, Segmented } from "./Segmented";
 import { Tabs } from "./Tabs";
 
-// Backend names, not translated: "Local" and "OpenRouter" read the same in
-// every locale the app ships.
-const PROVIDERS = [
-  { value: "local", label: "Local" },
-  { value: "openrouter", label: "OpenRouter" },
-];
+/** Everything a Tab press can land on, minus the roving members of a list —
+ *  the model picker's rows and the inactive tabs are reachable by arrow key,
+ *  not by Tab, and pulling them in would make the trap walk them all. */
+const FOCUSABLE =
+  'button:not([disabled]):not([tabindex="-1"]), input:not([disabled]), ' +
+  'select:not([disabled]), textarea:not([disabled]), a[href], ' +
+  '[tabindex]:not([tabindex="-1"])';
 
 interface Props {
   settings: AppSettings;
@@ -51,30 +60,55 @@ export function SettingsPanel({
   // failure has something to pull.
   const [orNonce, setOrNonce] = useState(0);
   const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [msgKey, setMsgKey] = useState<string | null>(null);
+  // A failed save and a successful one used to land in the same grey line at
+  // the bottom of the drawer. They are different events and they read
+  // differently now, beside the button that produced them.
+  const [result, setResult] = useState<
+    { ok: true } | { ok: false; error: string } | null
+  >(null);
   // One download at a time — the row that started it is the row that reports
   // it. This used to be a string in the drawer footer, ~400px from the button
   // that produced it, and that button stayed clickable while it ran.
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
 
-  // One status line, two sources. Setting either has to clear the other, or a
-  // leftover "Saved" outlives its moment and hides the download progress and
-  // errors that come after it.
-  const showText = (text: string | null) => {
-    setMsgKey(null);
-    setMsg(text);
-  };
-  const showKey = (key: string | null) => {
-    setMsg(null);
-    setMsgKey(key);
-  };
   const [tab, setTab] = useState<"local" | "cloud" | "devices" | "lang">("local");
+  const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api.listDevices().then(setDevices).catch(() => setDevices([]));
     api.capabilities().then(setCaps).catch(() => null);
   }, []);
+
+  // A modal owes the user three things this drawer did not have: a way out by
+  // keyboard, a tab order that cannot walk behind it, and the focus back where
+  // it was. `ConfirmDialog` already had all three — two modal surfaces where
+  // Escape works in one is worse than neither.
+  useEffect(() => {
+    const restore = document.activeElement as HTMLElement | null;
+    panelRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      // The model picker's popover swallows its own Escape by preventing the
+      // default. Without this check, closing the popover closes the drawer too.
+      if (e.key === "Escape" && !e.defaultPrevented) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      restore?.focus();
+    };
+  }, [onClose]);
+
+  function trapTab(e: KeyboardEvent<HTMLDivElement>) {
+    if (e.key !== "Tab") return;
+    const nodes = Array.from(
+      panelRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [],
+    );
+    if (nodes.length === 0) return;
+    const edge = e.shiftKey ? nodes[0] : nodes[nodes.length - 1];
+    if (document.activeElement !== edge) return;
+    e.preventDefault();
+    (e.shiftKey ? nodes[nodes.length - 1] : nodes[0]).focus();
+  }
 
   // Only when the Cloud tab is showing, and keyed on the SAVED key rather than
   // the draft. The commands read the key out of the backend's own state and take
@@ -101,17 +135,18 @@ export function SettingsPanel({
 
   async function save() {
     setSaving(true);
-    setMsg(null);
+    setResult(null);
     try {
       await onSave(draft);
       setLocale(draft.ui_locale);
-      // Keyed, not resolved: saving a language change means the catalog in t is
-      // still the previous one at this point.
-      showKey("settings.saved");
+      // The success text is resolved at render time, not here: saving a
+      // language change means the catalog behind `t` is still the previous one
+      // at this point.
+      setResult({ ok: true });
       // Only now does the backend hold the key the model list is fetched with.
       setOrNonce((n) => n + 1);
     } catch (e) {
-      showText(String(e));
+      setResult({ ok: false, error: String(e) });
     } finally {
       setSaving(false);
     }
@@ -194,13 +229,30 @@ export function SettingsPanel({
     >
       <motion.div
         {...slideInRight}
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
         data-testid="settings-panel"
         onClick={(e) => e.stopPropagation()}
-        className="flex h-full w-full max-w-md flex-col border-l border-border bg-surface-1"
+        onKeyDown={trapTab}
+        // The hairline draws the exposed left edge; the soft layer stays
+        // vertical so the light direction does not change.
+        className="flex h-full w-full max-w-md flex-col border-l border-border-strong bg-surface-1 shadow-occlude"
       >
         <div className="flex items-center justify-between border-b border-border px-4 py-4">
-          <h2 className="text-base font-semibold">{t("settings.title")}</h2>
-          <Button variant="ghost" size="icon" onClick={onClose}>
+          <h2 id="settings-title" className="text-lg font-semibold">
+            {t("settings.title")}
+          </h2>
+          {/* It was the only icon-only button in the app with no accessible
+              name, and the only mouse route out of the drawer. */}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onClose}
+            title={t("action.close")}
+            aria-label={t("action.close")}
+          >
             <X size={16} />
           </Button>
         </div>
@@ -211,7 +263,7 @@ export function SettingsPanel({
             nothing on screen acknowledging the change, and the LLM switch was
             invisible unless you happened to open the cloud tab. */}
         <div className="grid grid-cols-2 gap-3 border-b border-border px-4 py-4">
-          <FieldSelect
+          <Segmented
             label={t("settings.stt_provider")}
             value={draft.stt_provider}
             onChange={(v) =>
@@ -222,7 +274,7 @@ export function SettingsPanel({
             }
             options={PROVIDERS}
           />
-          <FieldSelect
+          <Segmented
             label={t("settings.llm_provider")}
             value={draft.llm_provider}
             onChange={(v) =>
@@ -408,34 +460,18 @@ export function SettingsPanel({
                 }
                 onRetry={() => setOrNonce((n) => n + 1)}
               />
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={draft.reasoning_enabled}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      reasoning_enabled: e.target.checked,
-                    }))
-                  }
-                  className={FOCUS}
-                />
-                {t("settings.reasoning")}
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={draft.auto_summarize}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      auto_summarize: e.target.checked,
-                    }))
-                  }
-                  className={FOCUS}
-                />
-                {t("settings.auto_summarize")}
-              </label>
+              <CheckBox
+                label={t("settings.reasoning")}
+                checked={draft.reasoning_enabled}
+                onChange={(v) =>
+                  setDraft((d) => ({ ...d, reasoning_enabled: v }))
+                }
+              />
+              <CheckBox
+                label={t("settings.auto_summarize")}
+                checked={draft.auto_summarize}
+                onChange={(v) => setDraft((d) => ({ ...d, auto_summarize: v }))}
+              />
             </>
           )}
 
@@ -494,40 +530,37 @@ export function SettingsPanel({
           )}
 
           {tab === "lang" && (
-            <div className="flex gap-2">
-              {[
-                { code: "en", label: "English" },
-                { code: "pt-BR", label: "Português (BR)" },
-              ].map((l) => (
-                <button
-                  key={l.code}
-                  type="button"
-                  onClick={() =>
-                    setDraft((d) => ({ ...d, ui_locale: l.code }))
-                  }
-                  className={`flex-1 rounded-md border px-3 py-3 text-sm ${FOCUS} ${
-                    draft.ui_locale === l.code
-                      ? "border-accent bg-accent/10"
-                      : "border-border"
-                  }`}
-                >
-                  {l.label}
-                </button>
-              ))}
-            </div>
+            <Segmented
+              label={t("settings.language")}
+              value={draft.ui_locale}
+              onChange={(v) => setDraft((d) => ({ ...d, ui_locale: v }))}
+              options={LOCALES}
+            />
           )}
         </div>
 
-        <div className="border-t border-border p-4">
-          {(msgKey || msg) && (
-            <p className="mb-2 text-xs text-fg-muted">{msgKey ? t(msgKey) : msg}</p>
-          )}
-          <Button
-            size="md"
-            className="w-full"
-            onClick={save}
-            disabled={saving}
-          >
+        {/* Feedback beside the trigger, not in a grey line at the far end of
+            the panel — and a failure is not the same event as a success. */}
+        <div className="flex items-center justify-end gap-3 border-t border-border p-4">
+          <div role="status" className="min-w-0 flex-1 text-xs">
+            {result?.ok === true && (
+              <span className="flex items-center gap-1 text-success">
+                <Check size={14} aria-hidden className="shrink-0" />
+                {t("settings.saved")}
+              </span>
+            )}
+            {result?.ok === false && (
+              <span className="flex items-center gap-1 text-danger">
+                <TriangleAlert size={14} aria-hidden className="shrink-0" />
+                <span className="truncate">{result.error}</span>
+                {/* Retries the draft as it stands — nothing typed is lost. */}
+                <Button variant="link" onClick={save} disabled={saving}>
+                  {t("action.retry")}
+                </Button>
+              </span>
+            )}
+          </div>
+          <Button size="md" onClick={save} disabled={saving}>
             {t("settings.save")}
           </Button>
         </div>
@@ -559,6 +592,38 @@ function Field({
         onChange={(e) => onChange(e.target.value)}
         className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
       />
+    </label>
+  );
+}
+
+/** The platform default is a white box with a system-blue check on a near-black
+ *  panel — the only control in the app whose accent is not the app's. The glyph
+ *  is a sibling rather than a background image so it inherits the ink token. */
+function CheckBox({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-sm">
+      <span className="relative inline-flex shrink-0">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          className={`peer h-4 w-4 appearance-none rounded-xs border border-border bg-surface-2 transition-colors checked:border-accent checked:bg-accent ${FOCUS}`}
+        />
+        <Check
+          size={12}
+          aria-hidden
+          className="pointer-events-none absolute inset-0 m-auto text-background opacity-0 peer-checked:opacity-100"
+        />
+      </span>
+      {label}
     </label>
   );
 }

@@ -10,6 +10,7 @@ import {
 import { useI18n } from "../lib/i18n";
 import { Button, FOCUS } from "./Button";
 import { ModelPicker } from "./ModelPicker";
+import { LOCALES, PROVIDERS, Segmented } from "./Segmented";
 import logo from "../assets/logo.png";
 
 interface Props {
@@ -119,35 +120,23 @@ export function Onboarding({ settings, onDone }: Props) {
         {step === 0 && (
           <section className="space-y-3">
             <h2 className="text-sm font-medium">{t("onboarding.language")}</h2>
-            <div className="flex gap-2">
-              {[
-                { code: "en", label: "English" },
-                { code: "pt-BR", label: "Português (BR)" },
-              ].map((l) => (
-                <button
-                  key={l.code}
-                  type="button"
-                  onClick={() => {
-                    setDraft((d) => ({ ...d, ui_locale: l.code }));
-                    setLocale(l.code);
-                  }}
-                  className={`flex-1 rounded-md border px-3 py-3 text-sm ${FOCUS} ${
-                    draft.ui_locale === l.code
-                      ? "border-accent bg-accent/10 text-accent"
-                      : "border-border hover:bg-surface-3"
-                  }`}
-                >
-                  {l.label}
-                </button>
-              ))}
-            </div>
+            {/* Applied immediately here, unlike the drawer's copy: this step is
+                the demonstration of what the choice does. */}
+            <Segmented
+              value={draft.ui_locale}
+              onChange={(v) => {
+                setDraft((d) => ({ ...d, ui_locale: v }));
+                setLocale(v);
+              }}
+              options={LOCALES}
+            />
           </section>
         )}
 
         {step === 1 && (
           <section className="space-y-4">
             <h2 className="text-sm font-medium">{t("onboarding.stt_path")}</h2>
-            <SelectPath
+            <Segmented
               value={draft.stt_provider}
               onChange={(v) =>
                 setDraft((d) => ({
@@ -155,6 +144,7 @@ export function Onboarding({ settings, onDone }: Props) {
                   stt_provider: v as AppSettings["stt_provider"],
                 }))
               }
+              options={PROVIDERS}
             />
             {draft.stt_provider === "openrouter" ? (
               <>
@@ -241,7 +231,7 @@ export function Onboarding({ settings, onDone }: Props) {
         {step === 2 && (
           <section className="space-y-4">
             <h2 className="text-sm font-medium">{t("onboarding.llm_path")}</h2>
-            <SelectPath
+            <Segmented
               value={draft.llm_provider}
               onChange={(v) =>
                 setDraft((d) => ({
@@ -249,6 +239,7 @@ export function Onboarding({ settings, onDone }: Props) {
                   llm_provider: v as AppSettings["llm_provider"],
                 }))
               }
+              options={PROVIDERS}
             />
             {draft.llm_provider === "openrouter" && (
               <>
@@ -390,36 +381,6 @@ export function Onboarding({ settings, onDone }: Props) {
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-function SelectPath({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex gap-2">
-      {[
-        { v: "local", l: "Local" },
-        { v: "openrouter", l: "OpenRouter" },
-      ].map((o) => (
-        <button
-          key={o.v}
-          type="button"
-          onClick={() => onChange(o.v)}
-          className={`flex-1 rounded-md border px-3 py-2 text-sm ${FOCUS} ${
-            value === o.v
-              ? "border-accent bg-accent/10"
-              : "border-border hover:bg-surface-3"
-          }`}
-        >
-          {o.l}
-        </button>
-      ))}
     </div>
   );
 }
