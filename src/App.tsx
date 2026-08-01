@@ -204,6 +204,30 @@ function AppShell({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Debounced so typing does not fire one query per keystroke. Every run
+  // supersedes the one before it, and a stale response that arrives after the
+  // query moved on is discarded rather than painted over the newer results.
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setHits([]);
+      return;
+    }
+    let current = true;
+    const timer = window.setTimeout(async () => {
+      try {
+        const found = await api.search(q);
+        if (current) setHits(found);
+      } catch (e) {
+        if (current) setError(String(e));
+      }
+    }, 200);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [query]);
+
   useEffect(() => {
     if (!status?.recording) return;
     const id = window.setInterval(async () => {
@@ -267,17 +291,8 @@ function AppShell({
     }
   }
 
-  async function handleSearch(q: string) {
+  function handleSearch(q: string) {
     setQuery(q);
-    if (!q.trim()) {
-      setHits([]);
-      return;
-    }
-    try {
-      setHits(await api.search(q));
-    } catch (e) {
-      setError(String(e));
-    }
   }
 
   async function handleChat() {

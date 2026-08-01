@@ -1,5 +1,5 @@
 use crate::domain::job::{MeetingRecord, MeetingStatus};
-use crate::domain::search::{search_meetings, SearchDocument, SearchHit};
+use crate::domain::search::SearchHit;
 use crate::domain::settings::AppSettings;
 use crate::domain::summary::MeetingInsights;
 use crate::domain::transcript::{LiveTranscript, TranscriptSegment};
@@ -11,6 +11,58 @@ use std::sync::Mutex;
 pub struct Database {
     conn: Mutex<Connection>,
     data_dir: PathBuf,
+}
+
+/// Deletes a meeting's recording, refusing anything outside the app's own
+/// recordings directory.
+///
+/// The containment check runs on canonicalised paths. `Path::starts_with`
+/// compares components without resolving them, so a stored path of
+/// `<recordings>/../../something` satisfies it and the delete would reach outside
+/// — turning a tampered database row into an arbitrary file deletion.
+fn delete_recording(path: &Path) -> Result<(), String> {
+    if !path.is_file() {
+        // Already gone, or never written. Nothing to remove and nothing to report.
+        return Ok(());
+    }
+    let root = crate::paths::recordings_dir();
+    let (Ok(root), Ok(resolved)) = (root.canonicalize(), path.canonicalize()) else {
+        return Err("could not resolve the recording's location".into());
+    };
+    if !resolved.starts_with(&root) {
+        tracing::warn!("refusing to delete a recording stored outside the app directory");
+        return Ok(());
+    }
+    std::fs::remove_file(&resolved)
+        .map_err(|e| format!("the recording could not be deleted, so nothing was removed: {e}"))
+}
+
+/// Turns a user's typed query into an FTS5 MATCH expression.
+///
+/// Raw input cannot go in: `AND`, `*`, `"` and `:` are operators there, so a
+/// perfectly ordinary search like `budget: Q3` is a syntax error rather than a
+/// search. Each word becomes a quoted phrase, with quotes doubled to escape them.
+///
+/// The terms are joined with `OR`, not the implicit `AND`, because that is what
+/// the search this replaces did: a meeting matched when any term appeared, and
+/// the rest only raised its rank. bm25 still sorts documents carrying more of the
+/// terms to the top, so the useful part of `AND` survives without the part that
+/// makes a two-word search find nothing.
+///
+/// Each phrase is a prefix query. The search runs as the user types, and the
+/// scorer this replaces matched substrings — without the `*`, typing `plan`
+/// returns nothing until `planning` is complete, which reads as a broken search.
+fn fts_match_expression(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|t| t.replace('"', "\"\""))
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| format!("\"{t}\"*"))
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+    Some(terms.join(" OR "))
 }
 
 /// Where the API key is safe to leave when settings are written.
@@ -89,14 +141,56 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_segments_meeting ON transcript_segments(meeting_id);
             CREATE INDEX IF NOT EXISTS idx_chat_meeting ON chat_messages(meeting_id);
+            -- Search index. Without it every keystroke pulled every transcript out
+            -- of the database and concatenated it in memory to scan by hand.
+            -- remove_diacritics keeps "reuniao" matching "reunião".
+            -- prefix='2 3' because the search runs as the user types: without
+            -- these, the first couple of characters force a scan and merge of
+            -- every matching term in the index, which is the cost this table
+            -- exists to remove.
+            CREATE VIRTUAL TABLE IF NOT EXISTS meetings_fts USING fts5(
+                meeting_id UNINDEXED,
+                title,
+                body,
+                prefix='2 3',
+                tokenize='unicode61 remove_diacritics 2'
+            );
             "#,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        drop(conn);
+        self.backfill_search_index()
+    }
+
+    /// Populates the index for meetings that predate it. Runs once: after the
+    /// first pass the table is non-empty and every later write maintains it.
+    fn backfill_search_index(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let indexed: i64 = conn
+            .query_row("SELECT count(*) FROM meetings_fts", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if indexed > 0 {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO meetings_fts (meeting_id, title, body)
+             SELECT id, title,
+                    transcript_text || char(10) || coalesce(summary,'') || char(10)
+                    || coalesce(action_items,'') || char(10) || coalesce(key_points,'')
+             FROM meetings",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn upsert_meeting(&self, m: &MeetingRecord) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // The row and its index entry move together. Committing the meeting and
+        // then failing to index it leaves search quietly answering with stale
+        // content until something else happens to touch the same meeting.
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
             r#"INSERT INTO meetings (id, title, status, created_at, updated_at, duration_ms, audio_path,
                 transcript_text, summary, action_items, key_points, project)
                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
@@ -122,6 +216,8 @@ impl Database {
             ],
         )
         .map_err(|e| e.to_string())?;
+        Self::index_meeting(&tx, m)?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -142,12 +238,16 @@ impl Database {
         }
     }
 
+    /// The sidebar list. `transcript_text` comes back empty on purpose: it is the
+    /// largest column by far, nothing in the UI reads it from this payload, and
+    /// shipping every transcript across the IPC boundary to render a list of
+    /// titles was the single most expensive thing the app did on startup.
     pub fn list_meetings(&self) -> Result<Vec<MeetingRecord>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
-                        transcript_text, summary, action_items, key_points, project
+                        '' AS transcript_text, summary, action_items, key_points, project
                  FROM meetings ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -165,13 +265,31 @@ impl Database {
     }
 
     pub fn delete_meeting(&self, id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM transcript_segments WHERE meeting_id=?1", params![id])
+        // The recording goes first, and its failure aborts the whole delete.
+        //
+        // Removing the rows first would destroy `audio_path`, so a WAV that could
+        // not be deleted — file locked, permissions — would become unreachable by
+        // any later attempt: the user is told the meeting is gone while a private
+        // recording sits on disk with nothing left pointing at it. Failing here
+        // leaves everything intact and the delete repeatable.
+        if let Some(audio) = self.get_meeting(id)?.and_then(|m| m.audio_path) {
+            delete_recording(Path::new(&audio))?;
+        }
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // One transaction: the audio is already gone by this point, so a partial
+        // delete would leave a meeting the user cannot play and cannot finish
+        // removing. All four rows go together or none do, and the retry works
+        // because a missing file is not an error.
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM meetings_fts WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM chat_messages WHERE meeting_id=?1", params![id])
+        tx.execute("DELETE FROM transcript_segments WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM meetings WHERE id=?1", params![id])
+        tx.execute("DELETE FROM chat_messages WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM meetings WHERE id=?1", params![id])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -284,22 +402,62 @@ impl Database {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
-        let meetings = self.list_meetings()?;
-        let docs: Vec<SearchDocument> = meetings
-            .into_iter()
-            .map(|m| SearchDocument {
-                meeting_id: m.id,
-                title: m.title,
-                body: format!(
+        let Some(match_expr) = fts_match_expression(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT meeting_id, title,
+                        snippet(meetings_fts, 2, '', '', '…', 12),
+                        bm25(meetings_fts)
+                 FROM meetings_fts
+                 WHERE meetings_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![match_expr, limit as i64], |row| {
+                Ok(SearchHit {
+                    meeting_id: row.get(0)?,
+                    title: row.get(1)?,
+                    snippet: row.get::<_, String>(2)?.trim().to_string(),
+                    // bm25 is negative and better the lower it is; the UI wants
+                    // "higher is more relevant".
+                    score: -row.get::<_, f64>(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    fn index_meeting(conn: &rusqlite::Transaction<'_>, m: &MeetingRecord) -> Result<(), String> {
+        conn.execute(
+            "DELETE FROM meetings_fts WHERE meeting_id=?1",
+            params![m.id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO meetings_fts (meeting_id, title, body) VALUES (?1,?2,?3)",
+            params![
+                m.id,
+                m.title,
+                format!(
                     "{}\n{}\n{}\n{}",
                     m.transcript_text,
-                    m.summary.unwrap_or_default(),
-                    m.action_items.unwrap_or_default(),
-                    m.key_points.unwrap_or_default()
-                ),
-            })
-            .collect();
-        Ok(search_meetings(&docs, query, limit))
+                    m.summary.clone().unwrap_or_default(),
+                    m.action_items.clone().unwrap_or_default(),
+                    m.key_points.clone().unwrap_or_default()
+                )
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Persists settings, dropping the API key when the keychain is holding it.
@@ -558,6 +716,157 @@ mod tests {
         // Idempotent: a second start finds nothing left to migrate.
         assert_eq!(db.legacy_api_key().unwrap(), None);
         db.clear_legacy_api_key().unwrap();
+    }
+
+    #[test]
+    fn search_finds_a_meeting_by_its_transcript() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut m = sample_meeting("m1", "Sprint planning");
+        m.transcript_text = "we agreed to cut the reporting module".into();
+        db.upsert_meeting(&m).unwrap();
+
+        let hits = db.search("reporting", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].meeting_id, "m1");
+        assert!(!hits[0].snippet.is_empty());
+
+        assert!(db.search("nothingmatchesthis", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_treats_fts_operators_as_plain_text() {
+        // These are FTS5 syntax. Passed through raw they raise a query error
+        // instead of searching, which is what a user typing normally would hit.
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut m = sample_meeting("m1", "Budget");
+        m.transcript_text = "the budget for Q3 was approved".into();
+        db.upsert_meeting(&m).unwrap();
+
+        for q in ["budget: Q3", "budget*", "budget AND", "budget \"quoted", "(budget)"] {
+            let hits = db.search(q, 10);
+            assert!(hits.is_ok(), "query {q:?} errored: {:?}", hits.err());
+        }
+        assert_eq!(db.search("budget: Q3", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_index_follows_edits_and_deletes() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut m = sample_meeting("m1", "Retro");
+        m.transcript_text = "original wording".into();
+        db.upsert_meeting(&m).unwrap();
+        assert_eq!(db.search("original", 10).unwrap().len(), 1);
+
+        m.transcript_text = "replaced wording".into();
+        db.upsert_meeting(&m).unwrap();
+        assert!(db.search("original", 10).unwrap().is_empty(), "stale index");
+        assert_eq!(db.search("replaced", 10).unwrap().len(), 1);
+
+        db.delete_meeting("m1").unwrap();
+        assert!(db.search("replaced", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_list_payload_leaves_out_transcripts() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut m = sample_meeting("m1", "Long one");
+        m.transcript_text = "a very long transcript".into();
+        db.upsert_meeting(&m).unwrap();
+
+        assert_eq!(db.list_meetings().unwrap()[0].transcript_text, "");
+        // Still there when the meeting is actually opened.
+        assert_eq!(
+            db.get_meeting("m1").unwrap().unwrap().transcript_text,
+            "a very long transcript"
+        );
+    }
+
+    fn sample_meeting(id: &str, title: &str) -> MeetingRecord {
+        MeetingRecord {
+            id: id.into(),
+            title: title.into(),
+            status: MeetingStatus::Ready,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            duration_ms: 1000,
+            audio_path: None,
+            transcript_text: String::new(),
+            summary: None,
+            action_items: None,
+            key_points: None,
+            project: None,
+        }
+    }
+
+    #[test]
+    fn a_multi_word_search_still_matches_on_any_term() {
+        // The search this replaced returned a meeting when any term appeared and
+        // used the rest only for ranking. Joining terms with FTS5's implicit AND
+        // would have made this two-word query find nothing.
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut m = sample_meeting("m1", "Budget");
+        m.transcript_text = "the budget was approved".into();
+        db.upsert_meeting(&m).unwrap();
+
+        assert_eq!(db.search("budget Q3", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_meeting_removes_its_recording() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let recordings = crate::paths::recordings_dir();
+        std::fs::create_dir_all(&recordings).unwrap();
+        let wav = recordings.join("delete-me-test.wav");
+        std::fs::write(&wav, vec![0u8; 16]).unwrap();
+
+        let mut m = sample_meeting("m1", "With audio");
+        m.audio_path = Some(wav.display().to_string());
+        db.upsert_meeting(&m).unwrap();
+        db.delete_meeting("m1").unwrap();
+
+        assert!(!wav.exists(), "the recording outlived the meeting");
+        assert!(db.get_meeting("m1").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_recording_outside_the_app_directory_is_left_alone() {
+        // A tampered audio_path must not turn deletion into an arbitrary file
+        // removal. Path::starts_with alone would accept a traversal like this.
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let outsider = dir.path().join("not-ours.wav");
+        std::fs::write(&outsider, b"someone else's file").unwrap();
+        let traversal = crate::paths::recordings_dir()
+            .join("..")
+            .join("..")
+            .join(outsider.file_name().unwrap());
+
+        let mut m = sample_meeting("m1", "Tampered");
+        m.audio_path = Some(traversal.display().to_string());
+        db.upsert_meeting(&m).unwrap();
+        db.delete_meeting("m1").unwrap();
+
+        assert!(outsider.exists(), "delete escaped the recordings directory");
+    }
+
+    #[test]
+    fn search_matches_a_prefix_as_the_user_types() {
+        // Search runs on every keystroke, so a query has to match before the word
+        // is finished. A bare FTS5 phrase only matches whole tokens.
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let m = sample_meeting("m1", "Sprint planning");
+        db.upsert_meeting(&m).unwrap();
+
+        for typed in ["p", "pl", "plan", "planning"] {
+            assert_eq!(db.search(typed, 10).unwrap().len(), 1, "typed {typed:?}");
+        }
     }
 
     #[test]
