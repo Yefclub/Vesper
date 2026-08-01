@@ -29,10 +29,19 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Dual-channel: mic + OS system loopback (WASAPI / CoreAudio taps / PipeWire)
+flexaudio = "0.2"
 cpal = "0.15"
 hound = "3.5"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "blocking"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+# Multi-format decode (wav/mp3/m4a/ogg/flac; webm best-effort)
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "ogg", "flac", "pcm", "wav", "mkv"] }
+# Local STT (whisper.cpp)
+whisper-rs = "0.16"
+# Local LLM (llama.cpp) — compat-only to ease Windows MSVC builds
+llama_cpp = { version = "0.3", default-features = false, features = ["compat"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "blocking", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+futures-util = "0.3"
 parking_lot = "0.12"
 base64 = "0.22"
 printpdf = "0.7"
@@ -42,6 +51,8 @@ sha2 = "0.10"
 hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+flate2 = "1"
+tar = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

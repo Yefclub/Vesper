@@ -24,10 +24,20 @@ Privacy-first desktop AI meeting note-taker. Capture **microphone + system audio
 
 Prerequisites: [Node.js](https://nodejs.org/) 20+, [Rust](https://rustup.rs/), platform WebView deps ([Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)).
 
+**Native ML build** (local Whisper + llama.cpp): install [LLVM](https://github.com/llvm/llvm-project/releases) so `libclang` is available. On Windows:
+
+```powershell
+winget install -e --id LLVM.LLVM
+$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+$env:Path = "C:\Program Files\LLVM\bin;" + $env:Path
+```
+
 ```bash
 npm install
 npm run tauri dev
 ```
+
+Download Whisper / GGUF weights from **Settings** (Hugging Face direct links). Until models are installed, OpenRouter remains available; local engines require real weights (no fake transcription theater).
 
 ### Useful commands
 

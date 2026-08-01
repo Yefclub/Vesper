@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { X } from "lucide-react";
 import { AppSettings, ModelInfo, api } from "../lib/api";
 
@@ -37,7 +38,23 @@ export function SettingsPanel({
   async function download(id: string, url?: string | null) {
     setMsg(`Downloading ${id}…`);
     try {
+      const un = await listen<{
+        model_id: string;
+        downloaded_bytes: number;
+        total_bytes?: number | null;
+        phase: string;
+        done: boolean;
+      }>("models://download-progress", (e) => {
+        if (e.payload.model_id !== id) return;
+        const total = e.payload.total_bytes ?? 0;
+        const pct =
+          total > 0
+            ? Math.min(100, Math.round((e.payload.downloaded_bytes / total) * 100))
+            : 0;
+        setMsg(`${id}: ${e.payload.phase} ${pct}%`);
+      });
       await api.downloadModel(id, url ?? undefined);
+      un();
       await onRefreshModels();
       setMsg(`${id} ready`);
     } catch (e) {

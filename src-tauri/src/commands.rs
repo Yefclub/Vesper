@@ -1,4 +1,5 @@
-use crate::audio::capture::{read_wav_mono, DualChannelRecorder};
+use crate::audio::capture::{read_dual_wav, DualChannelRecorder};
+use crate::audio::decode::decode_audio_file;
 use crate::db::Database;
 use crate::domain::chat::ChatMessage;
 use crate::domain::export::{export_meeting, ExportFormat};
@@ -8,7 +9,7 @@ use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
 use crate::domain::summary::{MeetingInsights, SummaryTemplate};
 use crate::domain::transcript::LiveTranscript;
 use crate::llm::service::LlmService;
-use crate::models::{download_model, list_models, ModelInfo};
+use crate::models::{download_model_with_progress, list_models, DownloadProgress, ModelInfo};
 use crate::paths::{ensure_app_dirs, recordings_dir};
 use crate::stt::pipeline::{apply_stt_chunks, SttService};
 use parking_lot::Mutex;
@@ -277,18 +278,26 @@ pub async fn stop_recording(
     state.db.upsert_meeting(&meeting)?;
     *state.active_meeting.lock() = None;
 
-    // Final dual-channel STT pass on saved audio (best-effort)
+    // Final dual-channel STT pass on saved stereo WAV (L=Me, R=Others)
     let settings = state.settings.lock().clone();
-    if let Ok((mono, sr)) = read_wav_mono(&path) {
-        // Stereo dual: re-read is mono downmix; live segments already accumulated.
-        let _ = (mono, sr);
-    }
-    let live = state
+    let mut live = state
         .live
         .lock()
         .get(&id)
         .cloned()
         .unwrap_or_default();
+    if live.segments().is_empty() {
+        if let Ok((mic, sys, sr)) = read_dual_wav(&path) {
+            if let Ok(chunks) = state
+                .stt
+                .transcribe_dual(&settings, &mic, &sys, sr, 0)
+                .await
+            {
+                apply_stt_chunks(&mut live, &chunks);
+                state.live.lock().insert(id.clone(), live.clone());
+            }
+        }
+    }
     state.db.save_transcript(&id, &live)?;
     meeting.transcript_text = live.plain_text();
     meeting.status = meeting
@@ -425,7 +434,8 @@ pub async fn import_audio(
     title: Option<String>,
 ) -> Result<MeetingRecord, String> {
     let path = PathBuf::from(path);
-    let (pcm, sr) = read_wav_mono(&path).map_err(|e| e.to_string())?;
+    // Multi-format: wav/mp3/m4a/ogg/flac/webm via decode layer
+    let (pcm, sr) = decode_audio_file(&path).map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
@@ -433,6 +443,10 @@ pub async fn import_audio(
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "Imported meeting".into())
     });
+    // Persist a dual-channel WAV copy under recordings for retranscription
+    let wav_path = recordings_dir().join(format!("{id}.wav"));
+    crate::audio::capture::write_dual_wav(&wav_path, sr, &pcm, &[])
+        .map_err(|e| e.to_string())?;
     let mut meeting = MeetingRecord {
         id: id.clone(),
         title,
@@ -440,7 +454,7 @@ pub async fn import_audio(
         created_at: now.clone(),
         updated_at: now,
         duration_ms: (pcm.len() as u64 * 1000) / sr.max(1) as u64,
-        audio_path: Some(path.display().to_string()),
+        audio_path: Some(wav_path.display().to_string()),
         transcript_text: String::new(),
         summary: None,
         action_items: None,
@@ -449,7 +463,7 @@ pub async fn import_audio(
     };
     state.db.upsert_meeting(&meeting)?;
     let settings = state.settings.lock().clone();
-    // Import: treat full mono as Me channel (file has no dual split guarantee)
+    // Mono import: Me channel only (no dual split in source file)
     let chunks = state
         .stt
         .transcribe_dual(&settings, &pcm, &[], sr, 0)
@@ -477,15 +491,24 @@ pub async fn retranscribe(
         .audio_path
         .clone()
         .ok_or_else(|| "no audio for meeting".to_string())?;
-    let (pcm, sr) = read_wav_mono(std::path::Path::new(&audio)).map_err(|e| e.to_string())?;
+    let audio_path = std::path::Path::new(&audio);
+    let (mic, sys, sr) = if audio_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false)
+    {
+        read_dual_wav(audio_path).map_err(|e| e.to_string())?
+    } else {
+        let (pcm, sr) = decode_audio_file(audio_path).map_err(|e| e.to_string())?;
+        (pcm, Vec::new(), sr)
+    };
     meeting.status = MeetingStatus::Transcribing;
     state.db.upsert_meeting(&meeting)?;
     let settings = state.settings.lock().clone();
-    let half = pcm.len() / 2;
-    // Dual-channel file: left/right already downmixed in mono path — re-run full as Me.
     let chunks = state
         .stt
-        .transcribe_dual(&settings, &pcm, &pcm[half.min(pcm.len())..], sr, 0)
+        .transcribe_dual(&settings, &mic, &sys, sr, 0)
         .await?;
     let mut t = LiveTranscript::new();
     apply_stt_chunks(&mut t, &chunks);
@@ -544,14 +567,23 @@ pub fn list_models_cmd() -> Vec<ModelInfo> {
 }
 
 #[tauri::command]
-pub async fn download_model_cmd(model_id: String, url: Option<String>) -> Result<String, String> {
+pub async fn download_model_cmd(
+    app: AppHandle,
+    model_id: String,
+    url: Option<String>,
+) -> Result<String, String> {
     let models = list_models();
     let m = models
         .into_iter()
         .find(|m| m.id == model_id)
         .ok_or_else(|| "unknown model".to_string())?;
     let url = url.or(m.download_url).ok_or_else(|| "no url".to_string())?;
-    let path = download_model(&model_id, &url).await?;
+    let mid = model_id.clone();
+    let path = download_model_with_progress(&model_id, &url, move |p: DownloadProgress| {
+        let _ = app.emit("models://download-progress", &p);
+    })
+    .await?;
+    let _ = mid;
     Ok(path.display().to_string())
 }
 

@@ -1,9 +1,17 @@
-//! Local ultra-light STT.
-//! Uses an ONNX/Moonshine/Parakeet-class model when present under the models dir;
-//! otherwise a deterministic offline heuristic for dev/tests (energy + silence gaps).
-//! Production path loads model files downloaded on first use.
+//! Local STT via whisper.cpp (`whisper-rs`).
+//! When a GGML/GGUF whisper model is present, runs real ASR.
+//! Without a model file, returns a clear error (no silent energy-theater as "ASR").
 
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+static WHISPER_CACHE: OnceLock<Mutex<Option<(String, WhisperContext)>>> = OnceLock::new();
+
+fn whisper_cache() -> &'static Mutex<Option<(String, WhisperContext)>> {
+    WHISPER_CACHE.get_or_init(|| Mutex::new(None))
+}
 
 #[derive(Debug, Clone)]
 pub struct LocalSttEngine {
@@ -12,38 +20,58 @@ pub struct LocalSttEngine {
 
 impl LocalSttEngine {
     pub fn new() -> Self {
-        let models_dir = crate::paths::models_dir();
-        Self { models_dir }
+        Self {
+            models_dir: crate::paths::models_dir(),
+        }
     }
 
     pub fn with_models_dir(models_dir: PathBuf) -> Self {
         Self { models_dir }
     }
 
+    /// Resolve model artifact path. Accepts either `model.bin` (whisper ggml) or legacy `model.onnx`.
     pub fn model_path(&self, model_id: &str) -> PathBuf {
-        self.models_dir.join(model_id).join("model.onnx")
+        let dir = self.models_dir.join(model_id);
+        let bin = dir.join("model.bin");
+        if bin.is_file() {
+            return bin;
+        }
+        let ggml = dir.join("ggml-model.bin");
+        if ggml.is_file() {
+            return ggml;
+        }
+        // default expected download target
+        bin
     }
 
     pub fn is_model_ready(&self, model_id: &str) -> bool {
-        self.model_path(model_id).is_file()
+        let p = self.model_path(model_id);
+        p.is_file() && std::fs::metadata(&p).map(|m| m.len() > 1_000_000).unwrap_or(false)
     }
 
-    /// Transcribe PCM mono. If ONNX model is present, run it; else energy-based stub
-    /// that still returns structured text for pipeline validation offline.
+    /// Transcribe mono PCM with local Whisper when model weights exist.
     pub fn transcribe(
         &self,
         pcm: &[i16],
         sample_rate: u32,
         model_id: &str,
-        _language: &str,
+        language: &str,
     ) -> Result<String, String> {
         if pcm.is_empty() {
             return Ok(String::new());
         }
-        if self.is_model_ready(model_id) {
-            return run_onnx_model(&self.model_path(model_id), pcm, sample_rate);
+        let peak = pcm.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        if !self.is_model_ready(model_id) {
+            // Silent frames: no-op. Voiced frames without weights: hard error (not fake ASR).
+            if peak < 400 {
+                return Ok(String::new());
+            }
+            return Err(format!(
+                "local STT model `{model_id}` is not installed — download Whisper GGML from Settings"
+            ));
         }
-        Ok(offline_energy_transcript(pcm, sample_rate))
+        let path = self.model_path(model_id);
+        run_whisper(&path, pcm, sample_rate, language)
     }
 }
 
@@ -53,43 +81,109 @@ impl Default for LocalSttEngine {
     }
 }
 
-/// Placeholder ONNX runner: validates model file exists and is non-empty, then
-/// falls through to offline transcript until a full ORT graph is wired.
-fn run_onnx_model(path: &Path, pcm: &[i16], sample_rate: u32) -> Result<String, String> {
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if meta.len() == 0 {
-        return Err("local STT model file is empty".into());
+/// Real whisper.cpp inference path — always uses WhisperContext when called.
+pub fn run_whisper(
+    model_path: &Path,
+    pcm: &[i16],
+    sample_rate: u32,
+    language: &str,
+) -> Result<String, String> {
+    if !model_path.is_file() {
+        return Err(format!("whisper model missing: {}", model_path.display()));
     }
-    // Full ORT inference is feature-gated by model assets; keep path real and tested.
-    let mut text = offline_energy_transcript(pcm, sample_rate);
-    if text.is_empty() {
-        text = "[local model] (silence)".into();
+    let meta = std::fs::metadata(model_path).map_err(|e| e.to_string())?;
+    if meta.len() < 1_000_000 {
+        return Err(
+            "whisper model file is too small to be a real GGML model (download may be incomplete)"
+                .into(),
+        );
     }
-    Ok(text)
+
+    let key = model_path.display().to_string();
+    let mut cache = whisper_cache().lock();
+    let need_load = cache
+        .as_ref()
+        .map(|(k, _)| k != &key)
+        .unwrap_or(true);
+    if need_load {
+        let ctx = WhisperContext::new_with_params(
+            model_path.to_str().ok_or("non-utf8 model path")?,
+            WhisperContextParameters::default(),
+        )
+        .map_err(|e| format!("whisper load failed: {e}"))?;
+        *cache = Some((key, ctx));
+    }
+    let ctx = &cache.as_ref().unwrap().1;
+
+    // Resample to 16 kHz mono f32 expected by whisper
+    let audio = resample_to_16k_f32(pcm, sample_rate);
+
+    let mut state = ctx
+        .create_state()
+        .map_err(|e| format!("whisper state: {e}"))?;
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    if language != "auto" && !language.is_empty() {
+        params.set_language(Some(language));
+    } else {
+        params.set_language(Some("auto"));
+    }
+    params.set_n_threads(num_cpus_soft());
+
+    state
+        .full(params, &audio)
+        .map_err(|e| format!("whisper inference failed: {e}"))?;
+
+    let mut out = String::new();
+    for segment in state.as_iter() {
+        let text = segment.to_string();
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(text);
+    }
+    Ok(out.trim().to_string())
 }
 
-/// Deterministic offline "transcription" used when models are not downloaded:
-/// emits a short marker with duration so live pipeline and tests exercise real code.
-pub fn offline_energy_transcript(pcm: &[i16], sample_rate: u32) -> String {
-    let sr = sample_rate.max(1) as usize;
-    let duration_ms = pcm.len() as u64 * 1000 / sr as u64;
-    let peak = pcm.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
-    if peak < 200 {
-        return String::new();
+fn num_cpus_soft() -> i32 {
+    std::thread::available_parallelism()
+        .map(|n| (n.get() as i32).clamp(1, 8))
+        .unwrap_or(4)
+}
+
+/// Linear resample i16 PCM → 16 kHz f32 mono in [-1, 1].
+pub fn resample_to_16k_f32(pcm: &[i16], sample_rate: u32) -> Vec<f32> {
+    if pcm.is_empty() {
+        return Vec::new();
     }
-    // Rough speech frame count above threshold
-    let frame = sr / 50; // 20ms
-    let mut voiced = 0usize;
-    for chunk in pcm.chunks(frame.max(1)) {
-        let p = chunk.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
-        if p > 500 {
-            voiced += 1;
-        }
+    let sr = sample_rate.max(1) as f64;
+    let target = 16_000f64;
+    if (sr - target).abs() < 1.0 {
+        return pcm
+            .iter()
+            .map(|s| *s as f32 / i16::MAX as f32)
+            .collect();
     }
-    if voiced == 0 {
-        return String::new();
+    let ratio = target / sr;
+    let out_len = ((pcm.len() as f64) * ratio).round().max(1.0) as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let src = i as f64 / ratio;
+        let i0 = src.floor() as usize;
+        let i1 = (i0 + 1).min(pcm.len() - 1);
+        let frac = (src - i0 as f64) as f32;
+        let a = pcm[i0] as f32 / i16::MAX as f32;
+        let b = pcm[i1] as f32 / i16::MAX as f32;
+        out.push(a * (1.0 - frac) + b * frac);
     }
-    format!("[local] speech ~{duration_ms}ms ({voiced} frames)")
+    out
 }
 
 #[cfg(test)]
@@ -98,31 +192,38 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn offline_silent_is_empty() {
-        let pcm = vec![0i16; 1600];
-        assert_eq!(offline_energy_transcript(&pcm, 16_000), "");
+    fn resample_identity_at_16k() {
+        let pcm = vec![0i16, 1000, -1000];
+        let f = resample_to_16k_f32(&pcm, 16_000);
+        assert_eq!(f.len(), 3);
+        assert!((f[1] - 1000.0 / i16::MAX as f32).abs() < 1e-4);
     }
 
     #[test]
-    fn offline_loud_produces_text() {
-        let pcm = vec![3000i16; 3200];
-        let t = offline_energy_transcript(&pcm, 16_000);
-        assert!(t.contains("local"));
-        assert!(t.contains("speech"));
-    }
-
-    #[test]
-    fn model_ready_checks_file() {
+    fn missing_model_errors_honestly() {
         let dir = tempdir().unwrap();
         let engine = LocalSttEngine::with_models_dir(dir.path().to_path_buf());
-        assert!(!engine.is_model_ready("moonshine-base"));
-        let p = engine.model_path("moonshine-base");
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(&p, b"fake-onnx").unwrap();
-        assert!(engine.is_model_ready("moonshine-base"));
-        let text = engine
-            .transcribe(&[4000i16; 1600], 16_000, "moonshine-base", "en")
-            .unwrap();
-        assert!(!text.is_empty());
+        let err = engine
+            .transcribe(&[3000i16; 1600], 16_000, "whisper-tiny", "en")
+            .unwrap_err();
+        assert!(err.contains("not installed") || err.contains("download"));
+    }
+
+    #[test]
+    fn tiny_fake_file_rejected_by_whisper_path() {
+        let dir = tempdir().unwrap();
+        let model_dir = dir.path().join("whisper-tiny");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        let p = model_dir.join("model.bin");
+        std::fs::write(&p, b"not-a-real-ggml").unwrap();
+        // is_model_ready requires >1MB so this is "not ready"
+        let engine = LocalSttEngine::with_models_dir(dir.path().to_path_buf());
+        assert!(!engine.is_model_ready("whisper-tiny"));
+        // Direct run_whisper must fail for junk file (proves real engine entry)
+        let err = run_whisper(&p, &[1000i16; 1600], 16_000, "en").unwrap_err();
+        assert!(
+            err.contains("too small") || err.contains("whisper"),
+            "unexpected: {err}"
+        );
     }
 }
