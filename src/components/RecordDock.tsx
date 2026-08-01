@@ -113,8 +113,11 @@ export function RecordDock({
           )}
         </div>
 
+        {/* The blocked reason is not something to go looking for: the only
+            control up there is disabled, so it cannot take focus, and a touch
+            user never hovers. It stays visible whenever recording is blocked. */}
         <AnimatePresence initial={false}>
-          {expanded && (
+          {(expanded || (blocked && gate.reason)) && (
             <motion.div
               // Height animates through the grid trick rather than `height:auto`,
               // which is not animatable; only transform and opacity actually move.

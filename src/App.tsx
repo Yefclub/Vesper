@@ -142,12 +142,24 @@ function AppShell({
     }
   }, []);
 
+  // Device enumeration is allowed to fail — a machine with no capture device
+  // still runs the app. Kept apart from the startup refresh so a rejection here
+  // cannot skip the recorder status and the gate, which would leave the dock
+  // disabled with no way back.
+  const refreshDevices = useCallback(async () => {
+    try {
+      setDevices(await api.listDevices());
+    } catch {
+      /* leave the previous list in place */
+    }
+  }, []);
+
   useEffect(() => {
     (async () => {
+      void refreshDevices();
       try {
         await refreshMeetings();
         setModels(await api.listModels());
-        setDevices(await api.listDevices());
         setStatus(await api.recorderStatus());
         await refreshGate();
       } catch (e) {
@@ -163,7 +175,7 @@ function AppShell({
         /* no release endpoint yet */
       }
     })();
-  }, [refreshMeetings, refreshGate]);
+  }, [refreshMeetings, refreshGate, refreshDevices]);
 
   useEffect(() => {
     let unsubs: Array<() => void> = [];
@@ -553,7 +565,7 @@ function AppShell({
                 ))}
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-28 pt-4">
+              <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-36 pt-4">
                 <AnimatePresence mode="wait">
                   {tab === "transcript" && (
                     <motion.div
@@ -688,10 +700,11 @@ function AppShell({
               setSettings(next);
               onSettingsChange(next);
               setModels(await api.listModels());
-              // The dock resolves device names from this list. Without a refresh
-              // it keeps a mount-time snapshot, so a device plugged in later is
-              // saved by its id and then displayed as the old default.
-              setDevices(await api.listDevices());
+              // The dock resolves device names from this list, so a device
+              // plugged in after launch would otherwise show as the old default.
+              // Failure here must not report the save as failed — it already
+              // succeeded.
+              void refreshDevices();
               await refreshGate();
             }}
             onRefreshModels={async () => {
