@@ -64,52 +64,60 @@ export function RecordDock({
     t("dock.system_default");
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center gap-2 pb-6">
-      {/* Anchored above the control it explains, with an arrow pointing at it —
-          feedback belongs next to its trigger, not stacked underneath in a block
-          that stretches the dock and drags the button off centre.
-          Rendered whenever recording is blocked rather than on hover: the button
-          it describes is disabled, and a disabled control takes neither focus nor
-          a tooltip, so hover would hide this from keyboard and touch entirely. */}
-      <AnimatePresence>
-        {blocked && gateReason && (
-          <motion.div
-            data-testid="record-gate"
-            role="status"
-            initial={{ opacity: 0, y: 4, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 4, scale: 0.98 }}
-            transition={transition.base}
-            className="pointer-events-auto relative max-w-xs rounded-xl border border-border bg-surface-3 px-3.5 py-3 shadow-none"
-          >
-            <div className="flex gap-2.5">
+    <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center pb-6">
+      {/* The live region is mounted for the whole life of the dock, empty until
+          there is something to say. A region inserted into the DOM together with
+          its text is announced unreliably — screen readers only watch regions
+          they were already aware of. Empty it has no box, so it costs no layout:
+          the spacing below lives on the balloon, not on a gap here. */}
+      <div role="status" className="flex flex-col items-center">
+        {/* Anchored above the control it explains, with an arrow pointing at it —
+            feedback belongs next to its trigger, not stacked underneath in a block
+            that stretches the dock and drags the button off centre.
+            Rendered whenever recording is blocked rather than on hover: the button
+            it describes is disabled, and a disabled control takes neither focus nor
+            a tooltip, so hover would hide this from keyboard and touch entirely. */}
+        <AnimatePresence>
+          {blocked && gateReason && (
+            <motion.div
+              data-testid="record-gate"
+              initial={{ opacity: 0, y: 4, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 4, scale: 0.98 }}
+              transition={transition.base}
+              className="pointer-events-auto relative mb-2 max-w-xs rounded-xl border border-border bg-surface-3 px-3.5 py-3 shadow-none"
+            >
+              <div className="flex gap-2.5">
+                <span
+                  aria-hidden
+                  className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-danger/15 text-[10px] font-semibold text-danger"
+                >
+                  !
+                </span>
+                <div className="flex flex-col items-start gap-2">
+                  {/* The sentence is foreground, not red. Red is the accent that
+                      says "look here"; a whole red paragraph just shouts. */}
+                  <p className="text-xs leading-relaxed text-foreground">{gateReason}</p>
+                  <button
+                    onClick={onOpenSettings}
+                    className="text-xs font-medium text-accent underline-offset-2 transition-colors hover:underline focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-3),0_0_0_4px_var(--color-accent)]"
+                  >
+                    {t("gate.fix")}
+                  </button>
+                </div>
+              </div>
+              {/* The arrow is the same surface and border as the balloon, rotated
+                  45° and clipped so only the two outer edges show. Its tip
+                  protrudes ~7px, which fits inside the balloon's 8px bottom
+                  margin, so it points at the dock without overlapping it. */}
               <span
                 aria-hidden
-                className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-danger/15 text-[10px] font-semibold text-danger"
-              >
-                !
-              </span>
-              <div className="flex flex-col items-start gap-2">
-                {/* The sentence is foreground, not red. Red is the accent that
-                    says "look here"; a whole red paragraph just shouts. */}
-                <p className="text-xs leading-relaxed text-foreground">{gateReason}</p>
-                <button
-                  onClick={onOpenSettings}
-                  className="text-xs font-medium text-accent underline-offset-2 transition-colors hover:underline focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-3),0_0_0_4px_var(--color-accent)]"
-                >
-                  {t("gate.fix")}
-                </button>
-              </div>
-            </div>
-            {/* The arrow is the same surface and border as the balloon, rotated
-                45° and clipped so only the two outer edges show. */}
-            <span
-              aria-hidden
-              className="absolute -bottom-[5px] left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 border-b border-r border-border bg-surface-3"
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
+                className="absolute -bottom-[5px] left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 border-b border-r border-border bg-surface-3"
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
 
       <motion.div
         layout
@@ -126,7 +134,14 @@ export function RecordDock({
         className="pointer-events-auto overflow-hidden rounded-2xl border border-border bg-surface-2/95 backdrop-blur-md"
       >
         <div className="flex items-center justify-center gap-3 px-3 py-2.5">
-          {!recording ? (
+          {/* A dead mirror of the gear. `justify-center` centres the whole row,
+              so a gear on one side only would push Gravar off centre by half its
+              width — which is the misalignment this change set out to fix.
+              Balancing it here keeps the primary action on the dock's axis, and
+              the axis is what the eye tracks. Kept in sync with the gear below:
+              w-8 is p-2 either side of a 16px icon. */}
+          {!recording && <span aria-hidden className="w-8 shrink-0" />}
+          {!recording && (
             <button
               data-testid="btn-record"
               disabled={busy || blocked}
@@ -135,7 +150,7 @@ export function RecordDock({
             >
               <Mic size={16} aria-hidden /> {t("record.start")}
             </button>
-          ) : null}
+          )}
           {!recording && (
             /* Beside the primary action, not stacked under a paragraph. Same
                height and radius so the pair reads as one control group. */
