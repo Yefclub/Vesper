@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -27,7 +27,7 @@ import {
   SearchHit,
   StartGate,
 } from "./lib/api";
-import { SearchIcon } from "@animateicons/react/lucide";
+import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise } from "./lib/motion";
 import { LevelMeter } from "./components/LevelMeter";
@@ -397,25 +397,27 @@ function AppShell({
         onSearch={handleSearch}
         onSelect={loadMeeting}
         onDelete={handleDelete}
-        onOpenSettings={() => setShowSettings(true)}
         onImport={handleImport}
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-4 border-b border-border bg-surface px-6 py-4">
-          <div className="flex items-center gap-2">
+        {/* Three columns, not flex with mx-auto. In a flex row `mx-auto` centres an
+            item between its siblings, so an identity block wider than the actions
+            block pushed the record control off-centre — and it moved again
+            whenever the recording state changed the width of either side. The
+            centre column is now anchored to the header, and its contents can grow
+            and shrink without dragging anything with them. */}
+        <header className="grid grid-cols-[1fr_auto_1fr] items-center gap-4 border-b border-border bg-surface px-6 py-4">
+          <div className="flex items-center gap-2.5">
             <img src={logo} alt="" className="h-8 w-8 rounded-lg" />
-            <div className="text-lg font-semibold tracking-tight">
-              <span className="bg-gradient-to-r from-accent to-accent-2 bg-clip-text text-transparent">
-                {t("app.name")}
-              </span>
-            </div>
-            <span className="rounded-full bg-surface-3 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted">
-              {t("app.tagline")}
+            {/* Negative tracking on the wordmark: at this size the default
+                spacing reads loose. */}
+            <span className="bg-gradient-to-r from-accent to-accent-2 bg-clip-text text-lg font-semibold tracking-[-0.02em] text-transparent">
+              {t("app.name")}
             </span>
           </div>
 
-          <div className="mx-auto flex flex-col items-center gap-1">
+          <div className="flex flex-col items-center gap-1">
             <div className="flex items-center gap-3">
               {!status?.recording ? (
                 <button
@@ -457,12 +459,13 @@ function AppShell({
             )}
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center justify-end gap-3">
             {status?.recording && <LevelMeter levels={status.levels} />}
             <button
               onClick={() => setShowSettings(true)}
-              className="rounded-lg p-2 text-muted hover:bg-surface-3 hover:text-foreground"
+              className="rounded-lg p-2 text-muted transition-colors hover:bg-surface-3 hover:text-foreground focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]"
               title={t("nav.settings")}
+              aria-label={t("nav.settings")}
             >
               <Settings size={18} />
             </button>
@@ -620,6 +623,7 @@ function AppShell({
                         ))
                       ) : (
                         <Empty
+                          icon={<AudioLinesIcon size={22} />}
                           title={t("empty.transcript")}
                           body={t("empty.transcript_body")}
                         />
@@ -684,30 +688,38 @@ function AppShell({
             </>
           ) : (
             <div className="flex flex-1 items-center justify-center p-8">
-              <Empty title={t("empty.ready")} body={t("empty.ready_body")} />
+              <Empty
+                icon={<MicIcon size={22} />}
+                title={t("empty.ready")}
+                body={t("empty.ready_body")}
+              />
             </div>
           )}
         </div>
       </main>
 
-      {showSettings && (
-        <SettingsPanel
-          settings={settings}
-          models={models}
-          onClose={() => setShowSettings(false)}
-          onSave={async (s) => {
-            const next = await api.saveSettings(s);
-            setSettings(next);
-            onSettingsChange(next);
-            setModels(await api.listModels());
-            await refreshGate();
-          }}
-          onRefreshModels={async () => {
-            setModels(await api.listModels());
-            await refreshGate();
-          }}
-        />
-      )}
+      {/* AnimatePresence so the drawer animates out as well as in — without it
+          the exit is a cut. */}
+      <AnimatePresence>
+        {showSettings && (
+          <SettingsPanel
+            settings={settings}
+            models={models}
+            onClose={() => setShowSettings(false)}
+            onSave={async (s) => {
+              const next = await api.saveSettings(s);
+              setSettings(next);
+              onSettingsChange(next);
+              setModels(await api.listModels());
+              await refreshGate();
+            }}
+            onRefreshModels={async () => {
+              setModels(await api.listModels());
+              await refreshGate();
+            }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -725,14 +737,25 @@ function Section({ title, body }: { title: string; body: string }) {
   );
 }
 
-function Empty({ title, body }: { title: string; body: string }) {
+/// The icon is a parameter because the two empty states mean different things:
+/// one is waiting for you to record, the other is a transcript that has not
+/// arrived yet. Both used to show a magnifying glass, which described neither.
+function Empty({
+  icon,
+  title,
+  body,
+}: {
+  icon: ReactNode;
+  title: string;
+  body: string;
+}) {
   return (
     <div className="mx-auto max-w-md text-center">
       <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-surface-3 text-accent">
-        <SearchIcon size={22} />
+        {icon}
       </div>
-      <h2 className="text-lg font-medium">{title}</h2>
-      <p className="mt-2 text-sm text-muted">{body}</p>
+      <h2 className="text-lg font-medium tracking-[-0.01em]">{title}</h2>
+      <p className="mt-2 text-sm leading-relaxed text-muted">{body}</p>
     </div>
   );
 }
