@@ -26,8 +26,12 @@ pub enum CaptureError {
 }
 
 struct RecorderInner {
+    /// Full meeting capture (never cleared by live STT).
     mic_samples: Vec<i16>,
     sys_samples: Vec<i16>,
+    /// Cursor for live-STT windows — advances on drain without destroying recording.
+    mic_stt_pos: usize,
+    sys_stt_pos: usize,
     sample_rate: u32,
     levels: ChannelLevels,
     out_path: Option<PathBuf>,
@@ -51,6 +55,8 @@ impl DualChannelRecorder {
             inner: Arc::new(Mutex::new(RecorderInner {
                 mic_samples: Vec::new(),
                 sys_samples: Vec::new(),
+                mic_stt_pos: 0,
+                sys_stt_pos: 0,
                 sample_rate: 16_000,
                 levels: ChannelLevels::default(),
                 out_path: None,
@@ -102,6 +108,8 @@ impl DualChannelRecorder {
             let mut g = self.inner.lock();
             g.mic_samples.clear();
             g.sys_samples.clear();
+            g.mic_stt_pos = 0;
+            g.sys_stt_pos = 0;
             g.sample_rate = sample_rate;
             g.out_path = Some(out_path);
             g.start = Some(Instant::now());
@@ -267,12 +275,52 @@ impl DualChannelRecorder {
         Ok(path)
     }
 
+    /// Return PCM **since the last drain** for live STT, without removing it from
+    /// the full recording buffers used by `stop()` → `write_dual_wav`.
     pub fn drain_chunks(&self) -> (Vec<i16>, Vec<i16>, u32) {
         let mut g = self.inner.lock();
-        let mic = std::mem::take(&mut g.mic_samples);
-        let sys = std::mem::take(&mut g.sys_samples);
-        (mic, sys, g.sample_rate)
+        let sample_rate = g.sample_rate;
+        // Split borrows carefully: copy windows first, then advance cursors.
+        let mic_pos = g.mic_stt_pos.min(g.mic_samples.len());
+        let sys_pos = g.sys_stt_pos.min(g.sys_samples.len());
+        let mic = g.mic_samples[mic_pos..].to_vec();
+        let sys = g.sys_samples[sys_pos..].to_vec();
+        g.mic_stt_pos = g.mic_samples.len();
+        g.sys_stt_pos = g.sys_samples.len();
+        (mic, sys, sample_rate)
     }
+
+    /// Snapshot of the full dual-channel recording (for tests / diagnostics).
+    pub fn recording_len(&self) -> (usize, usize) {
+        let g = self.inner.lock();
+        (g.mic_samples.len(), g.sys_samples.len())
+    }
+
+    /// Test/helper: append PCM as if capture threads produced it.
+    #[cfg(test)]
+    pub fn push_samples_for_test(&self, mic: &[i16], sys: &[i16]) {
+        let mut g = self.inner.lock();
+        g.mic_samples.extend_from_slice(mic);
+        g.sys_samples.extend_from_slice(sys);
+    }
+
+    /// Test/helper: write current full buffers to path (same as stop without joining streams).
+    #[cfg(test)]
+    pub fn flush_recording_for_test(&self, path: &Path) -> Result<(), CaptureError> {
+        let g = self.inner.lock();
+        write_dual_wav(path, g.sample_rate, &g.mic_samples, &g.sys_samples)
+    }
+}
+
+/// Copy samples from `read_pos` to end, then advance the cursor.
+/// Full `samples` buffer is left intact for final WAV persistence.
+pub fn drain_stt_window(samples: &[i16], read_pos: &mut usize) -> Vec<i16> {
+    if *read_pos > samples.len() {
+        *read_pos = samples.len();
+    }
+    let out = samples[*read_pos..].to_vec();
+    *read_pos = samples.len();
+    out
 }
 
 impl Default for DualChannelRecorder {
@@ -406,5 +454,54 @@ mod tests {
             format!("{:?}", SourceKind::SystemLoopback),
             format!("{:?}", SourceKind::Mic)
         );
+    }
+
+    #[test]
+    fn drain_stt_window_preserves_full_recording() {
+        let mut samples = vec![1i16, 2, 3, 4, 5, 6];
+        let mut pos = 0usize;
+        let w1 = drain_stt_window(&samples, &mut pos);
+        assert_eq!(w1, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(pos, 6);
+        // Full buffer still intact
+        assert_eq!(samples, vec![1, 2, 3, 4, 5, 6]);
+        // Second drain empty until new samples
+        assert!(drain_stt_window(&samples, &mut pos).is_empty());
+        samples.extend_from_slice(&[7, 8]);
+        let w2 = drain_stt_window(&samples, &mut pos);
+        assert_eq!(w2, vec![7, 8]);
+        assert_eq!(samples.len(), 8);
+    }
+
+    #[test]
+    fn live_stt_drain_does_not_truncate_final_wav() {
+        // Simulates poll_live_stt calling drain_chunks repeatedly while recording.
+        let rec = DualChannelRecorder::new();
+        rec.push_samples_for_test(&[100i16; 1600], &[200i16; 1600]); // ~100ms @16k
+        let (d1_m, d1_s, _) = rec.drain_chunks();
+        assert_eq!(d1_m.len(), 1600);
+        assert_eq!(d1_s.len(), 1600);
+
+        rec.push_samples_for_test(&[101i16; 1600], &[201i16; 1600]);
+        let (d2_m, _, _) = rec.drain_chunks();
+        assert_eq!(d2_m.len(), 1600);
+
+        rec.push_samples_for_test(&[102i16; 800], &[202i16; 800]);
+        // After three live-STT drains, full recording must still be 1600*2+800
+        let (mic_len, sys_len) = rec.recording_len();
+        assert_eq!(mic_len, 4000);
+        assert_eq!(sys_len, 4000);
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("meeting.wav");
+        rec.flush_recording_for_test(&path).unwrap();
+        let (mic, sys, _) = read_dual_wav(&path).unwrap();
+        assert_eq!(mic.len(), 4000, "final WAV must keep all samples after live STT drains");
+        assert_eq!(sys.len(), 4000);
+        // Spot-check channels still distinct (Me vs Others)
+        assert_eq!(mic[0], 100);
+        assert_eq!(sys[0], 200);
+        assert_eq!(mic[3200], 102);
+        assert_eq!(sys[3200], 202);
     }
 }
