@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { useI18n } from "../lib/i18n";
 import { backdropFade, transition } from "../lib/motion";
+import { Button } from "./Button";
 
 interface Props {
   title: string;
@@ -48,7 +49,7 @@ export function ConfirmDialog({
     <motion.div
       {...backdropFade}
       onClick={onCancel}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-6 backdrop-blur-sm"
     >
       <motion.div
         role="alertdialog"
@@ -60,30 +61,26 @@ export function ConfirmDialog({
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.96 }}
         transition={transition.base}
-        className="w-full max-w-sm rounded-2xl border border-border bg-surface-2 p-5"
+        className="w-full max-w-sm rounded-lg border border-border bg-surface-2 p-5 shadow-occlude"
       >
-        <h2 id="confirm-title" className="text-base font-medium tracking-[-0.01em]">
+        <h2 id="confirm-title" className="text-base font-medium">
           {title}
         </h2>
-        <p className="mt-2 text-sm leading-relaxed text-muted">{body}</p>
+        <p className="mt-2 text-sm leading-relaxed text-fg-muted">{body}</p>
         {extra && <div className="mt-4">{extra}</div>}
         <div className="mt-5 flex justify-end gap-2">
-          <button
-            onClick={onCancel}
-            className="rounded-xl px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-3 hover:text-foreground focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
-          >
+          <Button variant="ghost" size="md" onClick={onCancel}>
             {t("confirm.cancel")}
-          </button>
-          <button
+          </Button>
+          <Button
             ref={confirmRef}
+            variant={danger ? "danger" : "primary"}
+            size="md"
             data-testid="confirm-accept"
             onClick={onConfirm}
-            className={`rounded-xl px-4 py-2 text-sm font-medium transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)] ${
-              danger ? "bg-danger text-black" : "bg-accent text-black"
-            }`}
           >
             {confirmLabel}
-          </button>
+          </Button>
         </div>
       </motion.div>
     </motion.div>

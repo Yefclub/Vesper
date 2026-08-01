@@ -1,20 +1,136 @@
 @import "tailwindcss";
+/* Tailwind v4 compiles `hover:` to `@media (hover: hover) { &:hover }`, and
+   WebView2 on any touch-capable Windows machine answers `hover: none` — every
+   2-in-1, every touchscreen laptop, every Surface. On that hardware all of the
+   app's hover utilities were dead, and the sidebar's `group-hover:opacity-100`
+   delete button was permanently invisible. `group-hover` composes from the same
+   variant, so this one line fixes both. CSS requires `@import` to precede every
+   other at-rule, so it goes here and nowhere lower. */
+@custom-variant hover (&:hover);
 
 @theme {
-  --color-background: #0a0a0a;
-  --color-surface: #111111;
-  --color-surface-2: #141414;
-  --color-surface-3: #1a1a1a;
-  --color-border: #222222;
-  --color-muted: #a1a1aa;
-  --color-foreground: #fafafa;
-  --color-accent: #c084fc;
-  --color-accent-2: #e879f9;
-  --color-me: #a78bfa;
-  --color-others: #67e8f9;
-  --color-danger: #f87171;
-  --color-success: #4ade80;
+  /* ---- Surface ladder ------------------------------------------------
+     Six steps, each ≥4.2pp apart in oklch lightness. The old ladder spanned
+     #0a0a0a→#222222 (1.24:1 end to end) with a 1.18pp dead step between
+     surface and surface-2, so the app shipped four tokens and read as three
+     levels. This one spans 1.88:1.
+
+     Tinted to the accent's hue (oklch 305°) at chroma 0.006–0.011, a 3–6
+     point RGB spread — B > R > G, widening with lightness. Before this every
+     surface was R=G=B while --color-muted was hue-240 zinc: half achromatic
+     and half cool, which is the one thing the design rules forbid outright. */
+  --color-background: #0b090c;   /* canvas + all chrome; was #0a0a0a */
+  --color-surface-1:  #161418;   /* was --color-surface #111111 */
+  --color-surface-2:  #201e22;   /* was #141414 */
+  --color-surface-3:  #2a282d;   /* was #1a1a1a */
+  --color-hover:      #353338;   /* hover fill — never a border */
+  --color-active:     #403e44;   /* pressed / selected fill */
+
+  /* ---- Border ---------------------------------------------------------
+     A white alpha, not an opaque grey. A 1px border has to be lighter than
+     BOTH adjacent fills; one opaque #222222 was +1.24:1 over #0a0a0a and
+     +1.08:1 over #1a1a1a — crisp in one place, gone in another. A 10% alpha
+     composites to #222124 on background and #3e3c41 on surface-3: lighter
+     than its own surface and lighter than the next step up, at every level,
+     automatically. */
+  --color-border:        rgb(245 244 247 / 0.10);
+  --color-border-strong: rgb(245 244 247 / 0.16);  /* focused input, exposed panel edge */
+
+  /* ---- Ink ------------------------------------------------------------
+     Four named roles, not one token faded with opacity. text-muted/50
+     measured 2.71:1 and text-muted/40 measured 2.17:1 — both carried
+     structural labels the user was expected to read, both failed AA.
+     Contrast vs background / surface-2 / surface-3 given per token. */
+  --color-fg:        #f5f4f7;  /* was --color-foreground #fafafa   18.1 / 15.1 / 13.3 */
+  --color-fg-muted:  #bcb9bf;  /* secondary prose, row metadata    10.2 /  8.5 /  7.5 */
+  --color-fg-subtle: #939197;  /* eyebrows, group headers, placeholder  6.4 / 5.3 / 4.7 */
+  --color-fg-faint:  #6a686e;  /* separators only — never on surface-3  3.6 / 3.0 / 2.7 */
+
+  /* ---- Accent and semantics -------------------------------------------
+     --color-me points at the accent: #a78bfa and #c084fc were both violet at
+     7.2:1 and 7.5:1, so speaker identity and brand read as the same colour
+     with a rounding error between them. The local speaker is the user, who is
+     the app's primary. One violet (you) against one cyan (them).
+     --color-accent-2 is gone with the wordmark gradient it existed to feed. */
+  --color-accent:  #c084fc;              /* 7.51:1 on background */
+  --color-me:      var(--color-accent);
+  --color-others:  #67e8f9;              /* 13.69:1 */
+  --color-danger:  #f87171;              /* 7.17:1 */
+  --color-success: #4ade80;              /* 11.38:1 */
+  --color-warn:    #fbbf24;              /* model present-but-unverified  11.88:1 */
+
+  /* ---- Radius ---------------------------------------------------------
+     Ceiling 12px. Radius scales with element size: 12px landed on a 288px
+     sidebar row (reads as a bubble) and 16px landed on the dock wrapping a
+     12px button (reads as a pill floating inside a box). rounded-2xl and
+     rounded-3xl are out of the vocabulary; rounded-full stays for dots,
+     meter bars and the recording pill only. */
+  --radius-xs:   0.25rem;   /* 4px   innermost square inside a p-1 shell, checkbox */
+  --radius-sm:   0.375rem;  /* 6px   list rows, tabs, badges, small buttons */
+  --radius-md:   0.5rem;    /* 8px   inputs, icon buttons, primary buttons, model rows */
+  --radius-lg:   0.75rem;   /* 12px  cards, dock shell, dialog, drawer, gate balloon */
+
+  /* ---- Type -----------------------------------------------------------
+     All rem: px text freezes against browser zoom, which scales the root
+     font-size only. Sizes carry their own line-height and letter-spacing, so
+     tracking is structural instead of three hand-written tracking-[...]. */
+  --text-2xs: 0.6875rem;  --text-2xs--line-height: 1rem;      --text-2xs--letter-spacing: 0em;
+  --text-xs:  0.75rem;    --text-xs--line-height: 1.125rem;   --text-xs--letter-spacing: 0em;
+  --text-sm:  0.875rem;   --text-sm--line-height: 1.25rem;    --text-sm--letter-spacing: -0.006em;
+  --text-base:1rem;       --text-base--line-height: 1.6;      --text-base--letter-spacing: -0.011em;
+  --text-lg:  1.125rem;   --text-lg--line-height: 1.4;        --text-lg--letter-spacing: -0.018em;
+  --text-xl:  1.375rem;   --text-xl--line-height: 1.25;       --text-xl--letter-spacing: -0.024em;
+  --tracking-eyebrow: 0.02em;   /* uppercase micro-label; replaces tracking-wider (0.05em) */
+
+  /* ---- Measure --------------------------------------------------------
+     36rem at 16px ≈ 72 characters. max-w-3xl (768px) at 14px ran ~115. */
+  --container-reading: 36rem;
+
   --font-sans: "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  /* ---- Motion, mirrored from lib/motion.ts ----------------------------
+     These two are the theme keys behind every transition-* utility. Without
+     them the CSS transitions in the app ran Tailwind's default 150ms
+     cubic-bezier(0.4,0,0.2,1) while every framer animation ran the tokens —
+     two motion systems in one product. Change a value here and change it
+     there too. */
+  --default-transition-duration: 120ms;
+  --default-transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-arrival: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ---- Focus and occlusion --------------------------------------------
+     The inner ring is --color-background, fixed, never the parent's fill —
+     hand-picking it per call site means every one of them is wrong the moment
+     a surface changes. --shadow-occlude is occlusion, not elevation: it stops
+     scrolling text merging into an element that overlaps it, and it is the
+     only shadow in the app. */
+  --shadow-focus:        0 0 0 2px var(--color-background), 0 0 0 4px var(--color-accent);
+  --shadow-focus-danger: 0 0 0 2px var(--color-background), 0 0 0 4px var(--color-danger);
+  --shadow-occlude:      0 20px 40px -24px rgb(4 2 8 / 0.85);
+
+  /* ---- Derived geometry, declared not recomputed ----------------------
+     The dock used to be centred with a hand-derived pl-[70px] explained in a
+     five-line comment. Change the gear's padding, its control size or the gap
+     and the dock silently drifts off the screen axis. */
+  --dock-gear-offset: 3.625rem;  /* 58px = 1px border ×2 + 4px pad ×2 + 36px control + 12px gap */
+}
+
+@layer base {
+  /* Tailwind v4's preflight no longer sets cursor:pointer on buttons, and
+     every button in this app shows an arrow. */
+  button:not(:disabled), a[href], summary,
+  [role="button"]:not([aria-disabled="true"]),
+  [role="tab"]:not([aria-disabled="true"]),
+  [role="menuitem"]:not([aria-disabled="true"]) { cursor: pointer; }
+  button:disabled, [aria-disabled="true"] { cursor: default; }
+
+  /* Fixed-height shell: the document must never scroll or rubber-band. Two
+     panes scroll independently and chaining from either reaches the viewport. */
+  html, body { overflow: hidden; overscroll-behavior: none; }
+
+  /* Reading panes reserve the scrollbar so text does not reflow when it appears. */
+  [data-scroll] { scrollbar-gutter: stable; }
 }
 
 * {
@@ -27,27 +143,81 @@ body,
   height: 100%;
   margin: 0;
   background: var(--color-background);
-  color: var(--color-foreground);
+  color: var(--color-fg);
   font-family: var(--font-sans);
 }
 
+/* A 4px visible thumb inside a 10px grab area: the transparent border plus
+   background-clip does the inset, so the pointer target stays wide while the
+   stripe stays thin. Trap: do not set the standard `scrollbar-color` alongside
+   these — when it is present the engine ignores the pseudo styles entirely and
+   falls back to overlay scrollbars. */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2a2a;
+  background: var(--color-border-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
   border-radius: 999px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.bubble-me {
-  background: linear-gradient(135deg, #1a1228 0%, #16101f 100%);
-  border: 1px solid #2a1f3d;
+/* The chat pending row. The sweep runs across the glyphs themselves rather
+   than across a placeholder block, so the row is already the assistant's
+   shape and nothing reflows when the real answer replaces it. */
+@keyframes shimmer-text {
+  from {
+    background-position: 200% center;
+  }
+  to {
+    background-position: -200% center;
+  }
 }
-.bubble-others {
-  background: #141414;
-  border: 1px solid #222;
+.shimmer-text {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-fg-subtle) 0%,
+    var(--color-fg) 50%,
+    var(--color-fg-subtle) 100%
+  );
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: shimmer-text 2.4s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-text {
+    background-image: none;
+    color: var(--color-fg-subtle);
+    animation: none;
+  }
+}
+
+/* The download bar with no known total. `total_bytes` is nullable and a
+   percentage would be a lie about a multi-gigabyte transfer, so the fill
+   sweeps instead. Transform only — it stays on the compositor. The reduced
+   fallback fills the track rather than emptying it: an empty track next to
+   "Downloading" reads as stalled. */
+@keyframes progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+.progress-sweep {
+  width: 33%;
+  animation: progress-sweep 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-sweep {
+    width: 100%;
+    animation: none;
+  }
 }

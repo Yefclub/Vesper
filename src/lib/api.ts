@@ -35,6 +35,10 @@ export interface AppSettings {
   openrouter_api_key?: string | null;
   openrouter_stt_model: string;
   openrouter_llm_model: string;
+  /** Ids the user picked before, most recent first, capped by the backend.
+   *  Optional because the field lands in a separate change — every consumer
+   *  renders without it and it lights up on its own the day it arrives. */
+  recent_openrouter_llm_models?: string[];
   local_stt_model: string;
   local_llm_model: string;
   reasoning_enabled: boolean;
@@ -90,6 +94,25 @@ export interface ModelInfo {
   present: boolean;
   path: string;
   download_url?: string | null;
+}
+
+/** Payload of the `models://download-progress` event.
+ *
+ *  `bytes_per_sec`, `eta_secs`, `attempt` and `resumed_from_bytes` are optional
+ *  because the backend that emits them is a separate change that has not landed
+ *  yet. Every consumer must render without them; they light up on their own the
+ *  day the Rust side starts sending them, with no front-end change. */
+export interface DownloadProgress {
+  model_id: string;
+  downloaded_bytes: number;
+  total_bytes?: number | null;
+  done: boolean;
+  error?: string | null;
+  phase: string;
+  bytes_per_sec?: number | null;
+  eta_secs?: number | null;
+  attempt?: number | null;
+  resumed_from_bytes?: number | null;
 }
 
 export interface AudioDevice {
@@ -163,13 +186,14 @@ export const api = {
   updatesConfig: () => invoke<Record<string, unknown>>("check_updates_config"),
 };
 
+/** Rolls the hour out of the minutes field once there is one. Without it a
+ *  90-minute meeting read `90:00`, and the clock is the one number a meeting
+ *  recorder must get right. */
 export function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor(s / 60) % 60;
   const r = s % 60;
-  return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
-}
-
-export function formatTs(ms: number): string {
-  return `[${formatDuration(ms)}]`;
+  const rest = `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+  return h > 0 ? `${h}:${rest}` : rest;
 }

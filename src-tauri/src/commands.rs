@@ -43,6 +43,11 @@ pub struct AppState {
     /// poll its single-flight behaviour; `lock().await` lets stop wait for a pass
     /// that is already running instead of racing it to the transcript.
     pub stt_flight: tokio::sync::Mutex<()>,
+    /// Held for the duration of a model download. One at a time, and enforced
+    /// here rather than in the settings drawer: closing the drawer unmounts the
+    /// component that knows a transfer is running, and two transfers of the same
+    /// model append to one `.part` file.
+    pub download_flight: tokio::sync::Mutex<()>,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -63,6 +68,7 @@ impl AppState {
             active_meeting: Mutex::new(None),
             key_in_keychain: AtomicBool::new(in_keychain),
             stt_flight: tokio::sync::Mutex::new(()),
+            download_flight: tokio::sync::Mutex::new(()),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -823,7 +829,19 @@ pub fn list_models_cmd() -> Vec<ModelInfo> {
 /// artifact is fed to whisper.cpp / llama.cpp, so letting the WebView choose where
 /// the bytes come from would hand an attacker the input to a C++ parser.
 #[tauri::command]
-pub async fn download_model_cmd(app: AppHandle, model_id: String) -> Result<String, String> {
+pub async fn download_model_cmd(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    model_id: String,
+) -> Result<String, String> {
+    // `try_lock`, not `lock().await`: a queued second download is a click the user
+    // has forgotten about by the time it starts. Refusing is the honest answer, and
+    // the drawer's disabled buttons make this unreachable in the ordinary case —
+    // this catches the one they cannot cover, where the drawer was closed and
+    // reopened while the transfer kept running.
+    let Ok(_flight) = state.download_flight.try_lock() else {
+        return Err("another model is already downloading".into());
+    };
     let path = download_model_with_progress(&model_id, move |p: DownloadProgress| {
         // A dropped frame is how the freeze looked from the UI: the queue to the
         // window thread saturates, the emit fails, and the percentage stops moving
