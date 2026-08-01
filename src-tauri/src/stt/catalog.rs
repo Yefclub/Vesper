@@ -183,6 +183,8 @@ pub fn parse_openrouter_llm_models(body: &str) -> Result<Vec<OrModel>, String> {
         .get("data")
         .and_then(|d| d.as_array())
         .ok_or_else(|| "missing data array".to_string())?;
+    // `links.next` is ignored: the whole catalog arrives in one body today. If it
+    // ever comes back non-null this reads page one and silently drops the rest.
     let mut out = Vec::new();
     for m in data {
         let id = m
@@ -212,14 +214,26 @@ pub fn parse_openrouter_llm_models(body: &str) -> Result<Vec<OrModel>, String> {
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out.dedup_by(|a, b| a.id == b.id);
-    // Keep a useful top slice for UI
-    if out.len() > 120 {
-        out.truncate(120);
-    }
     Ok(out)
 }
 
 fn is_text_llm(m: &Value, id: &str) -> bool {
+    // Explicit output modalities, nested under `architecture` — the shape the API
+    // actually sends. Reading the top-level field instead made this branch dead
+    // against production and let every audio model through the catch-all below.
+    if let Some(arr) = m
+        .pointer("/architecture/output_modalities")
+        .and_then(|x| x.as_array())
+    {
+        let outs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+        if !outs.is_empty() {
+            return outs.contains(&"text") && !outs.contains(&"image") && !outs.contains(&"audio");
+        }
+    }
+    // Fallback for entries carrying no modalities at all — i.e. the built-in
+    // `default_llm_models()`. Guessing from the id is why `image` is gone from
+    // this list: the modality check above carries that weight now, and substring
+    // matching would eventually reject a chat model named `…-imagen-reasoning`.
     let id_l = id.to_ascii_lowercase();
     if id_l.contains("embed")
         || id_l.contains("whisper")
@@ -227,17 +241,9 @@ fn is_text_llm(m: &Value, id: &str) -> bool {
         || id_l.contains("tts")
         || id_l.contains("moderation")
         || id_l.contains("rerank")
-        || id_l.contains("image")
         || id_l.contains("vision-preview") && id_l.contains("only")
     {
         return false;
-    }
-    // Explicit output modalities
-    if let Some(arr) = m.get("output_modalities").and_then(|x| x.as_array()) {
-        let outs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
-        if !outs.is_empty() {
-            return outs.contains(&"text");
-        }
     }
     let modality = m
         .pointer("/architecture/modality")
@@ -306,13 +312,16 @@ mod tests {
       ]
     }"#;
 
+    // `output_modalities` is nested under `architecture` here because that is the
+    // only place OpenRouter puts it. The earlier fixture invented a top-level
+    // field, so this test passed against a payload the API never sends.
     const LLM_FIXTURE: &str = r#"{
       "data": [
-        {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini", "architecture": {"modality": "text->text"}, "output_modalities": ["text"]},
-        {"id": "openai/gpt-4o-mini-transcribe", "name": "Mini Transcribe", "output_modalities": ["transcription"]},
-        {"id": "openai/whisper-1", "name": "Whisper", "output_modalities": ["transcription"]},
-        {"id": "anthropic/claude-sonnet-4", "name": "Claude Sonnet 4", "output_modalities": ["text"]},
-        {"id": "openai/text-embedding-3-small", "name": "Embed", "output_modalities": ["embeddings"]}
+        {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini", "architecture": {"modality": "text->text", "output_modalities": ["text"]}},
+        {"id": "openai/gpt-4o-mini-transcribe", "name": "Mini Transcribe", "architecture": {"output_modalities": ["transcription"]}},
+        {"id": "openai/whisper-1", "name": "Whisper", "architecture": {"output_modalities": ["transcription"]}},
+        {"id": "anthropic/claude-sonnet-4", "name": "Claude Sonnet 4", "architecture": {"output_modalities": ["text"]}},
+        {"id": "openai/text-embedding-3-small", "name": "Embed", "architecture": {"output_modalities": ["embeddings"]}}
       ]
     }"#;
 
@@ -344,6 +353,56 @@ mod tests {
     }
 
     #[test]
+    fn a_two_hundred_entry_catalogue_comes_back_whole() {
+        // The list used to be sorted by display name and cut at 120. That is not a
+        // "top slice", it is a prefix of the alphabet: the live catalog lost every
+        // OpenAI and Qwen model, including the app's own default.
+        let entries: Vec<String> = (0..200)
+            .map(|i| {
+                format!(
+                    r#"{{"id":"vendor/model-{i:03}","name":"Vendor: Model {i:03}","architecture":{{"output_modalities":["text"]}}}}"#
+                )
+            })
+            .collect();
+        let body = format!(r#"{{"data":[{}]}}"#, entries.join(","));
+        let models = parse_openrouter_llm_models(&body).unwrap();
+        assert_eq!(models.len(), 200);
+        assert!(models.iter().any(|m| m.id == "vendor/model-199"));
+    }
+
+    #[test]
+    fn nested_architecture_output_modalities_is_what_gets_read() {
+        // Two places to look, and only the nested one is what OpenRouter sends —
+        // so the nested one has to be the one that decides.
+        let body = r#"{"data":[
+            {"id":"vendor/really-an-image-model","name":"Image","output_modalities":["text"],
+             "architecture":{"output_modalities":["image","text"]}},
+            {"id":"vendor/really-a-chat-model","name":"Chat","output_modalities":["image"],
+             "architecture":{"output_modalities":["text"]}}
+        ]}"#;
+        let models = parse_openrouter_llm_models(body).unwrap();
+        let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["vendor/really-a-chat-model"]);
+    }
+
+    #[test]
+    fn gpt_4o_mini_and_qwen_survive_the_filter() {
+        // Shapes copied from the live catalog. Both were cut by the truncate, and
+        // `openai/gpt-4o-mini` is the model the app ships as its default — note it
+        // takes image *input*, which must not be read as image output.
+        let body = r#"{"data":[
+            {"id":"openai/gpt-4o-mini","name":"OpenAI: GPT-4o-mini",
+             "architecture":{"modality":"text+image+file->text","input_modalities":["text","image","file"],"output_modalities":["text"]}},
+            {"id":"qwen/qwen-2.5-72b-instruct","name":"Qwen: 2.5 72B Instruct",
+             "architecture":{"modality":"text->text","input_modalities":["text"],"output_modalities":["text"]}}
+        ]}"#;
+        let models = parse_openrouter_llm_models(body).unwrap();
+        let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"openai/gpt-4o-mini"), "{ids:?}");
+        assert!(ids.contains(&"qwen/qwen-2.5-72b-instruct"), "{ids:?}");
+    }
+
+    #[test]
     fn serde_provider_accepts_openrouter_string() {
         use crate::domain::settings::{LlmProvider, SttProvider};
         let s: SttProvider = serde_json::from_str("\"openrouter\"").unwrap();
@@ -372,5 +431,19 @@ mod audio_modality_tests {
         let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
         assert!(ids.contains(&"vendor/real-stt"), "{ids:?}");
         assert!(!ids.contains(&"vendor/some-tts"), "{ids:?}");
+    }
+
+    #[test]
+    fn an_audio_output_model_is_not_a_chat_model() {
+        // `openai/gpt-audio` outputs ["text","audio"]. It passed the old filter as
+        // a chat model, so a voice model was on offer for summarising a meeting.
+        let body = r#"{"data":[
+            {"id":"openai/gpt-audio","name":"OpenAI: GPT Audio","architecture":{"output_modalities":["text","audio"]}},
+            {"id":"openai/gpt-4o-mini","name":"OpenAI: GPT-4o-mini","architecture":{"output_modalities":["text"]}}
+        ]}"#;
+        let models = parse_openrouter_llm_models(body).unwrap();
+        let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"openai/gpt-4o-mini"), "{ids:?}");
+        assert!(!ids.contains(&"openai/gpt-audio"), "{ids:?}");
     }
 }

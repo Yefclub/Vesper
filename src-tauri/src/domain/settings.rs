@@ -53,6 +53,13 @@ pub struct AppSettings {
     /// least once, and the user can turn it off after the first time.
     #[serde(default = "default_true")]
     pub confirm_before_recording: bool,
+    /// OpenRouter chat models the user picked, most recent first, capped at five.
+    ///
+    /// `#[serde(default)]` is load-bearing: `AppState::new` reads the row with
+    /// `unwrap_or_default()`, so a field this struct requires and an older row
+    /// does not carry would reset every existing user's settings in silence.
+    #[serde(default)]
+    pub recent_openrouter_llm_models: Vec<String>,
 }
 
 fn default_ui_locale() -> String {
@@ -84,6 +91,7 @@ impl Default for AppSettings {
             system_device_id: None,
             compute_backend: "auto".into(),
             confirm_before_recording: true,
+            recent_openrouter_llm_models: Vec::new(),
         }
     }
 }
@@ -137,6 +145,16 @@ impl AppSettings {
             return Err(SettingsError::EmptyModel);
         }
         Ok(())
+    }
+
+    /// Records a model pick, newest first, keeping at most five.
+    ///
+    /// Removing before inserting is what makes re-picking an old model promote it
+    /// instead of leaving a duplicate behind in the list.
+    pub fn remember_recent_llm_model(&mut self, id: &str) {
+        self.recent_openrouter_llm_models.retain(|m| m != id);
+        self.recent_openrouter_llm_models.insert(0, id.to_string());
+        self.recent_openrouter_llm_models.truncate(5);
     }
 
     pub fn public_view(&self) -> AppSettings {
@@ -224,5 +242,50 @@ mod tests {
         assert_eq!(s2.system_device_id.as_deref(), Some("sys-1"));
         assert!(s2.onboarding_complete);
         assert_eq!(s2.locale(), Locale::PtBr);
+    }
+
+    #[test]
+    fn recent_models_default_when_absent_from_an_older_row() {
+        // Exactly what a build before this field wrote. `AppState::new` loads with
+        // `unwrap_or_default()`, so a deserialise failure here does not surface as
+        // an error — it silently hands the user a factory-fresh configuration.
+        let older_row = r#"{
+            "stt_provider": "local",
+            "llm_provider": "openrouter",
+            "openrouter_api_key": null,
+            "openrouter_stt_model": "openai/gpt-4o-mini-transcribe",
+            "openrouter_llm_model": "anthropic/claude-sonnet-4",
+            "local_stt_model": "whisper-small",
+            "local_llm_model": "qwen2.5-1.5b",
+            "reasoning_enabled": true,
+            "auto_summarize": false,
+            "language": "pt",
+            "ui_locale": "pt-BR",
+            "onboarding_complete": true,
+            "mic_device_id": "mic-1",
+            "system_device_id": "sys-1",
+            "compute_backend": "cuda",
+            "confirm_before_recording": false
+        }"#;
+        let s: AppSettings = serde_json::from_str(older_row).expect("older rows must still load");
+        assert_eq!(s.llm_provider, LlmProvider::OpenRouter);
+        assert_eq!(s.openrouter_llm_model, "anthropic/claude-sonnet-4");
+        assert_eq!(s.local_stt_model, "whisper-small");
+        assert_eq!(s.ui_locale, "pt-BR");
+        assert_eq!(s.mic_device_id.as_deref(), Some("mic-1"));
+        assert_eq!(s.compute_backend, "cuda");
+        assert!(!s.confirm_before_recording);
+        assert!(s.recent_openrouter_llm_models.is_empty());
+    }
+
+    #[test]
+    fn saving_a_new_model_moves_it_to_the_front_of_recents() {
+        let mut s = AppSettings::default();
+        for id in ["a", "b", "c", "d", "e", "f"] {
+            s.remember_recent_llm_model(id);
+        }
+        assert_eq!(s.recent_openrouter_llm_models, ["f", "e", "d", "c", "b"]);
+        s.remember_recent_llm_model("c");
+        assert_eq!(s.recent_openrouter_llm_models, ["c", "f", "e", "d", "b"]);
     }
 }
