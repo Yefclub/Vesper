@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { FileUp, Search, SquarePen, Trash2 } from "lucide-react";
+import { FileUp, Search, SearchX, SquarePen, Trash2 } from "lucide-react";
 import { MeetingRecord, SearchHit, formatDuration } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { Button, FOCUS } from "./Button";
@@ -174,9 +174,24 @@ export function Sidebar({
             // Held back until the debounce answers, or every query would flash
             // "no matches" on its first keystroke.
             searching ? null : (
-              <p className="px-3 py-6 text-center text-xs text-fg-muted">
-                {t("sidebar.no_matches")}
-              </p>
+              // A dead end otherwise: the list is empty, the query is still in
+              // the box, and the way back was to select the text and delete it.
+              <div className="px-3 py-6 text-center">
+                <SearchX
+                  size={20}
+                  aria-hidden
+                  className="mx-auto mb-2 text-fg-subtle"
+                />
+                <p className="text-xs text-fg-muted">{t("sidebar.no_matches")}</p>
+                <Button
+                  variant="secondary"
+                  size="xs"
+                  className="mt-3"
+                  onClick={() => onSearch("")}
+                >
+                  {t("sidebar.clear_search")}
+                </Button>
+              </div>
             )
           ) : (
             hits.map((h) => (

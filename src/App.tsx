@@ -42,6 +42,10 @@ import logo from "./assets/logo.png";
 
 type Tab = "transcript" | "summary" | "chat";
 
+/// Mirrors the accelerator registered in `src-tauri/src/lib.rs`. No command
+/// reports it, and a global shortcut nobody can see is a shortcut nobody uses.
+const RECORD_SHORTCUT = "Ctrl+Shift+R";
+
 export default function App() {
   const [bootLocale, setBootLocale] = useState("en");
   const [ready, setReady] = useState(false);
@@ -770,6 +774,16 @@ function AppShell({
                           icon={<AudioLinesIcon size={22} />}
                           title={t("empty.transcript")}
                           body={t("empty.transcript_body")}
+                          action={
+                            <Button
+                              size="md"
+                              variant="secondary"
+                              onClick={handleImport}
+                              disabled={busy}
+                            >
+                              {t("nav.import")}
+                            </Button>
+                          }
                         />
                       )}
                     </motion.div>
@@ -782,9 +796,32 @@ function AppShell({
                       className="mx-auto max-w-reading space-y-6"
                       data-testid="summary-panel"
                     >
-                      <Section title={t("section.summary")} body={selected.summary || "—"} />
-                      <Section title={t("section.key_points")} body={selected.key_points || "—"} />
-                      <Section title={t("section.action_items")} body={selected.action_items || "—"} />
+                      {selected.summary ||
+                      selected.key_points ||
+                      selected.action_items ? (
+                        <>
+                          <Section title={t("section.summary")} body={selected.summary || "—"} />
+                          <Section title={t("section.key_points")} body={selected.key_points || "—"} />
+                          <Section title={t("section.action_items")} body={selected.action_items || "—"} />
+                        </>
+                      ) : (
+                        // Three cards each holding one em-dash and nothing to
+                        // act on is an empty state. This renders it as one.
+                        <Empty
+                          icon={<Sparkles size={22} />}
+                          title={t("empty.summary")}
+                          body={t("empty.summary_body")}
+                          action={
+                            <Button
+                              size="md"
+                              onClick={() => handleSummarize("general")}
+                              disabled={busy}
+                            >
+                              <Sparkles size={16} /> {t("action.summarize")}
+                            </Button>
+                          }
+                        />
+                      )}
                     </motion.div>
                   )}
 
@@ -893,6 +930,31 @@ function AppShell({
                 icon={<MicIcon size={22} />}
                 title={t("empty.ready")}
                 body={t("empty.ready_body")}
+                action={
+                  <div className="flex items-center justify-center gap-3">
+                    {/* The dock's guard, repeated: `New meeting` is reachable
+                        during a recording, so this screen can sit on top of one
+                        and a second Record would offer to start another. */}
+                    {!status?.recording && (
+                      <>
+                        <Button size="md" onClick={requestStart} disabled={busy}>
+                          {t("record.start")}
+                        </Button>
+                        <kbd className="inline-flex h-6 items-center rounded-xs border border-border bg-surface-2 px-2 text-2xs text-fg-subtle">
+                          {RECORD_SHORTCUT}
+                        </kbd>
+                      </>
+                    )}
+                    <Button
+                      size="md"
+                      variant="secondary"
+                      onClick={handleImport}
+                      disabled={busy}
+                    >
+                      {t("nav.import")}
+                    </Button>
+                  </div>
+                }
               />
             </div>
           )}
@@ -1026,25 +1088,34 @@ function Section({ title, body }: { title: string; body: string }) {
   );
 }
 
-/// The icon is a parameter because the two empty states mean different things:
-/// one is waiting for you to record, the other is a transcript that has not
-/// arrived yet. Both used to show a magnifying glass, which described neither.
+/// The icon is a parameter because the empty states mean different things: one
+/// is waiting for you to record, one is a transcript that has not arrived yet,
+/// one is a meeting nobody has summarized. They all used to show a magnifying
+/// glass, which described none of them.
+///
+/// `action` is what makes these states empty rather than dead. Every screen in
+/// the app now names the way out of itself.
 function Empty({
   icon,
   title,
   body,
+  action,
 }: {
   icon: ReactNode;
   title: string;
   body: string;
+  action?: ReactNode;
 }) {
   return (
     <div className="mx-auto max-w-md text-center">
-      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg bg-surface-3 text-accent">
+      {/* Not `text-accent`: the accent belongs to the primary action below,
+          and an empty state's icon is decoration. */}
+      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg bg-surface-2 text-fg-subtle">
         {icon}
       </div>
-      <h2 className="text-lg font-medium">{title}</h2>
-      <p className="mt-2 text-sm leading-relaxed text-fg-muted">{body}</p>
+      <h2 className="text-lg font-semibold">{title}</h2>
+      <p className="mt-2 text-base leading-relaxed text-fg-muted">{body}</p>
+      {action && <div className="mt-6">{action}</div>}
     </div>
   );
 }
