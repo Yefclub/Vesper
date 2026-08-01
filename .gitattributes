@@ -1,0 +1,9 @@
+# Fim de linha não pode depender da configuração local de quem clona.
+#
+# Um .sh commitado com CRLF por uma máquina Windows com core.autocrlf=false
+# quebra no Linux: /bin/sh é dash, que não tolera o \r e falha com
+# "$'\r': command not found". Git Bash tolera (MSYS2 é patcheado para isso),
+# então o defeito passa despercebido em quem escreveu e aparece só no outro SO.
+*.sh    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf

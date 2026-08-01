@@ -16,9 +16,12 @@ src-tauri/target/
 !.env.*.example
 *.key
 *.pem
+*.p12
+.credentials.json
 
 # Local / personal (not versioned)
 CLAUDE.local.md
+AGENTS.local.md
 SPEC.md
 PENDENCIAS.md
 .claude/settings.local.json
@@ -47,8 +50,10 @@ recordings/
 .idea/
 *.swp
 *.swo
+*~
 .DS_Store
 Thumbs.db
+Desktop.ini
 *.suo
 *.ntvs*
 *.njsproj
@@ -67,6 +72,11 @@ yarn-error.log*
 # Test artifacts
 playwright-report/
 test-results/
+.playwright/
+
+# Scratch work (never versioned)
+scratch/
+tmp/
 
 # Tauri gen (local)
 src-tauri/gen/schemas/*.json
