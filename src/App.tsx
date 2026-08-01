@@ -97,6 +97,7 @@ function AppShell({
   const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<LiveTranscript>({ segments: [] });
+  const [transcriptOwner, setTranscriptOwner] = useState<string | null>(null);
   const [status, setStatus] = useState<RecorderStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [query, setQuery] = useState("");
@@ -168,6 +169,12 @@ function AppShell({
         api.getMeeting(id),
       ]);
       setTranscript(tr);
+      // Which meeting the transcript on screen belongs to. `setSelectedId` above
+      // ran before this request resolved, so the scroll effect keyed on the id
+      // alone fires against the *outgoing* transcript. This lands with the
+      // content and gives that effect something that changes when the
+      // replacement is actually there.
+      setTranscriptOwner(id);
       setChat(c);
       if (m) {
         setMeetings((prev) => {
@@ -320,16 +327,17 @@ function AppShell({
   const transcriptMark = `${segmentCount}:${
     transcript.segments?.[segmentCount - 1]?.end_ms ?? 0
   }`;
-  // `selectedId` is in here as well as in the effect that sets the pin. Two
-  // meetings can share a segment count and a final `end_ms` — two 4-line
-  // imports of the same length do — and then `transcriptMark` is identical
-  // across the switch, nothing re-runs, and the second transcript opens at the
-  // first one's scroll offset. The pane is not remounted either, so the ref
-  // callback below does not cover it.
+  // `transcriptOwner` is in here as well as the mark. Two meetings can share a
+  // segment count and a final `end_ms` — two four-line imports of the same
+  // length do — so across that switch the mark is identical, nothing re-runs,
+  // and the second transcript opens at the first one's offset. The pane is not
+  // remounted either, so the ref callback below does not cover it. Keying on
+  // the owner rather than on `selectedId` is what makes this fire *after* the
+  // replacement has landed instead of against the outgoing content.
   useEffect(() => {
     if (tab !== "transcript" || !pinnedRef.current) return;
     pinToBottom();
-  }, [transcriptMark, tab, selectedId, pinToBottom]);
+  }, [transcriptMark, tab, transcriptOwner, pinToBottom]);
 
   /// The pane mounts after the outgoing one has animated away, which is a DOM
   /// change with no render of this component behind it — the effect above
@@ -498,6 +506,7 @@ function AppShell({
   function clearWorkspace() {
     setSelectedId(null);
     setTranscript({ segments: [] });
+    setTranscriptOwner(null);
     setChat([]);
   }
 

@@ -714,10 +714,6 @@ const PHASE_KEY: Record<string, string> = {
   done: "download.done",
 };
 
-/** Mirrors the retry ladder in the downloader — 1/2/4/8/16s, then give up. The
- *  count is shown so "Retrying 2/5" says how much patience is left. */
-const MAX_ATTEMPTS = 5;
-
 /** `142 MB`, `1.4 GB`. One decimal below 100, none above, so the field keeps
  *  its width while the number climbs. */
 function formatBytes(n: number): string {
@@ -782,12 +778,17 @@ const ModelRow = memo(function ModelRow({
       );
     }
     if ((progress.attempt ?? 1) > 1) {
-      // The retry line takes the rate's place; the byte counter and the bar
-      // both stay where they were, because the transfer does too.
+      // The retry line takes the rate's place; the byte counter and the bar both
+      // stay where they were, because the transfer does too.
+      //
+      // No denominator. `attempt` counts every transfer, and the budget that is
+      // capped at five is the *consecutive* failure count, which resets on any
+      // attempt that moved a byte — so a flaky link legitimately reaches attempt
+      // nine and "9/5" would be nonsense. The number that is true on its own is
+      // the one shown.
       parts.push(
         t("download.retrying")
           .replace("{attempt}", String(progress.attempt))
-          .replace("{max}", String(MAX_ATTEMPTS))
           .replace("{at}", resumePoint(progress, total)),
       );
     } else if (progress.bytes_per_sec) {
