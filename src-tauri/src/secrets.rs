@@ -33,13 +33,27 @@ pub fn openrouter_key() -> Option<String> {
 }
 
 /// Stores the key, or clears it when `None` or blank.
+///
+/// Clearing never fails the caller. There is nothing to lose by failing to delete
+/// something, and every settings save passes through here — including a local-only
+/// setup that has no key at all. Returning an error there would stop someone on a
+/// machine without a keychain daemon from finishing onboarding, over a credential
+/// they never had.
+///
+/// Storing a real key does propagate the error, because the alternative is the
+/// user believing their key was saved and finding it gone next launch.
 pub fn set_openrouter_key(key: Option<&str>) -> Result<(), String> {
-    let entry = entry().map_err(|e| e.to_string())?;
     match key.map(str::trim).filter(|k| !k.is_empty()) {
-        Some(k) => entry.set_password(k).map_err(|e| e.to_string()),
-        None => match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        },
+        Some(k) => entry()
+            .and_then(|e| e.set_password(k))
+            .map_err(|e| format!("could not store the API key in the system keychain: {e}")),
+        None => {
+            if let Err(e) = entry().and_then(|e| e.delete_credential()) {
+                if !matches!(e, keyring::Error::NoEntry) {
+                    tracing::warn!("could not clear the stored API key: {e}");
+                }
+            }
+            Ok(())
+        }
     }
 }

@@ -473,6 +473,9 @@ function AppShell({
                 } catch (e) {
                   setUpdateNote(null);
                   setError(String(e));
+                  // The check only runs once, on mount. Without putting the offer
+                  // back, a failed download means no retry until the app restarts.
+                  setPendingUpdate(update);
                 }
               }}
               className="rounded-lg bg-accent px-3 py-1 text-xs font-medium text-black hover:brightness-110"

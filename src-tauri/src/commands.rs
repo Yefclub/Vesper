@@ -121,9 +121,15 @@ fn persist_settings(
         }
     }
     settings.validate_models().map_err(|e| e.to_string())?;
-    crate::secrets::set_openrouter_key(settings.openrouter_api_key.as_deref())?;
+    // Database first. It is the write that can fail for boring reasons — disk full,
+    // file locked — and doing it after the keychain would leave the stored
+    // credential ahead of the settings that reference it.
     state.db.save_settings(&settings)?;
+    let stored = crate::secrets::set_openrouter_key(settings.openrouter_api_key.as_deref());
+    // The session keeps working with the key in memory either way; the caller is
+    // told only that it will not survive a restart.
     *state.settings.lock() = settings.clone();
+    stored?;
     Ok(settings)
 }
 
