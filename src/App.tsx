@@ -4,19 +4,11 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
-import {
-  FileAudio,
-  MessageSquare,
-  Mic,
-  Pause,
-  Play,
-  Settings,
-  Square,
-  Sparkles,
-} from "lucide-react";
+import { FileAudio, MessageSquare, Settings, Sparkles } from "lucide-react";
 import {
   api,
   AppSettings,
+  AudioDevice,
   ChatMessage,
   formatDuration,
   formatTs,
@@ -30,7 +22,7 @@ import {
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise } from "./lib/motion";
-import { LevelMeter } from "./components/LevelMeter";
+import { RecordDock } from "./components/RecordDock";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Onboarding } from "./components/Onboarding";
@@ -103,6 +95,7 @@ function AppShell({
   const [updateNote, setUpdateNote] = useState<string | null>(null);
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [gate, setGate] = useState<StartGate>({ allowed: false });
+  const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -154,6 +147,7 @@ function AppShell({
       try {
         await refreshMeetings();
         setModels(await api.listModels());
+        setDevices(await api.listDevices());
         setStatus(await api.recorderStatus());
         await refreshGate();
       } catch (e) {
@@ -371,7 +365,6 @@ function AppShell({
     }
   }
 
-  const recordBlocked = !gate.allowed && !status?.recording;
 
   return (
     <div className="flex h-full bg-background text-foreground">
@@ -417,50 +410,22 @@ function AppShell({
             </span>
           </div>
 
-          <div className="flex flex-col items-center gap-1">
-            <div className="flex items-center gap-3">
-              {!status?.recording ? (
-                <button
-                  data-testid="btn-record"
-                  disabled={busy || recordBlocked}
-                  title={recordBlocked ? gate.reason || undefined : undefined}
-                  onClick={handleStart}
-                  className="flex items-center gap-2 rounded-full bg-accent px-5 py-2 text-sm font-medium text-black transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <Mic size={16} /> {t("record.start")}
-                </button>
-              ) : (
-                <>
-                  <button
-                    data-testid="btn-pause"
-                    onClick={handlePauseResume}
-                    className="flex items-center gap-2 rounded-full bg-surface-3 px-4 py-2 text-sm text-foreground hover:bg-border"
-                  >
-                    {status.paused ? <Play size={16} /> : <Pause size={16} />}
-                    {status.paused ? t("record.resume") : t("record.pause")}
-                  </button>
-                  <button
-                    data-testid="btn-stop"
-                    onClick={handleStop}
-                    className="flex items-center gap-2 rounded-full bg-danger/20 px-4 py-2 text-sm text-danger hover:bg-danger/30"
-                  >
-                    <Square size={14} /> {t("record.stop")}
-                  </button>
-                  <span className="font-mono text-sm text-muted" data-testid="elapsed">
-                    {formatDuration(status.elapsed_ms)}
-                  </span>
-                </>
-              )}
-            </div>
-            {recordBlocked && gate.reason && (
-              <p className="max-w-md text-center text-[11px] text-muted" data-testid="record-gate">
-                {gate.reason}
-              </p>
+          {/* Centre column reserved for status. The recording controls moved to
+              the dock at the bottom of the content column, where nothing beside
+              them can change their position. */}
+          <div className="flex items-center justify-center">
+            {status?.recording && (
+              <span
+                data-testid="recording-badge"
+                className="flex items-center gap-2 rounded-full bg-danger/10 px-3 py-1 text-xs text-danger"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-danger" aria-hidden />
+                {status.paused ? t("record.paused_badge") : t("record.recording_badge")}
+              </span>
             )}
           </div>
 
           <div className="flex items-center justify-end gap-3">
-            {status?.recording && <LevelMeter levels={status.levels} />}
             <button
               onClick={() => setShowSettings(true)}
               className="rounded-lg p-2 text-muted transition-colors hover:bg-surface-3 hover:text-foreground focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]"
@@ -519,7 +484,7 @@ function AppShell({
           </div>
         )}
 
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="relative flex min-h-0 flex-1 flex-col">
           {selected ? (
             <>
               <div className="flex items-center justify-between border-b border-border px-6 py-3">
@@ -695,6 +660,18 @@ function AppShell({
               />
             </div>
           )}
+
+          <RecordDock
+            status={status}
+            gate={gate}
+            busy={busy}
+            devices={devices}
+            micDeviceId={settings.mic_device_id}
+            systemDeviceId={settings.system_device_id}
+            onStart={handleStart}
+            onStop={handleStop}
+            onPauseResume={handlePauseResume}
+          />
         </div>
       </main>
 
