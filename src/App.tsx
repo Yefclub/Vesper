@@ -553,7 +553,7 @@ function AppShell({
                 ))}
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+              <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-28 pt-4">
                 <AnimatePresence mode="wait">
                   {tab === "transcript" && (
                     <motion.div
@@ -688,6 +688,10 @@ function AppShell({
               setSettings(next);
               onSettingsChange(next);
               setModels(await api.listModels());
+              // The dock resolves device names from this list. Without a refresh
+              // it keeps a mount-time snapshot, so a device plugged in later is
+              // saved by its id and then displayed as the old default.
+              setDevices(await api.listDevices());
               await refreshGate();
             }}
             onRefreshModels={async () => {

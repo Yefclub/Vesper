@@ -44,7 +44,11 @@ export function RecordDock({
   onPauseResume,
 }: Props) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
+  // Hover and focus are tracked apart: moving the mouse away while a control
+  // inside is focused must not collapse the panel under the keyboard user.
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const expanded = hovered || focused;
   const recording = status?.recording ?? false;
   const blocked = !gate.allowed && !recording;
 
@@ -58,13 +62,13 @@ export function RecordDock({
       <motion.div
         layout
         transition={transition.base}
-        onHoverStart={() => setExpanded(true)}
-        onHoverEnd={() => setExpanded(false)}
-        onFocusCapture={() => setExpanded(true)}
+        onHoverStart={() => setHovered(true)}
+        onHoverEnd={() => setHovered(false)}
+        onFocusCapture={() => setFocused(true)}
         onBlurCapture={(e) => {
-          // Only collapse once focus has left the dock entirely, or tabbing
-          // between its own buttons would close it under the user.
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) setExpanded(false);
+          // Only clear once focus has left the dock entirely, or tabbing between
+          // its own buttons would close it under the user.
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setFocused(false);
         }}
         data-testid="record-dock"
         className="pointer-events-auto overflow-hidden rounded-2xl border border-border bg-surface-2/95 backdrop-blur-md"
