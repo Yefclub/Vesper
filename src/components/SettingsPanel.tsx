@@ -807,8 +807,18 @@ const ModelRow = memo(function ModelRow({
         <div>
           <div className="text-sm">{model.label}</div>
           <div
-            className={`text-2xs tabular-nums ${failed ? "text-danger" : "text-fg-muted"}`}
+            className={`flex items-center gap-2 text-2xs tabular-nums ${failed ? "text-danger" : "text-fg-muted"}`}
           >
+            {/* A dot and a word. Absent gets no dot — there is no state to
+                signal there, only the button beside it to press. */}
+            {!progress && (model.ready || model.present) && (
+              <span
+                aria-hidden
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                  model.ready ? "bg-success" : "bg-warn"
+                }`}
+              />
+            )}
             {readout}
           </div>
         </div>
