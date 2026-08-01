@@ -5,7 +5,7 @@ use crate::db::{Database, KeyHome};
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::chat::ChatMessage;
 use crate::domain::export::{export_meeting, ExportFormat};
-use crate::domain::gate::{can_start_recording, StartGate};
+use crate::domain::gate::{can_start_recording_with, StartGate};
 use crate::domain::i18n::{catalog, t, Locale};
 use crate::domain::job::{MeetingEvent, MeetingRecord, MeetingStatus};
 use crate::domain::search::SearchHit;
@@ -272,10 +272,22 @@ fn local_stt_ready(settings: &AppSettings) -> bool {
     LocalSttEngine::new().is_model_ready(&settings.local_stt_model)
 }
 
+/// Whether the artifact exists at all, regardless of verification.
+fn local_stt_present(settings: &AppSettings) -> bool {
+    list_models()
+        .into_iter()
+        .any(|m| m.id == settings.local_stt_model && m.present)
+}
+
 #[tauri::command]
 pub fn can_record(state: State<'_, Arc<AppState>>) -> StartGate {
     let s = state.settings.lock().clone();
-    can_start_recording(&s, local_stt_ready(&s), s.onboarding_complete)
+    can_start_recording_with(
+        &s,
+        local_stt_ready(&s),
+        local_stt_present(&s),
+        s.onboarding_complete,
+    )
 }
 
 #[tauri::command]
@@ -350,9 +362,10 @@ pub fn start_recording(
         return Err("already recording".into());
     }
     let settings = state.settings.lock().clone();
-    let gate = can_start_recording(
+    let gate = can_start_recording_with(
         &settings,
         local_stt_ready(&settings),
+        local_stt_present(&settings),
         settings.onboarding_complete,
     );
     if !gate.allowed {
