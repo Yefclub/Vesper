@@ -716,6 +716,7 @@ function AppShell({
             onStart={requestStart}
             onStop={handleStop}
             onPauseResume={handlePauseResume}
+            onOpenSettings={() => setShowSettings(true)}
           />
         </div>
       </main>

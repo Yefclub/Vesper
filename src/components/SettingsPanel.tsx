@@ -211,7 +211,7 @@ export function SettingsPanel({
                     <div>
                       <div className="text-sm">{m.label}</div>
                       <div className="text-[11px] text-muted">
-                        {m.ready ? t("model.ready") : t("model.not_downloaded")}
+                        {m.ready ? t("model.ready") : m.present ? t("model.unverified") : t("model.not_downloaded")}
                       </div>
                     </div>
                     {!m.ready && (
@@ -220,7 +220,7 @@ export function SettingsPanel({
                         onClick={() => download(m.id)}
                         className="rounded-lg bg-surface-3 px-2 py-1 text-xs hover:bg-border"
                       >
-                        {t("model.download")}
+                        {m.present ? t("model.verify") : t("model.download")}
                       </button>
                     )}
                   </div>

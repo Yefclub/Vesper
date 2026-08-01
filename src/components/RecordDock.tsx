@@ -16,6 +16,7 @@ interface Props {
   onStart: () => void;
   onStop: () => void;
   onPauseResume: () => void;
+  onOpenSettings: () => void;
 }
 
 /**
@@ -42,6 +43,7 @@ export function RecordDock({
   onStart,
   onStop,
   onPauseResume,
+  onOpenSettings,
 }: Props) {
   const { t } = useI18n();
   // Hover and focus are tracked apart: moving the mouse away while a control
@@ -51,8 +53,10 @@ export function RecordDock({
   const expanded = hovered || focused;
   const recording = status?.recording ?? false;
   const blocked = !gate.allowed && !recording;
-  // A gate can carry either a sentence from the backend or a key for one we own.
-  const gateReason = gate.reason ?? (gate.reason_key ? t(gate.reason_key) : null);
+  // The translated key wins. The backend also ships an English sentence for
+  // callers without a catalog, but in the app that sentence is the fallback,
+  // not the answer — it was reaching the screen in English.
+  const gateReason = gate.reason_key ? t(gate.reason_key) : (gate.reason ?? null);
 
   const deviceName = (id: string | null | undefined, kind: AudioDevice["kind"]) =>
     devices.find((d) => d.id === id)?.name ??
@@ -75,7 +79,7 @@ export function RecordDock({
         data-testid="record-dock"
         className="pointer-events-auto overflow-hidden rounded-2xl border border-border bg-surface-2/95 backdrop-blur-md"
       >
-        <div className="flex items-center gap-3 px-3 py-2.5">
+        <div className="flex items-center justify-center gap-3 px-3 py-2.5">
           {!recording ? (
             <button
               data-testid="btn-record"
@@ -131,9 +135,20 @@ export function RecordDock({
             >
               <div className="flex items-center gap-4 px-4 py-2.5 text-[11px] text-muted">
                 {blocked && gateReason ? (
-                  <span data-testid="record-gate" className="max-w-xs text-danger">
-                    {gateReason}
-                  </span>
+                  <div className="flex max-w-sm flex-col items-start gap-2">
+                    <span data-testid="record-gate" className="text-danger">
+                      {gateReason}
+                    </span>
+                    {/* Telling someone what is wrong without a way to fix it
+                        leaves them hunting through settings for the screen that
+                        matches the sentence they just read. */}
+                    <button
+                      onClick={onOpenSettings}
+                      className="rounded-lg bg-surface-3 px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-border focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
+                    >
+                      {t("gate.fix")}
+                    </button>
+                  </div>
                 ) : (
                   <>
                     <span className="flex items-center gap-1.5">
