@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -22,6 +29,7 @@ import {
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise } from "./lib/motion";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { RecordDock } from "./components/RecordDock";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -96,6 +104,11 @@ function AppShell({
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [gate, setGate] = useState<StartGate>({ allowed: false });
   const [devices, setDevices] = useState<AudioDevice[]>([]);
+  const [confirmingRecord, setConfirmingRecord] = useState(false);
+  const [skipRecordReminder, setSkipRecordReminder] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<MeetingRecord | null>(null);
+  const confirmBeforeRecordingRef = useRef(settings.confirm_before_recording);
+  confirmBeforeRecordingRef.current = settings.confirm_before_recording;
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -199,7 +212,7 @@ function AppShell({
           try {
             const st = await api.recorderStatus();
             if (st.recording) await handleStop();
-            else await handleStart();
+            else requestStart();
           } catch (e) {
             setError(String(e));
           }
@@ -246,6 +259,20 @@ function AppShell({
     }, 1200);
     return () => window.clearInterval(id);
   }, [status?.recording, status?.paused]);
+
+  /// The dock and the hotkey both go through here, so the reminder cannot be
+  /// skipped by starting a recording from the keyboard.
+  ///
+  /// Reads the preference from a ref rather than the closed-over value: the
+  /// hotkey listener is registered once on mount, so it would otherwise keep the
+  /// setting as it was at startup and go on asking after the user opted out.
+  function requestStart() {
+    if (confirmBeforeRecordingRef.current) {
+      setConfirmingRecord(true);
+      return;
+    }
+    void handleStart();
+  }
 
   async function handleStart() {
     setBusy(true);
@@ -364,6 +391,9 @@ function AppShell({
   }
 
   async function handleDelete(id: string) {
+    // Dismiss first. Leaving the dialog up after the meeting is gone offers a
+    // Delete button for something that no longer exists.
+    setPendingDelete(null);
     try {
       await api.deleteMeeting(id);
       if (selectedId === id) {
@@ -401,7 +431,7 @@ function AppShell({
         hits={hits}
         onSearch={handleSearch}
         onSelect={loadMeeting}
-        onDelete={handleDelete}
+        onDelete={(id) => setPendingDelete(meetings.find((m) => m.id === id) ?? null)}
         onImport={handleImport}
       />
 
@@ -680,12 +710,74 @@ function AppShell({
             devices={devices}
             micDeviceId={settings.mic_device_id}
             systemDeviceId={settings.system_device_id}
-            onStart={handleStart}
+            onStart={requestStart}
             onStop={handleStop}
             onPauseResume={handlePauseResume}
           />
         </div>
       </main>
+
+      <AnimatePresence>
+        {confirmingRecord && (
+          <ConfirmDialog
+            title={t("confirm.record_title")}
+            body={t("confirm.record_body")}
+            confirmLabel={t("confirm.record_accept")}
+            extra={
+              <label className="flex items-center gap-2 text-xs text-muted">
+                <input
+                  type="checkbox"
+                  checked={skipRecordReminder}
+                  onChange={(e) => setSkipRecordReminder(e.target.checked)}
+                />
+                {t("confirm.record_dont_ask")}
+              </label>
+            }
+            onCancel={() => {
+              setConfirmingRecord(false);
+              // A ticked box that survives a cancel would silently opt the user
+              // out the next time they press Start.
+              setSkipRecordReminder(false);
+            }}
+            onConfirm={async () => {
+              setConfirmingRecord(false);
+              if (skipRecordReminder) {
+                // Persist before recording starts: the preference is the user's
+                // answer to the question they were just asked, and losing it
+                // would ask again next time as if they had not replied.
+                const next = { ...settings, confirm_before_recording: false };
+                try {
+                  const saved = await api.saveSettings(next);
+                  setSettings(saved);
+                  onSettingsChange(saved);
+                } catch (e) {
+                  // Do not record. `handleStart` clears the error banner, so
+                  // carrying on would swallow the failure and leave the user
+                  // believing a preference was saved that was not.
+                  setError(String(e));
+                  setSkipRecordReminder(false);
+                  return;
+                }
+              }
+              setSkipRecordReminder(false);
+              await handleStart();
+            }}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {pendingDelete && (
+          <ConfirmDialog
+            danger
+            title={t("confirm.delete_title")}
+            body={t("confirm.delete_body")}
+            confirmLabel={t("confirm.delete_accept")}
+            onCancel={() => setPendingDelete(null)}
+            onConfirm={() => handleDelete(pendingDelete.id)}
+          />
+        )}
+      </AnimatePresence>
 
       {/* AnimatePresence so the drawer animates out as well as in — without it
           the exit is a cut. */}

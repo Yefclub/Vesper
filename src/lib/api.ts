@@ -45,6 +45,7 @@ export interface AppSettings {
   mic_device_id?: string | null;
   system_device_id?: string | null;
   compute_backend: string;
+  confirm_before_recording: boolean;
 }
 
 export interface ChannelLevels {

@@ -48,10 +48,18 @@ pub struct AppSettings {
     /// Preferred compute backend: `cpu` | `cuda` | `auto`
     #[serde(default = "default_backend")]
     pub compute_backend: String,
+    /// Whether to show the reminder to tell the room they are being recorded.
+    /// Defaults on: a meeting tool that records other people should say so at
+    /// least once, and the user can turn it off after the first time.
+    #[serde(default = "default_true")]
+    pub confirm_before_recording: bool,
 }
 
 fn default_ui_locale() -> String {
     "en".into()
+}
+fn default_true() -> bool {
+    true
 }
 fn default_backend() -> String {
     "auto".into()
@@ -75,6 +83,7 @@ impl Default for AppSettings {
             mic_device_id: None,
             system_device_id: None,
             compute_backend: "auto".into(),
+            confirm_before_recording: true,
         }
     }
 }
