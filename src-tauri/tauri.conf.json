@@ -68,7 +68,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI5RDdFQTQ1RjE2MDk0MkQKUldRdGxHRHhSZXJYS1lsZnA0VHY5TlMvV2JGd3NRdkgxTkdoK3lHeFVRcmYxOWk5QjJwcERCRUcK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYyRTQ4QjlBOUM4NEJDQUEKUldTcXZJU2Ntb3ZrOGp0djVvZ0FqWk1hM0NNcWFtVktjUzdpZ0YydkRVU2t2MHZyZHZRK2VoQmMK",
       "endpoints": [
         "https://github.com/Yefclub/Vesper/releases/latest/download/latest.json"
       ],

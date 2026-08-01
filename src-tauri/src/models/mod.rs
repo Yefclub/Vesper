@@ -12,6 +12,11 @@ pub struct ModelInfo {
     pub kind: String,
     pub label: String,
     pub ready: bool,
+    /// The artifact exists on disk. Separate from , which also requires a
+    /// verified checksum — a user who downloaded before checksums existed has a
+    /// real file that is simply unvouched for, and telling them it is "not
+    /// downloaded" invites a re-download they do not need.
+    pub present: bool,
     pub path: String,
     pub download_url: Option<String>,
     pub size_hint_bytes: Option<u64>,
@@ -75,18 +80,20 @@ pub fn list_models() -> Vec<ModelInfo> {
         .into_iter()
         .map(|(id, kind, label, url, size, sha256)| {
             let path = model_artifact_path(id, kind);
-            let ready = std::fs::read_to_string(artifact_marker_path(&path))
-                .map(|recorded| recorded.trim().eq_ignore_ascii_case(sha256))
-                .unwrap_or(false)
-                && path.is_file()
+            let present = path.is_file()
                 && std::fs::metadata(&path)
                     .map(|m| m.len() > 1_000_000)
                     .unwrap_or(false);
+            let ready = std::fs::read_to_string(artifact_marker_path(&path))
+                .map(|recorded| recorded.trim().eq_ignore_ascii_case(sha256))
+                .unwrap_or(false)
+                && present;
             ModelInfo {
                 id: id.into(),
                 kind: kind.into(),
                 label: label.into(),
                 ready,
+                present,
                 path: path.display().to_string(),
                 download_url: Some(url.into()),
                 size_hint_bytes: Some(size),

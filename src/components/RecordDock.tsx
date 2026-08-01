@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Mic, Pause, Play, Square } from "lucide-react";
+import { Mic, Pause, Play, Settings, Square } from "lucide-react";
 import { AudioDevice, RecorderStatus, StartGate, formatDuration } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { transition } from "../lib/motion";
@@ -16,6 +16,7 @@ interface Props {
   onStart: () => void;
   onStop: () => void;
   onPauseResume: () => void;
+  onOpenSettings: () => void;
 }
 
 /**
@@ -42,6 +43,7 @@ export function RecordDock({
   onStart,
   onStop,
   onPauseResume,
+  onOpenSettings,
 }: Props) {
   const { t } = useI18n();
   // Hover and focus are tracked apart: moving the mouse away while a control
@@ -51,8 +53,10 @@ export function RecordDock({
   const expanded = hovered || focused;
   const recording = status?.recording ?? false;
   const blocked = !gate.allowed && !recording;
-  // A gate can carry either a sentence from the backend or a key for one we own.
-  const gateReason = gate.reason ?? (gate.reason_key ? t(gate.reason_key) : null);
+  // The translated key wins. The backend also ships an English sentence for
+  // callers without a catalog, but in the app that sentence is the fallback,
+  // not the answer — it was reaching the screen in English.
+  const gateReason = gate.reason_key ? t(gate.reason_key) : (gate.reason ?? null);
 
   const deviceName = (id: string | null | undefined, kind: AudioDevice["kind"]) =>
     devices.find((d) => d.id === id)?.name ??
@@ -60,7 +64,61 @@ export function RecordDock({
     t("dock.system_default");
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center pb-6">
+    <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center pb-6">
+      {/* The live region is mounted for the whole life of the dock, empty until
+          there is something to say. A region inserted into the DOM together with
+          its text is announced unreliably — screen readers only watch regions
+          they were already aware of. Empty it has no box, so it costs no layout:
+          the spacing below lives on the balloon, not on a gap here. */}
+      <div role="status" className="flex flex-col items-center">
+        {/* Anchored above the control it explains, with an arrow pointing at it —
+            feedback belongs next to its trigger, not stacked underneath in a block
+            that stretches the dock and drags the button off centre.
+            Rendered whenever recording is blocked rather than on hover: the button
+            it describes is disabled, and a disabled control takes neither focus nor
+            a tooltip, so hover would hide this from keyboard and touch entirely. */}
+        <AnimatePresence>
+          {blocked && gateReason && (
+            <motion.div
+              data-testid="record-gate"
+              initial={{ opacity: 0, y: 4, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 4, scale: 0.98 }}
+              transition={transition.base}
+              className="pointer-events-auto relative mb-2 max-w-xs rounded-xl border border-border bg-surface-3 px-3.5 py-3 shadow-none"
+            >
+              <div className="flex gap-2.5">
+                <span
+                  aria-hidden
+                  className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-danger/15 text-[10px] font-semibold text-danger"
+                >
+                  !
+                </span>
+                <div className="flex flex-col items-start gap-2">
+                  {/* The sentence is foreground, not red. Red is the accent that
+                      says "look here"; a whole red paragraph just shouts. */}
+                  <p className="text-xs leading-relaxed text-foreground">{gateReason}</p>
+                  <button
+                    onClick={onOpenSettings}
+                    className="text-xs font-medium text-accent underline-offset-2 transition-colors hover:underline focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-3),0_0_0_4px_var(--color-accent)]"
+                  >
+                    {t("gate.fix")}
+                  </button>
+                </div>
+              </div>
+              {/* The arrow is the same surface and border as the balloon, rotated
+                  45° and clipped so only the two outer edges show. Its tip
+                  protrudes ~7px, which fits inside the balloon's 8px bottom
+                  margin, so it points at the dock without overlapping it. */}
+              <span
+                aria-hidden
+                className="absolute -bottom-[5px] left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 border-b border-r border-border bg-surface-3"
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
       <motion.div
         layout
         transition={transition.base}
@@ -75,8 +133,15 @@ export function RecordDock({
         data-testid="record-dock"
         className="pointer-events-auto overflow-hidden rounded-2xl border border-border bg-surface-2/95 backdrop-blur-md"
       >
-        <div className="flex items-center gap-3 px-3 py-2.5">
-          {!recording ? (
+        <div className="flex items-center justify-center gap-3 px-3 py-2.5">
+          {/* A dead mirror of the gear. `justify-center` centres the whole row,
+              so a gear on one side only would push Gravar off centre by half its
+              width — which is the misalignment this change set out to fix.
+              Balancing it here keeps the primary action on the dock's axis, and
+              the axis is what the eye tracks. Kept in sync with the gear below:
+              w-8 is p-2 either side of a 16px icon. */}
+          {!recording && <span aria-hidden className="w-8 shrink-0" />}
+          {!recording && (
             <button
               data-testid="btn-record"
               disabled={busy || blocked}
@@ -85,7 +150,21 @@ export function RecordDock({
             >
               <Mic size={16} aria-hidden /> {t("record.start")}
             </button>
-          ) : (
+          )}
+          {!recording && (
+            /* Beside the primary action, not stacked under a paragraph. Same
+               height and radius so the pair reads as one control group. */
+            <button
+              data-testid="btn-dock-settings"
+              onClick={onOpenSettings}
+              title={t("nav.settings")}
+              aria-label={t("nav.settings")}
+              className="rounded-xl bg-surface-3 p-2 text-muted transition-colors hover:bg-border hover:text-foreground focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
+            >
+              <Settings size={16} />
+            </button>
+          )}
+          {recording && (
             <>
               <button
                 data-testid="btn-stop"
@@ -115,41 +194,31 @@ export function RecordDock({
           )}
         </div>
 
-        {/* The blocked reason is not something to go looking for: the only
-            control up there is disabled, so it cannot take focus, and a touch
-            user never hovers. It stays visible whenever recording is blocked. */}
+        {/* The lower panel is the device readout and nothing else now. The
+            blocked reason moved out to a balloon, so a long sentence no longer
+            stretches the dock and drags the button off centre. */}
         <AnimatePresence initial={false}>
-          {(expanded || (blocked && gateReason)) && (
+          {expanded && !blocked && (
             <motion.div
-              // Height animates through the grid trick rather than `height:auto`,
-              // which is not animatable; only transform and opacity actually move.
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: "auto" }}
               exit={{ opacity: 0, height: 0 }}
               transition={transition.base}
               className="border-t border-border/60"
             >
-              <div className="flex items-center gap-4 px-4 py-2.5 text-[11px] text-muted">
-                {blocked && gateReason ? (
-                  <span data-testid="record-gate" className="max-w-xs text-danger">
-                    {gateReason}
+              <div className="flex items-center justify-center gap-4 px-4 py-2.5 text-[11px] text-muted">
+                <span className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-me" aria-hidden />
+                  <span className="max-w-[14rem] truncate">
+                    {deviceName(micDeviceId, "mic")}
                   </span>
-                ) : (
-                  <>
-                    <span className="flex items-center gap-1.5">
-                      <span className="h-1.5 w-1.5 rounded-full bg-me" aria-hidden />
-                      <span className="max-w-[14rem] truncate">
-                        {deviceName(micDeviceId, "mic")}
-                      </span>
-                    </span>
-                    <span className="flex items-center gap-1.5">
-                      <span className="h-1.5 w-1.5 rounded-full bg-others" aria-hidden />
-                      <span className="max-w-[14rem] truncate">
-                        {deviceName(systemDeviceId, "system")}
-                      </span>
-                    </span>
-                  </>
-                )}
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-others" aria-hidden />
+                  <span className="max-w-[14rem] truncate">
+                    {deviceName(systemDeviceId, "system")}
+                  </span>
+                </span>
               </div>
             </motion.div>
           )}

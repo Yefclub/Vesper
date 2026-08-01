@@ -16,6 +16,19 @@ pub fn can_start_recording(
     local_stt_ready: bool,
     onboarding_complete: bool,
 ) -> StartGate {
+    can_start_recording_with(settings, local_stt_ready, false, onboarding_complete)
+}
+
+/// `local_stt_present` separates "the file is missing" from "the file is there but
+/// this build has never verified it". Saying a model is not installed while it sits
+/// on the user's disk sends them to re-download something they already have — and
+/// the settings screen, which knows the difference, would be contradicting this one.
+pub fn can_start_recording_with(
+    settings: &AppSettings,
+    local_stt_ready: bool,
+    local_stt_present: bool,
+    onboarding_complete: bool,
+) -> StartGate {
     if !onboarding_complete || !settings.onboarding_complete {
         return StartGate {
             allowed: false,
@@ -30,6 +43,15 @@ pub fn can_start_recording(
                     allowed: true,
                     reason: None,
                     reason_key: None,
+                }
+            } else if local_stt_present {
+                StartGate {
+                    allowed: false,
+                    reason: Some(format!(
+                        "Local STT model `{}` is on disk but has not been verified yet.",
+                        settings.local_stt_model
+                    )),
+                    reason_key: Some("gate.local_stt_unverified".into()),
                 }
             } else {
                 StartGate {

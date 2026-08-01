@@ -86,6 +86,8 @@ export interface ModelInfo {
   kind: string;
   label: string;
   ready: boolean;
+  /** File is on disk. Distinct from ready, which also requires verification. */
+  present: boolean;
   path: string;
   download_url?: string | null;
 }
