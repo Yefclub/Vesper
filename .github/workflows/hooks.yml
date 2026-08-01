@@ -1,0 +1,57 @@
+name: hooks
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  # Roda nos dois SOs de proposito: os hooks sao POSIX sh e a promessa e que
+  # funcionem em Linux (dash) e no bash do MSYS2 no Windows. Testar so num
+  # deles deixa passar exatamente o defeito que a promessa quer evitar.
+  suite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sintaxe dos hooks
+        shell: bash
+        run: for f in .claude/hooks/*.sh; do sh -n "$f"; done
+
+      - name: Suite
+        shell: bash
+        run: sh .claude/hooks/test-hooks.sh
+
+      - name: JSON valido
+        shell: bash
+        run: |
+          for f in .mcp.json .claude/settings.json .claude/playwright-mcp.config.json; do
+            node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))" && echo "$f ok"
+          done
+
+      - name: Frontmatter em toda skill
+        shell: bash
+        run: |
+          rc=0
+          for f in .claude/skills/*/SKILL.md; do
+            head -1 "$f" | grep -q '^---$' || { echo "sem frontmatter: $f"; rc=1; }
+            grep -q '^name:' "$f"        || { echo "sem name: $f"; rc=1; }
+            grep -q '^description:' "$f" || { echo "sem description: $f"; rc=1; }
+            n=$(wc -l < "$f")
+            [ "$n" -le 110 ] || { echo "acima de 110 linhas ($n): $f"; rc=1; }
+          done
+          exit $rc
+
+  # dash e o /bin/sh do Debian/Ubuntu e e mais estrito que bash. Rodar a suite
+  # sob ele explicitamente pega bashismo que passaria despercebido no Git Bash.
+  dash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y dash
+      - run: dash .claude/hooks/test-hooks.sh

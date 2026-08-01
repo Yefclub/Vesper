@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+
+  "enableAllProjectMcpServers": true,
+  "extraKnownMarketplaces": {
+    "superpowers-marketplace": {
+      "source": { "source": "github", "repo": "obra/superpowers-marketplace" }
+    }
+  },
+  "enabledPlugins": {
+    "superpowers@superpowers-marketplace": true
+  },
+
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "sh .claude/hooks/guard-bash.sh",
+            "timeout": 10,
+            "statusMessage": "Conferindo o comando"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "sh .claude/hooks/guard-secrets.sh",
+            "timeout": 10,
+            "statusMessage": "Conferindo o destino da escrita"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "sh .claude/hooks/session-start.sh",
+            "timeout": 15,
+            "statusMessage": "Levantando estado do repositorio"
+          },
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "sh .claude/hooks/check-toolchain.sh",
+            "timeout": 10,
+            "statusMessage": "Conferindo toolchain"
+          }
+        ]
+      }
+    ]
+  }
+}
