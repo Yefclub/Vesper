@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type UIEvent,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -27,7 +28,7 @@ import {
 } from "./lib/api";
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
 import { I18nProvider, useI18n } from "./lib/i18n";
-import { fadeRise } from "./lib/motion";
+import { fadeRise, segmentArrive } from "./lib/motion";
 import { Button, FOCUS } from "./components/Button";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -116,6 +117,12 @@ function AppShell({
   const [pendingDelete, setPendingDelete] = useState<MeetingRecord | null>(null);
   const confirmBeforeRecordingRef = useRef(settings.confirm_before_recording);
   confirmBeforeRecordingRef.current = settings.confirm_before_recording;
+  const scrollRef = useRef<HTMLDivElement>(null);
+  /// Whether the reading column is following the newest line. A ref, not state:
+  /// it is written from a scroll handler at up to one frame per pixel, and this
+  /// component owns the meetings, the transcript, the chat and the recorder
+  /// status — a state write here would re-render the whole shell per frame.
+  const pinnedRef = useRef(true);
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -273,6 +280,55 @@ function AppShell({
     }, 1200);
     return () => window.clearInterval(id);
   }, [status?.recording, status?.paused]);
+
+  /// Jump the reading column to its newest line.
+  ///
+  /// `auto`, never `smooth`: `scrollTo({behavior:"smooth"})` is not reliably
+  /// gated by `prefers-reduced-motion`, and with a line landing every 1.2s the
+  /// animation would never finish before the next one restarts it.
+  const pinToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+  }, []);
+
+  function handleContentScroll(e: UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    // 48px of slack, not exact equality: at any zoom other than 100% the three
+    // numbers are fractional and never cancel out, so `=== 0` would unpin the
+    // column permanently on the first wheel tick.
+    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 48;
+  }
+
+  /// Opening a meeting or coming back to the tab starts at the newest line.
+  /// Content is deliberately not in here: a reader who scrolled up must stay
+  /// where they are while the recording keeps appending.
+  useEffect(() => {
+    pinnedRef.current = true;
+  }, [selectedId, tab]);
+
+  // Keyed on what the transcript *contains*, not on the object: `poll_live_stt`
+  // replaces it every 1200ms whether or not a word was added, so keying on
+  // `transcript` would yank the column back down on every silent tick.
+  // (Indexed rather than `.at(-1)`: the project targets ES2020.)
+  const segmentCount = transcript.segments?.length ?? 0;
+  const transcriptMark = `${segmentCount}:${
+    transcript.segments?.[segmentCount - 1]?.end_ms ?? 0
+  }`;
+  useEffect(() => {
+    if (tab !== "transcript" || !pinnedRef.current) return;
+    pinToBottom();
+  }, [transcriptMark, tab, pinToBottom]);
+
+  /// The pane mounts after the outgoing one has animated away, which is a DOM
+  /// change with no render of this component behind it — the effect above
+  /// cannot see it. Leaving the tab while lines arrive and coming back has to
+  /// land on the newest one, so the pane honours the pin as it lands.
+  const pinOnPaneMount = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (node && pinnedRef.current) pinToBottom();
+    },
+    [pinToBottom],
+  );
 
   /// The dock and the hotkey both go through here, so the reminder cannot be
   /// skipped by starting a recording from the keyboard.
@@ -630,6 +686,9 @@ function AppShell({
                   inside it, so the id follows the selected tab rather than
                   living on a pane that unmounts. */}
               <div
+                ref={scrollRef}
+                onScroll={handleContentScroll}
+                data-scroll
                 id={`content-panel-${tab}`}
                 role="tabpanel"
                 aria-labelledby={`content-tab-${tab}`}
@@ -639,34 +698,55 @@ function AppShell({
                   {tab === "transcript" && (
                     <motion.div
                       key="transcript"
+                      ref={pinOnPaneMount}
                       {...fadeRise}
-                      exit={{ opacity: 0 }}
-                      className="mx-auto flex max-w-reading flex-col gap-3"
+                      className="mx-auto max-w-reading"
                       data-testid="transcript-panel"
                     >
                       {transcript.segments?.length ? (
-                        transcript.segments.map((s) => (
-                          <div
-                            key={s.id}
-                            className={`max-w-[85%] rounded-lg border border-border px-4 py-3 text-sm leading-relaxed ${
-                              s.speaker === "me" ? "ml-auto bg-surface-2" : "bg-surface-1"
-                            }`}
-                          >
-                            <div className="mb-1 flex items-center gap-2 text-2xs uppercase tracking-wide text-fg-subtle">
-                              <span
-                                className={
-                                  s.speaker === "me" ? "text-me" : "text-others"
-                                }
+                        // `initial={false}` so opening a past meeting does not
+                        // blur-and-fade three hundred rows at once: only the
+                        // segments that land after the pane is up animate, which
+                        // is the handful per minute `segmentArrive` is sized for.
+                        <AnimatePresence initial={false}>
+                          {transcript.segments.map((s, i) => {
+                            // A run of consecutive lines from one speaker is one
+                            // utterance: it carries a single timestamp and a
+                            // single name, and only the gap says where it ends.
+                            const opens =
+                              i === 0 ||
+                              transcript.segments[i - 1].speaker !== s.speaker;
+                            return (
+                              <motion.div
+                                key={s.id}
+                                {...segmentArrive}
+                                className={`flex gap-4 ${
+                                  i === 0 ? "" : opens ? "mt-4" : "mt-1"
+                                }`}
                               >
-                                {s.speaker === "me"
-                                  ? t("speaker.me")
-                                  : t("speaker.others")}
-                              </span>
-                              <span>{formatDuration(s.start_ms)}</span>
-                            </div>
-                            {s.text}
-                          </div>
-                        ))
+                                <span className="w-14 shrink-0 tabular-nums text-2xs text-fg-faint">
+                                  {opens ? formatDuration(s.start_ms) : ""}
+                                </span>
+                                <span
+                                  aria-hidden
+                                  className={`w-0.5 shrink-0 self-stretch rounded-full ${
+                                    s.speaker === "me" ? "bg-accent" : "bg-others"
+                                  }`}
+                                />
+                                <div className="min-w-0 flex-1">
+                                  {opens && (
+                                    <div className="text-2xs text-fg-subtle">
+                                      {s.speaker === "me"
+                                        ? t("speaker.me")
+                                        : t("speaker.others")}
+                                    </div>
+                                  )}
+                                  <p className="text-base leading-relaxed">{s.text}</p>
+                                </div>
+                              </motion.div>
+                            );
+                          })}
+                        </AnimatePresence>
                       ) : (
                         <Empty
                           icon={<AudioLinesIcon size={22} />}
