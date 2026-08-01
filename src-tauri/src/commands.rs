@@ -676,36 +676,60 @@ pub fn list_models_cmd() -> Vec<ModelInfo> {
     list_models()
 }
 
+/// Downloads a catalog model by id. There is deliberately no URL parameter: the
+/// artifact is fed to whisper.cpp / llama.cpp, so letting the WebView choose where
+/// the bytes come from would hand an attacker the input to a C++ parser.
 #[tauri::command]
-pub async fn download_model_cmd(
-    app: AppHandle,
-    model_id: String,
-    url: Option<String>,
-) -> Result<String, String> {
-    let models = list_models();
-    let m = models
-        .into_iter()
-        .find(|m| m.id == model_id)
-        .ok_or_else(|| "unknown model".to_string())?;
-    let url = url.or(m.download_url).ok_or_else(|| "no url".to_string())?;
-    let mid = model_id.clone();
-    let path = download_model_with_progress(&model_id, &url, move |p: DownloadProgress| {
+pub async fn download_model_cmd(app: AppHandle, model_id: String) -> Result<String, String> {
+    let path = download_model_with_progress(&model_id, move |p: DownloadProgress| {
         let _ = app.emit("models://download-progress", &p);
     })
     .await?;
-    let _ = mid;
     Ok(path.display().to_string())
 }
 
+/// Reports the updater config for UI/tests without network.
+///
+/// Everything is read from `tauri.conf.json` at compile time rather than restated
+/// here. The previous version hardcoded `pubkey_configured: true` while the shipped
+/// key was a development placeholder — claiming a signature guarantee the build did
+/// not have. A hand-kept mirror of a config file drifts; a derived one cannot.
 #[tauri::command]
 pub fn check_updates_config() -> serde_json::Value {
-    // Mirrors tauri.conf.json updater endpoint for UI/tests without network.
+    let conf: serde_json::Value = serde_json::from_str(TAURI_CONF).unwrap_or_default();
+    let updater = conf.pointer("/plugins/updater");
     serde_json::json!({
-        "active": true,
-        "endpoints": [
-            "https://github.com/Yefclub/Vesper/releases/latest/download/latest.json"
-        ],
+        "active": updater.is_some(),
+        "endpoints": updater
+            .and_then(|u| u.get("endpoints"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
         "targets": ["windows", "macos", "linux"],
-        "pubkey_configured": true
+        "pubkey_configured": updater_pubkey_is_real(&conf)
     })
+}
+
+const TAURI_CONF: &str = include_str!("../tauri.conf.json");
+
+/// True only when the updater public key is a real signing key.
+///
+/// A minisign public key carries an untrusted comment in its payload, and the
+/// placeholder shipped for development says so in plain text. Until a real key is
+/// wired through CI, the honest answer is `false`.
+fn updater_pubkey_is_real(conf: &serde_json::Value) -> bool {
+    use base64::Engine as _;
+    let Some(pubkey) = conf
+        .pointer("/plugins/updater/pubkey")
+        .and_then(|k| k.as_str())
+    else {
+        return false;
+    };
+    if pubkey.trim().is_empty() {
+        return false;
+    }
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(pubkey) else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&decoded).to_ascii_lowercase();
+    !text.contains("placeholder") && !text.contains("dev only")
 }

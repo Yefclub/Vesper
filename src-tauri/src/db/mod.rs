@@ -32,6 +32,11 @@ impl Database {
 
     fn migrate(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // SQLite defaults foreign_keys to OFF, per connection. Without this the
+        // ON DELETE CASCADE declared below never fires and the constraint is
+        // decorative — a deleted meeting would leave its rows behind.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| e.to_string())?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS meetings (
@@ -404,5 +409,16 @@ mod tests {
         db.save_settings(&settings).unwrap();
         let s2 = db.load_settings().unwrap();
         assert_eq!(s2.openrouter_api_key.as_deref(), Some("sk-test"));
+    }
+
+    #[test]
+    fn foreign_keys_are_enforced() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let on: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(on, 1, "cascade deletes are decorative without this pragma");
     }
 }

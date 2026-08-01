@@ -133,8 +133,11 @@ impl AppSettings {
     pub fn public_view(&self) -> AppSettings {
         let mut v = self.clone();
         if let Some(k) = &self.openrouter_api_key {
-            if k.len() > 8 {
-                v.openrouter_api_key = Some(format!("{}…", &k[..4]));
+            // Slice by chars, not bytes: `&k[..4]` panics when byte 4 lands inside a
+            // multi-byte char, and this runs on the boot path via `get_settings`.
+            if k.chars().count() > 8 {
+                let head: String = k.chars().take(4).collect();
+                v.openrouter_api_key = Some(format!("{head}…"));
             } else if !k.is_empty() {
                 v.openrouter_api_key = Some("****".into());
             }
@@ -179,6 +182,18 @@ mod tests {
         s.openrouter_api_key = Some("sk-abcdefghij".into());
         let p = s.public_view();
         assert_ne!(p.openrouter_api_key.as_deref(), Some("sk-abcdefghij"));
+    }
+
+    #[test]
+    fn public_view_survives_multibyte_key() {
+        // Byte 4 falls inside a char here — slicing by byte would panic on the
+        // boot path, leaving the app stuck on the loading screen.
+        let mut s = AppSettings::default();
+        s.openrouter_api_key = Some("sk-ção-chave-secreta".into());
+        let p = s.public_view();
+        let redacted = p.openrouter_api_key.unwrap();
+        assert!(redacted.ends_with('…'));
+        assert!(!redacted.contains("secreta"));
     }
 
     #[test]
