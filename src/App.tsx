@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import {
   FileAudio,
   MessageSquare,
@@ -29,6 +29,7 @@ import {
   StartGate,
 } from "./lib/api";
 import { I18nProvider, useI18n } from "./lib/i18n";
+import { fadeRise } from "./lib/motion";
 import { LevelMeter } from "./components/LevelMeter";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -64,12 +65,16 @@ export default function App() {
   }
 
   return (
-    <I18nProvider initialLocale={bootLocale}>
-      <AppShell
-        initialSettings={settings}
-        onSettingsChange={setSettings}
-      />
-    </I18nProvider>
+    // reducedMotion="user" honours the OS setting for everyone below this point,
+    // so no individual animation has to remember to check it.
+    <MotionConfig reducedMotion="user">
+      <I18nProvider initialLocale={bootLocale}>
+        <AppShell
+          initialSettings={settings}
+          onSettingsChange={setSettings}
+        />
+      </I18nProvider>
+    </MotionConfig>
   );
 }
 
@@ -538,9 +543,7 @@ function AppShell({
                   {tab === "transcript" && (
                     <motion.div
                       key="transcript"
-                      initial={{ opacity: 0, y: 6 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0 }}
+                      {...fadeRise}
                       className="mx-auto flex max-w-3xl flex-col gap-3"
                       data-testid="transcript-panel"
                     >
@@ -579,8 +582,7 @@ function AppShell({
                   {tab === "summary" && (
                     <motion.div
                       key="summary"
-                      initial={{ opacity: 0, y: 6 }}
-                      animate={{ opacity: 1, y: 0 }}
+                      {...fadeRise}
                       className="mx-auto max-w-3xl space-y-6"
                       data-testid="summary-panel"
                     >
@@ -593,8 +595,7 @@ function AppShell({
                   {tab === "chat" && (
                     <motion.div
                       key="chat"
-                      initial={{ opacity: 0, y: 6 }}
-                      animate={{ opacity: 1, y: 0 }}
+                      {...fadeRise}
                       className="mx-auto flex h-full max-w-3xl flex-col"
                       data-testid="chat-panel"
                     >

@@ -1,4 +1,5 @@
-import { FileUp, Settings, Trash2 } from "lucide-react";
+import { FileUp, Settings } from "lucide-react";
+import { Trash2Icon } from "@animateicons/react/lucide";
 import { MeetingRecord, SearchHit } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 
@@ -107,7 +108,7 @@ export function Sidebar({
                 className="mr-2 mt-2 rounded p-1 text-muted opacity-0 hover:text-danger group-hover:opacity-100"
                 title="Delete"
               >
-                <Trash2 size={14} />
+                <Trash2Icon size={14} />
               </button>
             </div>
           ))

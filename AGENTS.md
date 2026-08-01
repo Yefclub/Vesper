@@ -86,6 +86,7 @@ O produto promete privacidade. Regressão aqui é quebra de promessa, não bug d
 - **Segredo nunca** em código, commit, log, mensagem de erro, corpo de PR ou output do agente. Chave de API do usuário não é exceção: não vai para o banco em texto puro, não aparece em log, não é ecoada em erro.
 - **Áudio e transcrição não saem da máquina** a não ser que o usuário tenha escolhido explicitamente um provedor de nuvem.
 - Dependência nova: conferir se já existe algo equivalente no projeto antes de adicionar. Toda dependência nova entra no bundle desktop do usuário.
+- `@animateicons/react` custa **+527 kB fixos** no bundle e não faz tree-shaking: os ícones são `forwardRef(...)` no topo do módulo sem anotação `/*#__PURE__*/`, então o Rollup não descarta nenhum, mesmo com `sideEffects: false` declarado. Importar um ícone traz os 293. Custo aceito por ser app desktop — o preço é parse no startup, não download por visita. Não usar isso como precedente para lib de web.
 
 ## Dados e migrations
 
