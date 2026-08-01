@@ -831,7 +831,7 @@ pub fn list_models_cmd() -> Vec<ModelInfo> {
 #[tauri::command]
 pub async fn download_model_cmd(
     app: AppHandle,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     model_id: String,
 ) -> Result<String, String> {
     // `try_lock`, not `lock().await`: a queued second download is a click the user
