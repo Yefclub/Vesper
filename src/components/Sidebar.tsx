@@ -20,10 +20,19 @@ interface Props {
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]";
 
+/** Local midnight for a timestamp, so comparisons are by calendar day. */
+function startOfDay(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
 /** Buckets the list by recency. Forty rows all named after their own date is a
- *  wall of text; the headings give the eye somewhere to stop. */
+ *  wall of text; the headings give the eye somewhere to stop.
+ *
+ *  Counted in calendar days, not elapsed hours: "Today" is a date, so a meeting
+ *  from 23:00 yesterday belongs under yesterday even though it is nine hours old.
+ */
 function groupByAge(meetings: MeetingRecord[], t: (k: string) => string) {
-  const now = Date.now();
+  const today = startOfDay(new Date());
   const day = 24 * 60 * 60 * 1000;
   const groups = [
     { key: "today", label: t("sidebar.today"), items: [] as MeetingRecord[] },
@@ -31,9 +40,11 @@ function groupByAge(meetings: MeetingRecord[], t: (k: string) => string) {
     { key: "earlier", label: t("sidebar.earlier"), items: [] as MeetingRecord[] },
   ];
   for (const m of meetings) {
-    const created = new Date(m.created_at).getTime();
-    const age = Number.isNaN(created) ? Number.MAX_SAFE_INTEGER : now - created;
-    groups[age < day ? 0 : age < 7 * day ? 1 : 2].items.push(m);
+    const created = new Date(m.created_at);
+    const daysAgo = Number.isNaN(created.getTime())
+      ? Number.MAX_SAFE_INTEGER
+      : Math.round((today - startOfDay(created)) / day);
+    groups[daysAgo <= 0 ? 0 : daysAgo < 7 ? 1 : 2].items.push(m);
   }
   return groups.filter((g) => g.items.length > 0);
 }
