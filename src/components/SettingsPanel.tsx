@@ -37,6 +37,18 @@ export function SettingsPanel({
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [msgKey, setMsgKey] = useState<string | null>(null);
+
+  // One status line, two sources. Setting either has to clear the other, or a
+  // leftover "Saved" outlives its moment and hides the download progress and
+  // errors that come after it.
+  const showText = (text: string | null) => {
+    setMsgKey(null);
+    setMsg(text);
+  };
+  const showKey = (key: string | null) => {
+    setMsg(null);
+    setMsgKey(key);
+  };
   const [tab, setTab] = useState<"local" | "cloud" | "devices" | "lang">("local");
 
   useEffect(() => {
@@ -64,16 +76,16 @@ export function SettingsPanel({
       setLocale(draft.ui_locale);
       // Keyed, not resolved: saving a language change means the catalog in t is
       // still the previous one at this point.
-      setMsgKey("settings.saved");
+      showKey("settings.saved");
     } catch (e) {
-      setMsg(String(e));
+      showText(String(e));
     } finally {
       setSaving(false);
     }
   }
 
   async function download(id: string) {
-    setMsg(`Downloading ${id}…`);
+    showText(`Downloading ${id}…`);
     try {
       const un = await listen<{
         model_id: string;
@@ -87,7 +99,7 @@ export function SettingsPanel({
           total > 0
             ? Math.min(100, Math.round((e.payload.downloaded_bytes / total) * 100))
             : 0;
-        setMsg(`${id}: ${e.payload.phase} ${pct}%`);
+        showText(`${id}: ${e.payload.phase} ${pct}%`);
       });
       try {
         await api.downloadModel(id);
@@ -97,9 +109,9 @@ export function SettingsPanel({
         un();
       }
       await onRefreshModels();
-      setMsg(`${id} ready`);
+      showText(`${id} ready`);
     } catch (e) {
-      setMsg(String(e));
+      showText(String(e));
     }
   }
 
