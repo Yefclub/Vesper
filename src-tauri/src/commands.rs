@@ -86,9 +86,13 @@ fn load_or_migrate_api_key(db: &Database) -> (Option<String>, bool) {
             }
         },
         Ok(None) => (crate::secrets::openrouter_key(), true),
+        // We could not find out whether a legacy key is sitting in the row, so we
+        // cannot claim the keychain is holding it. Saying "not migrated" costs one
+        // redundant keychain write later; saying the opposite would let the next
+        // save strip a row we never managed to read.
         Err(e) => {
             tracing::warn!("could not read stored settings: {e}");
-            (crate::secrets::openrouter_key(), true)
+            (crate::secrets::openrouter_key(), false)
         }
     }
 }
