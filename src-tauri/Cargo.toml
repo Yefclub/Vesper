@@ -40,7 +40,9 @@ whisper-rs = "0.16"
 # Local LLM (llama.cpp) — compat-only to ease Windows MSVC builds
 llama_cpp = { version = "0.3", default-features = false, features = ["compat"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "blocking", "stream"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+# `net` is for the loopback server in the resume test; reqwest already pulls it in
+# transitively, so it costs nothing in the bundle.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
 futures-util = "0.3"
 parking_lot = "0.12"
 base64 = "0.22"
