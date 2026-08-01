@@ -94,14 +94,7 @@ git push --force-with-lease --atomic origin <bottom> <top>
 `git worktree remove` fails with `Permission denied` if your shell sits inside the worktree. `cd`
 out first, then `git worktree prune` and confirm with `git worktree list`.
 
-## Useful
-
-```bash
-gh stack view       # tree of the current stack
-gh stack switch     # move between layers
-gh stack sync       # reconcile local with remote after a merge
-gh stack modify     # interactively restructure (interactive — avoid in automation)
-```
+## Layer discipline
 
 A change that belongs to a lower layer must be committed there and propagated up. Never patch it at
-the top of the stack.
+the top of the stack. `gh stack modify` restructures a stack but is interactive — avoid in automation.
