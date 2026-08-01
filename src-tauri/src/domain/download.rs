@@ -144,8 +144,9 @@ pub fn plan_resume(
     }
 }
 
-/// `bytes 276485400-491400031/491400032` → `491400032`. `*/N` and a missing tail
-/// both fall through to `None`.
+/// `bytes 276485400-491400031/491400032` → `491400032`, and `bytes */491400032` the
+/// same way — the 416 branch depends on that second form. A `*` tail or a missing
+/// header falls through to `None`.
 fn total_from_content_range(header: &str) -> Option<u64> {
     header.rsplit('/').next()?.trim().parse().ok()
 }
