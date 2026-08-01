@@ -59,7 +59,7 @@ export default function App() {
   if (!ready || !settings) {
     return (
       <div className="flex h-full items-center justify-center bg-background text-muted">
-        Loading Vesper…
+        Vesper
       </div>
     );
   }
@@ -122,9 +122,9 @@ function AppShell({
     try {
       setGate(await api.canRecord());
     } catch {
-      setGate({ allowed: false, reason: "Gate unavailable" });
+      setGate({ allowed: false, reason: t("gate.unavailable") });
     }
-  }, []);
+  }, [t]);
 
   const refreshMeetings = useCallback(async () => {
     try {
@@ -483,7 +483,7 @@ function AppShell({
           <div className="border-b border-danger/30 bg-danger/10 px-6 py-2 text-sm text-danger">
             {error}
             <button className="ml-3 underline" onClick={() => setError(null)}>
-              dismiss
+              {t("action.dismiss")}
             </button>
           </div>
         )}
@@ -541,7 +541,7 @@ function AppShell({
                     onClick={() => handleSummarize("general")}
                     className="flex items-center gap-1 rounded-lg bg-surface-3 px-3 py-1.5 text-xs hover:bg-border"
                   >
-                    <Sparkles size={14} /> Summarize
+                    <Sparkles size={14} /> {t("action.summarize")}
                   </button>
                   <button
                     onClick={() => handleExport("md")}
@@ -568,7 +568,7 @@ function AppShell({
                     }
                     className="flex items-center gap-1 rounded-lg bg-surface-3 px-3 py-1.5 text-xs hover:bg-border"
                   >
-                    <FileAudio size={14} /> Retranscribe
+                    <FileAudio size={14} /> {t("action.retranscribe")}
                   </button>
                 </div>
               </div>
@@ -645,9 +645,9 @@ function AppShell({
                       className="mx-auto max-w-3xl space-y-6"
                       data-testid="summary-panel"
                     >
-                      <Section title="Summary" body={selected.summary || "—"} />
-                      <Section title="Key points" body={selected.key_points || "—"} />
-                      <Section title="Action items" body={selected.action_items || "—"} />
+                      <Section title={t("section.summary")} body={selected.summary || "—"} />
+                      <Section title={t("section.key_points")} body={selected.key_points || "—"} />
+                      <Section title={t("section.action_items")} body={selected.action_items || "—"} />
                     </motion.div>
                   )}
 
@@ -677,7 +677,7 @@ function AppShell({
                           value={question}
                           onChange={(e) => setQuestion(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && handleChat()}
-                          placeholder="…"
+                          placeholder={t("chat.placeholder")}
                           className="flex-1 rounded-xl border border-border bg-surface-2 px-4 py-2.5 text-sm outline-none focus:border-accent"
                         />
                         <button
@@ -685,7 +685,7 @@ function AppShell({
                           disabled={busy}
                           className="flex items-center gap-1 rounded-xl bg-accent px-4 py-2 text-sm font-medium text-black disabled:opacity-50"
                         >
-                          <MessageSquare size={16} /> Send
+                          <MessageSquare size={16} /> {t("action.send")}
                         </button>
                       </div>
                     </motion.div>

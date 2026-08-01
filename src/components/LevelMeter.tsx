@@ -1,14 +1,16 @@
 import { ChannelLevels } from "../lib/api";
+import { useI18n } from "../lib/i18n";
 
 export function LevelMeter({ levels }: { levels: ChannelLevels }) {
+  const { t } = useI18n();
   return (
     <div
       className="flex items-end gap-2"
       data-testid="level-meter"
-      title="Me / Others levels"
+      aria-label={`${t("level.me")} / ${t("level.others")}`}
     >
-      <Bar label="Me" value={levels.me_rms} color="bg-me" />
-      <Bar label="Others" value={levels.others_rms} color="bg-others" />
+      <Bar label={t("level.me")} value={levels.me_rms} color="bg-me" />
+      <Bar label={t("level.others")} value={levels.others_rms} color="bg-others" />
     </div>
   );
 }

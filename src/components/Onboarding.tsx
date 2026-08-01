@@ -322,7 +322,7 @@ export function Onboarding({ settings, onDone }: Props) {
                   }))
                 }
               >
-                {mics.length === 0 && <option value="">Default mic</option>}
+                {mics.length === 0 && <option value="">{t("onboarding.default_mic")}</option>}
                 {mics.map((d) => (
                   <option key={d.id} value={d.id}>
                     {d.name}
@@ -347,7 +347,7 @@ export function Onboarding({ settings, onDone }: Props) {
                 }
               >
                 {systems.length === 0 && (
-                  <option value="">Default system audio</option>
+                  <option value="">{t("onboarding.default_system")}</option>
                 )}
                 {systems.map((d) => (
                   <option key={d.id} value={d.id}>

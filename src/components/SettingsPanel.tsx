@@ -61,7 +61,7 @@ export function SettingsPanel({
     try {
       await onSave(draft);
       setLocale(draft.ui_locale);
-      setMsg("OK");
+      setMsg(t("settings.saved"));
     } catch (e) {
       setMsg(String(e));
     } finally {
@@ -196,7 +196,7 @@ export function SettingsPanel({
                     <div>
                       <div className="text-sm">{m.label}</div>
                       <div className="text-[11px] text-muted">
-                        {m.ready ? "Ready" : "Not downloaded"}
+                        {m.ready ? t("model.ready") : t("model.not_downloaded")}
                       </div>
                     </div>
                     {!m.ready && (
