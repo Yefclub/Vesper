@@ -10,7 +10,6 @@ import {
   Mic,
   Pause,
   Play,
-  Search,
   Settings,
   Square,
   Sparkles,
@@ -28,6 +27,7 @@ import {
   SearchHit,
   StartGate,
 } from "./lib/api";
+import { SearchIcon } from "@animateicons/react/lucide";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise } from "./lib/motion";
 import { LevelMeter } from "./components/LevelMeter";
@@ -682,7 +682,7 @@ function Empty({ title, body }: { title: string; body: string }) {
   return (
     <div className="mx-auto max-w-md text-center">
       <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-surface-3 text-accent">
-        <Search size={22} />
+        <SearchIcon size={22} />
       </div>
       <h2 className="text-lg font-medium">{title}</h2>
       <p className="mt-2 text-sm text-muted">{body}</p>

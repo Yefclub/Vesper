@@ -87,6 +87,7 @@ O produto promete privacidade. Regressão aqui é quebra de promessa, não bug d
 - **Áudio e transcrição não saem da máquina** a não ser que o usuário tenha escolhido explicitamente um provedor de nuvem.
 - Dependência nova: conferir se já existe algo equivalente no projeto antes de adicionar. Toda dependência nova entra no bundle desktop do usuário.
 - `@animateicons/react` custa **+527 kB fixos** no bundle e não faz tree-shaking: os ícones são `forwardRef(...)` no topo do módulo sem anotação `/*#__PURE__*/`, então o Rollup não descarta nenhum, mesmo com `sideEffects: false` declarado. Importar um ícone traz os 293. Custo aceito por ser app desktop — o preço é parse no startup, não download por visita. Não usar isso como precedente para lib de web.
+- **Ícone animado não vai dentro de `<button>`**: ele renderiza `<div><svg/></div>`, e `button` só aceita *phrasing content* — `div` é flow content, o que torna o HTML inválido. Dentro de botão, usar `lucide-react`, que renderiza `<svg>` direto. O animado fica em contêiner de bloco: empty state, cabeçalho de card, estado vazio de lista.
 
 ## Dados e migrations
 
