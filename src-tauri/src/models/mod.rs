@@ -287,7 +287,7 @@ where
 
     let tmp = dest.with_extension("part");
     let mut pacer = ProgressPacer::new();
-    let downloaded = fetch_to_file(
+    let mut transfer = fetch_to_file(
         &client,
         model_id,
         url,
@@ -297,22 +297,34 @@ where
         &mut on_progress,
     )
     .await?;
-    let total = Some(downloaded);
+    let mut actual = verify_part(model_id, &tmp, &transfer, &mut on_progress).await?;
 
-    // Verify what came off the network, before anything reads or extracts it.
-    on_progress(DownloadProgress::phase(
-        model_id,
-        "verifying",
-        downloaded,
-        total,
-        false,
-    ));
-    // Hashing a gigabyte takes seconds; on a runtime worker that blocks every other
-    // task on the executor, including the event pump feeding the UI.
-    let hashed = tmp.clone();
-    let actual = tokio::task::spawn_blocking(move || sha256_file(&hashed))
-        .await
-        .map_err(|e| e.to_string())??;
+    // A `.part` from a build that predates the ETag sidecar was resumed with nothing
+    // guarding the range, so a mismatch here is far more likely to be two objects
+    // spliced together than an artifact that changed under a pinned URL. Taking the
+    // whole thing once costs what the old code charged for *every* dropped connection,
+    // and it is the difference between a slow success and telling the user their
+    // download is broken. Only ever once: the second pass starts from zero, so if it
+    // still mismatches the bytes on the wire genuinely are not what the catalog says.
+    if !actual.eq_ignore_ascii_case(&info.sha256) && transfer.unvalidated_resume {
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(part_etag_path(&tmp));
+        let mut pacer = ProgressPacer::new();
+        transfer = fetch_to_file(
+            &client,
+            model_id,
+            url,
+            &tmp,
+            info.size_hint_bytes,
+            &mut pacer,
+            &mut on_progress,
+        )
+        .await?;
+        actual = verify_part(model_id, &tmp, &transfer, &mut on_progress).await?;
+    }
+
+    let downloaded = transfer.bytes;
+    let total = Some(downloaded);
     if !actual.eq_ignore_ascii_case(&info.sha256) {
         let _ = std::fs::remove_file(&tmp);
         let _ = std::fs::remove_file(part_etag_path(&tmp));
@@ -406,6 +418,37 @@ async fn wait_before_retry(consecutive_failures: u32, reason: String) -> Result<
     }
 }
 
+/// Announce the verifying phase and hash the `.part`.
+///
+/// Hashing a gigabyte takes seconds; on a runtime worker that blocks every other task
+/// on the executor, including the event pump feeding the UI.
+async fn verify_part(
+    model_id: &str,
+    tmp: &Path,
+    transfer: &Transfer,
+    on_progress: &mut (dyn FnMut(DownloadProgress) + Send),
+) -> Result<String, String> {
+    on_progress(DownloadProgress::phase(
+        model_id,
+        "verifying",
+        transfer.bytes,
+        Some(transfer.bytes),
+        false,
+    ));
+    let hashed = tmp.to_path_buf();
+    tokio::task::spawn_blocking(move || sha256_file(&hashed))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The outcome of a completed transfer.
+struct Transfer {
+    bytes: u64,
+    /// This run appended to a `.part` the server had no validator for, so nothing
+    /// but the final checksum stands between spliced bytes and the model loader.
+    unvalidated_resume: bool,
+}
+
 /// Stream `url` into `tmp`, resuming from whatever is already there and retrying a
 /// dropped connection until the budget runs out.
 ///
@@ -421,19 +464,22 @@ async fn fetch_to_file(
     size_hint: Option<u64>,
     pacer: &mut ProgressPacer,
     on_progress: &mut (dyn FnMut(DownloadProgress) + Send),
-) -> Result<u64, String> {
+) -> Result<Transfer, String> {
     let etag_path = part_etag_path(tmp);
     let mut consecutive_failures = 0u32;
     let mut attempt = 1u32;
+    let mut unvalidated_resume = false;
 
     loop {
         let part_len = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
         let mut request = client.get(url);
+        let mut validated = false;
         if part_len > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={part_len}-"));
             if let Ok(etag) = std::fs::read_to_string(&etag_path) {
                 if !etag.trim().is_empty() {
                     request = request.header(reqwest::header::IF_RANGE, etag.trim());
+                    validated = true;
                 }
             }
         }
@@ -460,14 +506,31 @@ async fn fetch_to_file(
             response.content_length(),
             content_range.as_deref(),
         ) {
-            ResumeAction::Append { from, total } => (
-                std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(tmp)
-                    .map_err(|e| e.to_string())?,
-                from,
-                total.or(size_hint),
-            ),
+            ResumeAction::Append { from, total } => {
+                // A `.part` left by a build that predates the sidecar has no ETag, so
+                // the range went out unguarded and the server had nothing to check it
+                // against. Appending anyway is the right trade — these URLs are pinned
+                // and the catalog checksum is the backstop — but the caller has to know,
+                // because a mismatch then means spliced bytes, not a changed artifact,
+                // and the answer is to take the whole object rather than to give up.
+                unvalidated_resume |= !validated;
+                (
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(tmp)
+                        .map_err(|e| e.to_string())?,
+                    from,
+                    total.or(size_hint),
+                )
+            }
+            // Every byte is already there. No frame is emitted: the caller's next act
+            // is the "verifying" phase, which is exactly what happens next.
+            ResumeAction::AlreadyComplete { total } => {
+                return Ok(Transfer {
+                    bytes: total,
+                    unvalidated_resume: unvalidated_resume || !validated,
+                });
+            }
             ResumeAction::Restart { total } => {
                 store_part_etag(&etag_path, &response);
                 (
@@ -544,7 +607,10 @@ async fn fetch_to_file(
         drop(writer);
 
         let Some(reason) = transport_error else {
-            return Ok(downloaded);
+            return Ok(Transfer {
+                bytes: downloaded,
+                unvalidated_resume,
+            });
         };
 
         // The `.part` file is never removed on this path. Those bytes are the resume
@@ -784,7 +850,11 @@ mod tests {
         .unwrap();
         let heads = server.await.unwrap();
 
-        assert_eq!(downloaded, TOTAL as u64);
+        assert_eq!(downloaded.bytes, TOTAL as u64);
+        assert!(
+            !downloaded.unvalidated_resume,
+            "the server sent an ETag, so the resume was guarded by If-Range"
+        );
         assert_eq!(
             std::fs::read(&tmp).unwrap(),
             body,

@@ -93,8 +93,17 @@ impl Default for ProgressPacer {
 /// What to do with the `.part` file already on disk, given the server's answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeAction {
-    Append { from: u64, total: Option<u64> },
-    Restart { total: Option<u64> },
+    Append {
+        from: u64,
+        total: Option<u64>,
+    },
+    Restart {
+        total: Option<u64>,
+    },
+    /// The `.part` already holds the whole object. Verify it; do not fetch again.
+    AlreadyComplete {
+        total: u64,
+    },
     DiscardAndRestart,
     Fail(u16),
 }
@@ -122,8 +131,15 @@ pub fn plan_resume(
         200 => ResumeAction::Restart {
             total: content_length,
         },
-        // The `.part` is at or past the end of the remote object.
-        416 => ResumeAction::DiscardAndRestart,
+        // The `.part` is at or past the end of the remote object. A 416 answers
+        // `Content-Range: bytes */N`, and `part_len == N` is the ordinary shape of
+        // a run that transferred every byte and then died before verifying or
+        // renaming. Throwing that away costs the user the entire download to
+        // rediscover, by checksum, what the header already said.
+        416 => match content_range.and_then(total_from_content_range) {
+            Some(total) if total == part_len => ResumeAction::AlreadyComplete { total },
+            _ => ResumeAction::DiscardAndRestart,
+        },
         other => ResumeAction::Fail(other),
     }
 }
@@ -296,6 +312,23 @@ mod tests {
         assert_eq!(
             plan_resume(600_000_000, 416, None, None),
             ResumeAction::DiscardAndRestart
+        );
+        // Past the end for real: the header says the object is smaller than what is
+        // on disk, so those bytes cannot be a prefix of it.
+        assert_eq!(
+            plan_resume(600_000_000, 416, None, Some("bytes */491400032")),
+            ResumeAction::DiscardAndRestart
+        );
+    }
+
+    #[test]
+    fn a_part_file_that_already_holds_the_whole_object_is_kept() {
+        // The shape of a run that transferred every byte and then died before it could
+        // verify or rename. Discarding it charges the user a second full download to
+        // rediscover, by checksum, what the 416 already said.
+        assert_eq!(
+            plan_resume(491_400_032, 416, None, Some("bytes */491400032")),
+            ResumeAction::AlreadyComplete { total: 491_400_032 }
         );
     }
 
