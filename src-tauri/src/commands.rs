@@ -475,7 +475,6 @@ pub async fn stop_recording(
     // the transcript with the last chunk gone.
     let _flight = state.stt_flight.lock().await;
 
-    // Final dual-channel STT pass on saved stereo WAV (L=Me, R=Others)
     let settings = state.settings.lock().clone();
     let mut live = state
         .live
@@ -483,7 +482,10 @@ pub async fn stop_recording(
         .get(&id)
         .cloned()
         .unwrap_or_default();
+
     if live.segments().is_empty() {
+        // Nothing was transcribed live — cloud STT down, or a recording short
+        // enough that no poll ever ran. Transcribe the whole saved WAV.
         if let Ok((mic, sys, sr)) = read_dual_wav(&path) {
             if let Ok(chunks) = state
                 .stt
@@ -491,10 +493,29 @@ pub async fn stop_recording(
                 .await
             {
                 apply_stt_chunks(&mut live, &chunks);
-                state.live.lock().insert(id.clone(), live.clone());
+            }
+        }
+    } else {
+        // Live transcription only ever consumed what the last poll drained, so
+        // everything spoken between that drain and the stop is still sitting in
+        // the buffer. Skipping it — which is what happened whenever any live
+        // segment existed — silently dropped the end of every meeting.
+        let (mic, sys, sr) = state.recorder.drain_chunks();
+        if !mic.is_empty() || !sys.is_empty() {
+            let tail_ms = duration.saturating_sub(
+                (mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64,
+            );
+            match state
+                .stt
+                .transcribe_dual(&settings, &mic, &sys, sr, tail_ms)
+                .await
+            {
+                Ok(chunks) => apply_stt_chunks(&mut live, &chunks),
+                Err(e) => tracing::warn!("final chunk could not be transcribed: {e}"),
             }
         }
     }
+    state.live.lock().insert(id.clone(), live.clone());
     state.db.save_transcript(&id, &live)?;
     meeting.transcript_text = live.plain_text();
     meeting.status = meeting
