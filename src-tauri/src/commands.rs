@@ -16,7 +16,8 @@ use crate::llm::service::LlmService;
 use crate::models::{download_model_with_progress, list_models, DownloadProgress, ModelInfo};
 use crate::paths::{ensure_app_dirs, recordings_dir};
 use crate::stt::catalog::{
-    default_stt_models, fetch_openrouter_stt_models, OrModel,
+    default_llm_models, default_stt_models, fetch_openrouter_llm_models,
+    fetch_openrouter_stt_models, OrModel,
 };
 use crate::stt::local::LocalSttEngine;
 use crate::stt::pipeline::{apply_stt_chunks, SttService};
@@ -217,6 +218,22 @@ pub async fn list_openrouter_stt_models(
         return Ok(default_stt_models());
     }
     fetch_openrouter_stt_models(&key).await
+}
+
+#[tauri::command]
+pub async fn list_openrouter_llm_models(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<OrModel>, String> {
+    let key = state
+        .settings
+        .lock()
+        .openrouter_api_key
+        .clone()
+        .unwrap_or_default();
+    if key.is_empty() || key.contains('…') {
+        return Ok(default_llm_models());
+    }
+    fetch_openrouter_llm_models(&key).await
 }
 
 #[tauri::command]

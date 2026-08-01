@@ -76,6 +76,7 @@ pub fn run() {
                         if let Some(w) = app.get_webview_window("main") {
                             let _ = w.show();
                             let _ = w.set_focus();
+                            let _ = w.maximize();
                         }
                     }
                     "toggle_record" => {
@@ -94,10 +95,16 @@ pub fn run() {
                         if let Some(w) = app.get_webview_window("main") {
                             let _ = w.show();
                             let _ = w.set_focus();
+                            let _ = w.maximize();
                         }
                     }
                 })
                 .build(app)?;
+
+            // Always open maximized (tela cheia de trabalho)
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.maximize();
+            }
 
             Ok(())
         })
@@ -119,6 +126,7 @@ pub fn run() {
             commands::translate_key,
             commands::get_capabilities,
             commands::list_openrouter_stt_models,
+            commands::list_openrouter_llm_models,
             commands::complete_onboarding,
             commands::start_recording,
             commands::pause_recording,

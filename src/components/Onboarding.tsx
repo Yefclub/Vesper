@@ -23,6 +23,7 @@ export function Onboarding({ settings, onDone }: Props) {
   const [caps, setCaps] = useState<CapabilityReport | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [sttOr, setSttOr] = useState<OrModel[]>([]);
+  const [llmOr, setLlmOr] = useState<OrModel[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -60,10 +61,20 @@ export function Onboarding({ settings, onDone }: Props) {
   }, []);
 
   useEffect(() => {
-    if (draft.stt_provider === "openrouter" && draft.openrouter_api_key) {
-      api.openrouterSttModels().then(setSttOr).catch(() => setSttOr([]));
+    if (draft.stt_provider === "openrouter" || draft.llm_provider === "openrouter") {
+      // Always try list (defaults without key; live list with key)
+      if (draft.stt_provider === "openrouter") {
+        api.openrouterSttModels().then(setSttOr).catch(() => setSttOr([]));
+      }
+      if (draft.llm_provider === "openrouter") {
+        api.openrouterLlmModels().then(setLlmOr).catch(() => setLlmOr([]));
+      }
     }
-  }, [draft.stt_provider, draft.openrouter_api_key]);
+  }, [
+    draft.stt_provider,
+    draft.llm_provider,
+    draft.openrouter_api_key,
+  ]);
 
   const mics = devices.filter((d) => d.kind === "mic");
   const systems = devices.filter((d) => d.kind === "system");
@@ -128,15 +139,6 @@ export function Onboarding({ settings, onDone }: Props) {
                 </button>
               ))}
             </div>
-            {caps && (
-              <p className="text-xs text-muted">
-                {t("cap.recommended")}: {caps.recommended_backend.toUpperCase()} ·{" "}
-                {caps.recommended_stt_model}
-                {caps.cuda_available
-                  ? ` · CUDA (${caps.cuda_device_name})`
-                  : " · CPU"}
-              </p>
-            )}
           </section>
         )}
 
@@ -247,21 +249,57 @@ export function Onboarding({ settings, onDone }: Props) {
               }
             />
             {draft.llm_provider === "openrouter" && (
-              <label className="block text-sm">
-                <span className="mb-1 block text-xs text-muted">
-                  {t("settings.pick_llm_model")}
-                </span>
-                <input
-                  className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
-                  value={draft.openrouter_llm_model}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      openrouter_llm_model: e.target.value,
-                    }))
-                  }
-                />
-              </label>
+              <>
+                {!draft.openrouter_api_key && draft.stt_provider !== "openrouter" && (
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-xs text-muted">
+                      {t("onboarding.api_key")}
+                    </span>
+                    <input
+                      type="password"
+                      className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                      value={draft.openrouter_api_key ?? ""}
+                      onChange={(e) =>
+                        setDraft((d) => ({
+                          ...d,
+                          openrouter_api_key: e.target.value,
+                        }))
+                      }
+                      placeholder="sk-or-…"
+                    />
+                  </label>
+                )}
+                <label className="block text-sm">
+                  <span className="mb-1 block text-xs text-muted">
+                    {t("settings.pick_llm_model")}
+                  </span>
+                  <select
+                    data-testid="or-llm-select"
+                    className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                    value={draft.openrouter_llm_model}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        openrouter_llm_model: e.target.value,
+                      }))
+                    }
+                  >
+                    {(llmOr.length
+                      ? llmOr
+                      : [
+                          {
+                            id: "openai/gpt-4o-mini",
+                            name: "GPT-4o Mini",
+                          },
+                        ]
+                    ).map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name || m.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </>
             )}
           </section>
         )}

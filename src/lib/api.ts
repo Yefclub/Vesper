@@ -138,6 +138,7 @@ export const api = {
     invoke<Record<string, string>>("get_i18n_catalog", { locale }),
   capabilities: () => invoke<CapabilityReport>("get_capabilities"),
   openrouterSttModels: () => invoke<OrModel[]>("list_openrouter_stt_models"),
+  openrouterLlmModels: () => invoke<OrModel[]>("list_openrouter_llm_models"),
   startRecording: (title?: string) => invoke<MeetingRecord>("start_recording", { title }),
   pauseRecording: () => invoke<RecorderStatus>("pause_recording"),
   resumeRecording: () => invoke<RecorderStatus>("resume_recording"),

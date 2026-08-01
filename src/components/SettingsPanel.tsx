@@ -31,6 +31,7 @@ export function SettingsPanel({
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [caps, setCaps] = useState<CapabilityReport | null>(null);
   const [sttOr, setSttOr] = useState<OrModel[]>([]);
+  const [llmOr, setLlmOr] = useState<OrModel[]>([]);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [tab, setTab] = useState<"local" | "cloud" | "devices" | "lang">("local");
@@ -41,10 +42,9 @@ export function SettingsPanel({
   }, []);
 
   useEffect(() => {
-    if (draft.stt_provider === "openrouter") {
-      api.openrouterSttModels().then(setSttOr).catch(() => setSttOr([]));
-    }
-  }, [draft.stt_provider, draft.openrouter_api_key]);
+    api.openrouterSttModels().then(setSttOr).catch(() => setSttOr([]));
+    api.openrouterLlmModels().then(setLlmOr).catch(() => setLlmOr([]));
+  }, [draft.openrouter_api_key, tab]);
 
   async function save() {
     setSaving(true);
@@ -239,13 +239,36 @@ export function SettingsPanel({
                   ))}
                 </select>
               </label>
-              <Field
-                label={t("settings.pick_llm_model")}
-                value={draft.openrouter_llm_model}
-                onChange={(v) =>
-                  setDraft((d) => ({ ...d, openrouter_llm_model: v }))
-                }
-              />
+              <label className="block text-sm">
+                <span className="mb-1 block text-xs text-muted">
+                  {t("settings.pick_llm_model")}
+                </span>
+                <select
+                  data-testid="or-llm-select"
+                  className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+                  value={draft.openrouter_llm_model}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      openrouter_llm_model: e.target.value,
+                    }))
+                  }
+                >
+                  {(llmOr.length
+                    ? llmOr
+                    : [
+                        {
+                          id: draft.openrouter_llm_model,
+                          name: draft.openrouter_llm_model,
+                        },
+                      ]
+                  ).map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name || m.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <FieldSelect
                 label={t("settings.llm_provider")}
                 value={draft.llm_provider}

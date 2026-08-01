@@ -7,6 +7,8 @@ use thiserror::Error;
 pub enum SttProvider {
     #[default]
     Local,
+    /// Frontend and docs use `openrouter` (no underscore).
+    #[serde(rename = "openrouter", alias = "open_router")]
     OpenRouter,
 }
 
@@ -15,6 +17,7 @@ pub enum SttProvider {
 pub enum LlmProvider {
     #[default]
     Local,
+    #[serde(rename = "openrouter", alias = "open_router")]
     OpenRouter,
 }
 
