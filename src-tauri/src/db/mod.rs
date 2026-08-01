@@ -286,8 +286,13 @@ impl Database {
         Ok(search_meetings(&docs, query, limit))
     }
 
+    /// Persists settings **without** the API key — that lives in the OS keychain.
+    /// Stripping it here rather than at the call sites means no future caller can
+    /// reintroduce the plaintext copy by forgetting.
     pub fn save_settings(&self, settings: &AppSettings) -> Result<(), String> {
-        let json = serde_json::to_string(settings).map_err(|e| e.to_string())?;
+        let mut on_disk = settings.clone();
+        on_disk.openrouter_api_key = None;
+        let json = serde_json::to_string(&on_disk).map_err(|e| e.to_string())?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO settings (key, value) VALUES ('app', ?1)
@@ -296,6 +301,54 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// An API key left in the settings row by an older build, if any.
+    ///
+    /// Reading and clearing are separate on purpose: clearing before the keychain
+    /// has accepted the value would destroy the user's key whenever the keychain
+    /// is unavailable.
+    pub fn legacy_api_key(&self) -> Result<Option<String>, String> {
+        let Some(value) = self.raw_settings_json()? else {
+            return Ok(None);
+        };
+        Ok(value
+            .get("openrouter_api_key")
+            .and_then(|k| k.as_str())
+            .map(str::to_string)
+            .filter(|k| !k.trim().is_empty()))
+    }
+
+    /// Drops the plaintext key from the settings row. Safe to call repeatedly.
+    pub fn clear_legacy_api_key(&self) -> Result<(), String> {
+        let Some(mut value) = self.raw_settings_json()? else {
+            return Ok(());
+        };
+        if value.get("openrouter_api_key").map(|k| k.is_null()) == Some(true) {
+            return Ok(());
+        }
+        value["openrouter_api_key"] = serde_json::Value::Null;
+        let cleaned = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE settings SET value=?1 WHERE key='app'",
+            params![cleaned],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn raw_settings_json(&self) -> Result<Option<serde_json::Value>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT value FROM settings WHERE key='app'")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let Some(row) = rows.next().map_err(|e| e.to_string())? else {
+            return Ok(None);
+        };
+        let raw: String = row.get(0).map_err(|e| e.to_string())?;
+        Ok(serde_json::from_str(&raw).ok())
     }
 
     pub fn load_settings(&self) -> Result<AppSettings, String> {
@@ -405,10 +458,66 @@ mod tests {
         let hits = db.search("hello", 5).unwrap();
         assert_eq!(hits.len(), 1);
         let mut settings = AppSettings::default();
-        settings.openrouter_api_key = Some("sk-test".into());
+        settings.language = "pt".into();
         db.save_settings(&settings).unwrap();
         let s2 = db.load_settings().unwrap();
-        assert_eq!(s2.openrouter_api_key.as_deref(), Some("sk-test"));
+        assert_eq!(s2.language, "pt");
+    }
+
+    #[test]
+    fn the_api_key_never_reaches_the_database() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut settings = AppSettings::default();
+        settings.openrouter_api_key = Some("sk-or-must-not-be-written".into());
+        db.save_settings(&settings).unwrap();
+
+        let stored: String = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT value FROM settings WHERE key='app'", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert!(
+            !stored.contains("sk-or-must-not-be-written"),
+            "settings row still carries the key: {stored}"
+        );
+        assert!(db.load_settings().unwrap().openrouter_api_key.is_none());
+    }
+
+    #[test]
+    fn a_key_left_by_an_older_build_is_taken_out_of_the_row() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        // Exactly what an older build wrote: the whole struct, key included.
+        let mut legacy = AppSettings::default();
+        legacy.openrouter_api_key = Some("sk-or-legacy".into());
+        let json = serde_json::to_string(&legacy).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('app', ?1)",
+                params![json],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(db.legacy_api_key().unwrap().as_deref(), Some("sk-or-legacy"));
+
+        // Reading must not destroy it: the keychain write can still fail.
+        assert_eq!(db.legacy_api_key().unwrap().as_deref(), Some("sk-or-legacy"));
+
+        db.clear_legacy_api_key().unwrap();
+        let stored: String = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT value FROM settings WHERE key='app'", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert!(!stored.contains("sk-or-legacy"), "key survived: {stored}");
+
+        // Idempotent: a second start finds nothing left to migrate.
+        assert_eq!(db.legacy_api_key().unwrap(), None);
+        db.clear_legacy_api_key().unwrap();
     }
 
     #[test]

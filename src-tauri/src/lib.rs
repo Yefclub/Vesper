@@ -5,6 +5,7 @@ mod domain;
 mod llm;
 mod models;
 mod paths;
+mod secrets;
 mod stt;
 
 use commands::AppState;

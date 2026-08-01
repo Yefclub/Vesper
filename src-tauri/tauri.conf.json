@@ -35,7 +35,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi", "dmg", "app", "deb", "rpm", "appimage"],
+    "targets": [
+      "nsis",
+      "msi",
+      "dmg",
+      "app",
+      "deb",
+      "rpm",
+      "appimage"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -60,7 +68,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmltYWwgcGxhY2Vob2xkZXIga2V5IGZvciBkZXYgb25seSAtIHJlcGxhY2UgaW4gQ0kK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI5RDdFQTQ1RjE2MDk0MkQKUldRdGxHRHhSZXJYS1lsZnA0VHY5TlMvV2JGd3NRdkgxTkdoK3lHeFVRcmYxOWk5QjJwcERCRUcK",
       "endpoints": [
         "https://github.com/Yefclub/Vesper/releases/latest/download/latest.json"
       ],

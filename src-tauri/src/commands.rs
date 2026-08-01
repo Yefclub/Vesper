@@ -44,7 +44,8 @@ impl AppState {
         ensure_app_dirs()?;
         let data = crate::paths::app_data_dir();
         let db = Database::open(&data)?;
-        let settings = db.load_settings().unwrap_or_default();
+        let mut settings = db.load_settings().unwrap_or_default();
+        settings.openrouter_api_key = load_or_migrate_api_key(&db);
         Ok(Self {
             db,
             recorder: DualChannelRecorder::new(),
@@ -54,6 +55,35 @@ impl AppState {
             stt: SttService::new(),
             llm: LlmService::new(),
         })
+    }
+}
+
+/// Resolves the API key at startup, moving it out of the database on the first
+/// run of a build that stores it in the keychain.
+///
+/// The database row is only cleared once the keychain has taken the value. If the
+/// keychain is unavailable the key stays where it is and the app keeps working —
+/// losing the user's credential to be tidy would be a worse outcome than leaving
+/// it one more session in the old place.
+fn load_or_migrate_api_key(db: &Database) -> Option<String> {
+    match db.legacy_api_key() {
+        Ok(Some(legacy)) => match crate::secrets::set_openrouter_key(Some(&legacy)) {
+            Ok(()) => {
+                if let Err(e) = db.clear_legacy_api_key() {
+                    tracing::warn!("key moved to the keychain but the old copy remains: {e}");
+                }
+                Some(legacy)
+            }
+            Err(e) => {
+                tracing::warn!("keychain unavailable, key stays in the database: {e}");
+                Some(legacy)
+            }
+        },
+        Ok(None) => crate::secrets::openrouter_key(),
+        Err(e) => {
+            tracing::warn!("could not read stored settings: {e}");
+            crate::secrets::openrouter_key()
+        }
     }
 }
 
@@ -71,12 +101,17 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> AppSettings {
     state.settings.lock().public_view()
 }
 
-#[tauri::command]
-pub fn save_settings(
-    state: State<'_, Arc<AppState>>,
+/// The single write path for settings.
+///
+/// Both callers need the same three steps in the same order — restore a redacted
+/// key, put the key in the keychain, then persist everything else — and the
+/// keychain step is easy to forget when it is copied by hand.
+fn persist_settings(
+    state: &AppState,
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    // Preserve full API key if client sent redacted value
+    // The front end only ever sees a redacted key, so a redacted value coming
+    // back means "unchanged", not "set it to these characters".
     {
         let current = state.settings.lock();
         if let Some(k) = &settings.openrouter_api_key {
@@ -86,9 +121,18 @@ pub fn save_settings(
         }
     }
     settings.validate_models().map_err(|e| e.to_string())?;
+    crate::secrets::set_openrouter_key(settings.openrouter_api_key.as_deref())?;
     state.db.save_settings(&settings)?;
     *state.settings.lock() = settings.clone();
-    Ok(settings.public_view())
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn save_settings(
+    state: State<'_, Arc<AppState>>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    Ok(persist_settings(&state, settings)?.public_view())
 }
 
 #[tauri::command]
@@ -241,24 +285,10 @@ pub fn complete_onboarding(
     state: State<'_, Arc<AppState>>,
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    {
-        let current = state.settings.lock();
-        if let Some(k) = &settings.openrouter_api_key {
-            if k.contains('…') || k == "****" {
-                settings.openrouter_api_key = current.openrouter_api_key.clone();
-            }
-        }
-    }
     settings.onboarding_complete = true;
-    settings.validate_models().map_err(|e| e.to_string())?;
-    // If local STT selected, require model ready
-    let gate = can_start_recording(&settings, local_stt_ready(&settings), true);
-    if !gate.allowed && settings.stt_provider == SttProvider::Local {
-        // Allow finishing onboarding but user must still download model before record
-    }
-    state.db.save_settings(&settings)?;
-    *state.settings.lock() = settings.clone();
-    Ok(settings.public_view())
+    // Finishing onboarding is allowed even when the local model is still missing;
+    // `can_record` is what actually blocks the recording later.
+    Ok(persist_settings(&state, settings)?.public_view())
 }
 
 #[tauri::command]
@@ -761,12 +791,13 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_placeholder_is_not_a_configured_key() {
+    fn the_shipped_key_is_a_real_signing_key() {
         let conf: serde_json::Value = serde_json::from_str(TAURI_CONF).unwrap();
         assert!(
-            !updater_pubkey_is_real(&conf),
-            "tauri.conf.json still carries a development placeholder; reporting it as \
-             configured would claim a signature guarantee the build does not have"
+            updater_pubkey_is_real(&conf),
+            "tauri.conf.json no longer carries a usable minisign public key; without one \
+             the updater cannot verify a release, and every install would accept whatever \
+             the endpoint serves"
         );
     }
 
