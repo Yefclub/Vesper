@@ -13,13 +13,41 @@ pub struct Database {
     data_dir: PathBuf,
 }
 
+/// Deletes a meeting's recording, refusing anything outside the app's own
+/// recordings directory.
+///
+/// The containment check runs on canonicalised paths. `Path::starts_with`
+/// compares components without resolving them, so a stored path of
+/// `<recordings>/../../something` satisfies it and the delete would reach outside
+/// — turning a tampered database row into an arbitrary file deletion.
+fn delete_recording(path: &Path) -> Result<(), String> {
+    if !path.is_file() {
+        // Already gone, or never written. Nothing to remove and nothing to report.
+        return Ok(());
+    }
+    let root = crate::paths::recordings_dir();
+    let (Ok(root), Ok(resolved)) = (root.canonicalize(), path.canonicalize()) else {
+        return Err("could not resolve the recording's location".into());
+    };
+    if !resolved.starts_with(&root) {
+        tracing::warn!("refusing to delete a recording stored outside the app directory");
+        return Ok(());
+    }
+    std::fs::remove_file(&resolved)
+        .map_err(|e| format!("the recording could not be deleted, so nothing was removed: {e}"))
+}
+
 /// Turns a user's typed query into an FTS5 MATCH expression.
 ///
 /// Raw input cannot go in: `AND`, `*`, `"` and `:` are operators there, so a
 /// perfectly ordinary search like `budget: Q3` is a syntax error rather than a
-/// search. Each word becomes a quoted phrase — quotes doubled to escape them —
-/// which FTS5 combines with an implicit AND. Returns `None` when nothing
-/// searchable is left.
+/// search. Each word becomes a quoted phrase, with quotes doubled to escape them.
+///
+/// The terms are joined with `OR`, not the implicit `AND`, because that is what
+/// the search this replaces did: a meeting matched when any term appeared, and
+/// the rest only raised its rank. bm25 still sorts documents carrying more of the
+/// terms to the top, so the useful part of `AND` survives without the part that
+/// makes a two-word search find nothing.
 fn fts_match_expression(query: &str) -> Option<String> {
     let terms: Vec<String> = query
         .split_whitespace()
@@ -30,7 +58,7 @@ fn fts_match_expression(query: &str) -> Option<String> {
     if terms.is_empty() {
         return None;
     }
-    Some(terms.join(" "))
+    Some(terms.join(" OR "))
 }
 
 /// Where the API key is safe to leave when settings are written.
@@ -148,8 +176,12 @@ impl Database {
     }
 
     pub fn upsert_meeting(&self, m: &MeetingRecord) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // The row and its index entry move together. Committing the meeting and
+        // then failing to index it leaves search quietly answering with stale
+        // content until something else happens to touch the same meeting.
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
             r#"INSERT INTO meetings (id, title, status, created_at, updated_at, duration_ms, audio_path,
                 transcript_text, summary, action_items, key_points, project)
                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
@@ -175,7 +207,8 @@ impl Database {
             ],
         )
         .map_err(|e| e.to_string())?;
-        Self::index_meeting(&conn, m)?;
+        Self::index_meeting(&tx, m)?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -223,10 +256,16 @@ impl Database {
     }
 
     pub fn delete_meeting(&self, id: &str) -> Result<(), String> {
-        // The recording itself, first. Deleting the rows and leaving the audio on
-        // disk means someone who deleted a private meeting still has it — the one
-        // promise this app cannot break. Read the path before the row goes.
-        let audio = self.get_meeting(id)?.and_then(|m| m.audio_path);
+        // The recording goes first, and its failure aborts the whole delete.
+        //
+        // Removing the rows first would destroy `audio_path`, so a WAV that could
+        // not be deleted — file locked, permissions — would become unreachable by
+        // any later attempt: the user is told the meeting is gone while a private
+        // recording sits on disk with nothing left pointing at it. Failing here
+        // leaves everything intact and the delete repeatable.
+        if let Some(audio) = self.get_meeting(id)?.and_then(|m| m.audio_path) {
+            delete_recording(Path::new(&audio))?;
+        }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM meetings_fts WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
@@ -236,19 +275,6 @@ impl Database {
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM meetings WHERE id=?1", params![id])
             .map_err(|e| e.to_string())?;
-        drop(conn);
-        if let Some(path) = audio {
-            let path = Path::new(&path);
-            // Only ever inside our own recordings directory, so a stored path that
-            // points elsewhere is left alone rather than acted on.
-            if path.starts_with(crate::paths::recordings_dir()) && path.is_file() {
-                if let Err(e) = std::fs::remove_file(path) {
-                    return Err(format!(
-                        "meeting deleted but its recording could not be removed: {e}"
-                    ));
-                }
-            }
-        }
         Ok(())
     }
 
@@ -395,7 +421,7 @@ impl Database {
         Ok(out)
     }
 
-    fn index_meeting(conn: &Connection, m: &MeetingRecord) -> Result<(), String> {
+    fn index_meeting(conn: &rusqlite::Transaction<'_>, m: &MeetingRecord) -> Result<(), String> {
         conn.execute(
             "DELETE FROM meetings_fts WHERE meeting_id=?1",
             params![m.id],
@@ -759,6 +785,59 @@ mod tests {
             key_points: None,
             project: None,
         }
+    }
+
+    #[test]
+    fn a_multi_word_search_still_matches_on_any_term() {
+        // The search this replaced returned a meeting when any term appeared and
+        // used the rest only for ranking. Joining terms with FTS5's implicit AND
+        // would have made this two-word query find nothing.
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut m = sample_meeting("m1", "Budget");
+        m.transcript_text = "the budget was approved".into();
+        db.upsert_meeting(&m).unwrap();
+
+        assert_eq!(db.search("budget Q3", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_meeting_removes_its_recording() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let recordings = crate::paths::recordings_dir();
+        std::fs::create_dir_all(&recordings).unwrap();
+        let wav = recordings.join("delete-me-test.wav");
+        std::fs::write(&wav, vec![0u8; 16]).unwrap();
+
+        let mut m = sample_meeting("m1", "With audio");
+        m.audio_path = Some(wav.display().to_string());
+        db.upsert_meeting(&m).unwrap();
+        db.delete_meeting("m1").unwrap();
+
+        assert!(!wav.exists(), "the recording outlived the meeting");
+        assert!(db.get_meeting("m1").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_recording_outside_the_app_directory_is_left_alone() {
+        // A tampered audio_path must not turn deletion into an arbitrary file
+        // removal. Path::starts_with alone would accept a traversal like this.
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let outsider = dir.path().join("not-ours.wav");
+        std::fs::write(&outsider, b"someone else's file").unwrap();
+        let traversal = crate::paths::recordings_dir()
+            .join("..")
+            .join("..")
+            .join(outsider.file_name().unwrap());
+
+        let mut m = sample_meeting("m1", "Tampered");
+        m.audio_path = Some(traversal.display().to_string());
+        db.upsert_meeting(&m).unwrap();
+        db.delete_meeting("m1").unwrap();
+
+        assert!(outsider.exists(), "delete escaped the recordings directory");
     }
 
     #[test]
