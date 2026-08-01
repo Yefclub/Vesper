@@ -154,8 +154,9 @@ export const api = {
   exportMeeting: (id: string, path: string, format: string) =>
     invoke<string>("export_meeting_cmd", { id, path, format }),
   listModels: () => invoke<ModelInfo[]>("list_models_cmd"),
-  downloadModel: (modelId: string, url?: string) =>
-    invoke<string>("download_model_cmd", { modelId, url }),
+  // No URL parameter: the backend resolves it from its own catalog and verifies
+  // the artifact's checksum before it reaches whisper.cpp / llama.cpp.
+  downloadModel: (modelId: string) => invoke<string>("download_model_cmd", { modelId }),
   updatesConfig: () => invoke<Record<string, unknown>>("check_updates_config"),
 };
 

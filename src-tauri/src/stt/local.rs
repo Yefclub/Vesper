@@ -44,9 +44,11 @@ impl LocalSttEngine {
         bin
     }
 
+    /// Ready means "verified against the catalog digest", not merely "a big file is
+    /// there". whisper.cpp parses this file, so bytes of unknown provenance must not
+    /// reach it just because they predate the checksum work.
     pub fn is_model_ready(&self, model_id: &str) -> bool {
-        let p = self.model_path(model_id);
-        p.is_file() && std::fs::metadata(&p).map(|m| m.len() > 1_000_000).unwrap_or(false)
+        crate::models::artifact_is_verified(&self.model_path(model_id), model_id)
     }
 
     /// Transcribe mono PCM with local Whisper when model weights exist.

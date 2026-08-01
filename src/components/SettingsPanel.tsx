@@ -60,7 +60,7 @@ export function SettingsPanel({
     }
   }
 
-  async function download(id: string, url?: string | null) {
+  async function download(id: string) {
     setMsg(`Downloading ${id}…`);
     try {
       const un = await listen<{
@@ -77,7 +77,7 @@ export function SettingsPanel({
             : 0;
         setMsg(`${id}: ${e.payload.phase} ${pct}%`);
       });
-      await api.downloadModel(id, url ?? undefined);
+      await api.downloadModel(id);
       un();
       await onRefreshModels();
       setMsg(`${id} ready`);
@@ -171,7 +171,7 @@ export function SettingsPanel({
                     {!m.ready && (
                       <button
                         type="button"
-                        onClick={() => download(m.id, m.download_url)}
+                        onClick={() => download(m.id)}
                         className="rounded-lg bg-surface-3 px-2 py-1 text-xs hover:bg-border"
                       >
                         Download

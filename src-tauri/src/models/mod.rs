@@ -15,6 +15,9 @@ pub struct ModelInfo {
     pub path: String,
     pub download_url: Option<String>,
     pub size_hint_bytes: Option<u64>,
+    /// Expected SHA-256 of the artifact served by `download_url`.
+    /// Taken from the Hugging Face LFS oid, which is the file digest.
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +31,10 @@ pub struct DownloadProgress {
 }
 
 /// Catalog of local models with **direct** artifact URLs (not empty placeholders).
+///
+/// This is the only source of download URLs. Nothing reaching the IPC boundary can
+/// point the downloader somewhere else: a model artifact is parsed by whisper.cpp and
+/// llama.cpp, so an attacker-chosen file is an attacker-chosen input to a C++ parser.
 pub fn list_models() -> Vec<ModelInfo> {
     let catalog = [
         (
@@ -36,35 +43,42 @@ pub fn list_models() -> Vec<ModelInfo> {
             "Whisper Tiny (local STT, ggml)",
             // Official ggerganov whisper.cpp release asset (direct ggml binary)
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
-            Some(77_000_000u64),
+            77_691_713u64,
+            "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
         ),
         (
             "whisper-base",
             "stt",
             "Whisper Base (local STT, ggml)",
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-            Some(148_000_000u64),
+            147_951_465u64,
+            "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
         ),
         (
             "qwen2.5-0.5b",
             "llm",
             "Qwen2.5 0.5B Instruct Q4_K_M (local LLM)",
             "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-            Some(400_000_000u64),
+            491_400_032u64,
+            "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
         ),
         (
             "qwen2.5-1.5b",
             "llm",
             "Qwen2.5 1.5B Instruct Q4_K_M (local LLM)",
             "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-            Some(1_000_000_000u64),
+            1_117_320_736u64,
+            "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
         ),
     ];
     catalog
         .into_iter()
-        .map(|(id, kind, label, url, size)| {
+        .map(|(id, kind, label, url, size, sha256)| {
             let path = model_artifact_path(id, kind);
-            let ready = path.is_file()
+            let ready = std::fs::read_to_string(artifact_marker_path(&path))
+                .map(|recorded| recorded.trim().eq_ignore_ascii_case(sha256))
+                .unwrap_or(false)
+                && path.is_file()
                 && std::fs::metadata(&path)
                     .map(|m| m.len() > 1_000_000)
                     .unwrap_or(false);
@@ -75,10 +89,57 @@ pub fn list_models() -> Vec<ModelInfo> {
                 ready,
                 path: path.display().to_string(),
                 download_url: Some(url.into()),
-                size_hint_bytes: size,
+                size_hint_bytes: Some(size),
+                sha256: sha256.into(),
             }
         })
         .collect()
+}
+
+/// Sidecar holding the digest this code verified for an artifact.
+///
+/// Its absence is meaningful: it marks bytes that were never checked, which is
+/// exactly the state left behind by the old download path that accepted a URL
+/// from the front end. Verifying only fresh downloads would leave the artifact
+/// already on disk trusted forever.
+pub fn artifact_marker_path(artifact: &Path) -> PathBuf {
+    let mut name = artifact.file_name().unwrap_or_default().to_os_string();
+    name.push(".sha256");
+    artifact.with_file_name(name)
+}
+
+/// Digest the catalog expects for a model id.
+pub fn catalog_sha256(model_id: &str) -> Option<String> {
+    list_models()
+        .into_iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.sha256)
+}
+
+/// Whether an artifact may be handed to whisper.cpp / llama.cpp.
+///
+/// Reads the 64-byte sidecar instead of hashing: this is called from the record
+/// gate and from the settings screen, and re-hashing a gigabyte there would make
+/// the UI hang. The hash itself is computed once, on download or on the
+/// verify-in-place path.
+pub fn artifact_is_verified(artifact: &Path, model_id: &str) -> bool {
+    let plausible = artifact.is_file()
+        && std::fs::metadata(artifact)
+            .map(|m| m.len() > 1_000_000)
+            .unwrap_or(false);
+    if !plausible {
+        return false;
+    }
+    let Some(expected) = catalog_sha256(model_id) else {
+        return false;
+    };
+    std::fs::read_to_string(artifact_marker_path(artifact))
+        .map(|recorded| recorded.trim().eq_ignore_ascii_case(&expected))
+        .unwrap_or(false)
+}
+
+fn write_artifact_marker(artifact: &Path, sha256: &str) -> Result<(), String> {
+    std::fs::write(artifact_marker_path(artifact), sha256).map_err(|e| e.to_string())
 }
 
 fn model_artifact_path(id: &str, kind: &str) -> PathBuf {
@@ -92,9 +153,11 @@ fn model_artifact_path(id: &str, kind: &str) -> PathBuf {
 
 /// Download a model with streaming progress callbacks.
 /// Handles raw binaries and `.tar` / `.tar.gz` archives.
+///
+/// The URL is resolved from the internal catalog by `model_id` — it is deliberately
+/// not a parameter, so no caller can redirect the download.
 pub async fn download_model_with_progress<F>(
     model_id: &str,
-    url: &str,
     mut on_progress: F,
 ) -> Result<PathBuf, String>
 where
@@ -104,9 +167,43 @@ where
         .into_iter()
         .find(|m| m.id == model_id)
         .ok_or_else(|| format!("unknown model {model_id}"))?;
+    let url = info
+        .download_url
+        .clone()
+        .ok_or_else(|| format!("model {model_id} has no download URL in the catalog"))?;
+    let url = url.as_str();
     let dest = PathBuf::from(&info.path);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    // An artifact may already be on disk from a build that did not verify anything.
+    // Hash it before pulling hundreds of MB again: if it is genuine, this costs a
+    // few seconds and records the marker; if it is not, the download proceeds and
+    // replaces it.
+    if dest.is_file() {
+        on_progress(DownloadProgress {
+            model_id: model_id.into(),
+            downloaded_bytes: 0,
+            total_bytes: info.size_hint_bytes,
+            done: false,
+            error: None,
+            phase: "verifying".into(),
+        });
+        if let Ok(existing) = sha256_file(&dest) {
+            if existing.eq_ignore_ascii_case(&info.sha256) {
+                write_artifact_marker(&dest, &info.sha256)?;
+                on_progress(DownloadProgress {
+                    model_id: model_id.into(),
+                    downloaded_bytes: std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
+                    total_bytes: info.size_hint_bytes,
+                    done: true,
+                    error: None,
+                    phase: "done".into(),
+                });
+                return Ok(dest);
+            }
+        }
     }
 
     on_progress(DownloadProgress {
@@ -149,6 +246,24 @@ where
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
 
+    // Verify what came off the network, before anything reads or extracts it.
+    on_progress(DownloadProgress {
+        model_id: model_id.into(),
+        downloaded_bytes: downloaded,
+        total_bytes: total,
+        done: false,
+        error: None,
+        phase: "verifying".into(),
+    });
+    let actual = sha256_file(&tmp)?;
+    if !actual.eq_ignore_ascii_case(&info.sha256) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "checksum mismatch for {model_id}: expected {}, got {actual} — artifact discarded",
+            info.sha256
+        ));
+    }
+
     // Archive handling
     let lower = url.to_ascii_lowercase();
     if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
@@ -184,6 +299,7 @@ where
             "downloaded artifact too small ({final_len} bytes) — URL may not be a model file"
         ));
     }
+    write_artifact_marker(&dest, &info.sha256)?;
 
     on_progress(DownloadProgress {
         model_id: model_id.into(),
@@ -196,8 +312,13 @@ where
     Ok(dest)
 }
 
-pub async fn download_model(model_id: &str, url: &str) -> Result<PathBuf, String> {
-    download_model_with_progress(model_id, url, |_| {}).await
+/// Streaming SHA-256 of a file — models are hundreds of MB, so never read one whole.
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|e| e.to_string())?;
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn extract_tar_gz(archive_path: &Path, _out_dir: &Path, dest_file: &Path) -> Result<(), String> {
@@ -233,6 +354,7 @@ fn extract_first_model_entry<R: std::io::Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn catalog_lists_stt_and_llm_with_direct_urls() {
@@ -247,6 +369,76 @@ mod tests {
             );
             assert!(url.contains("huggingface.co") || url.contains("github.com"));
         }
+    }
+
+    #[test]
+    fn every_catalog_entry_declares_a_sha256() {
+        for m in list_models() {
+            assert_eq!(m.sha256.len(), 64, "{} has a malformed digest", m.id);
+            assert!(
+                m.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                "{} digest is not hex: {}",
+                m.id,
+                m.sha256
+            );
+            assert!(m.size_hint_bytes.unwrap_or(0) > 1_000_000, "{}", m.id);
+        }
+    }
+
+    #[test]
+    fn sha256_file_matches_known_digest() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("abc.bin");
+        std::fs::write(&p, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&p).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn sha256_comparison_rejects_a_different_artifact() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("tampered.bin");
+        std::fs::write(&p, b"not the model you asked for").unwrap();
+        let expected = list_models()
+            .into_iter()
+            .find(|m| m.id == "whisper-tiny")
+            .unwrap()
+            .sha256;
+        assert!(!sha256_file(&p).unwrap().eq_ignore_ascii_case(&expected));
+    }
+
+    /// The marker records that *this code* checked these bytes once. It is not a
+    /// defence against someone who can already write inside the app data directory —
+    /// they could rewrite the marker too. It exists to stop artifacts of unknown
+    /// provenance, including everything downloaded before checksums existed, from
+    /// being handed to a C++ parser.
+    #[test]
+    fn an_unverified_artifact_is_never_ready() {
+        let dir = tempdir().unwrap();
+        let artifact = dir.path().join("model.bin");
+        std::fs::write(&artifact, vec![0u8; 1_100_000]).unwrap();
+        let expected = catalog_sha256("whisper-tiny").unwrap();
+
+        // Big file, no marker: this is the state left by the old download path.
+        assert!(!artifact_is_verified(&artifact, "whisper-tiny"));
+
+        // Marker from a different model must not vouch for this one.
+        write_artifact_marker(&artifact, &catalog_sha256("whisper-base").unwrap()).unwrap();
+        assert!(!artifact_is_verified(&artifact, "whisper-tiny"));
+
+        write_artifact_marker(&artifact, &expected).unwrap();
+        assert!(artifact_is_verified(&artifact, "whisper-tiny"));
+    }
+
+    #[test]
+    fn a_marked_but_tiny_artifact_is_not_ready() {
+        let dir = tempdir().unwrap();
+        let artifact = dir.path().join("model.bin");
+        std::fs::write(&artifact, b"too small to be a model").unwrap();
+        write_artifact_marker(&artifact, &catalog_sha256("whisper-tiny").unwrap()).unwrap();
+        assert!(!artifact_is_verified(&artifact, "whisper-tiny"));
     }
 
     #[test]

@@ -28,6 +28,16 @@ cd src-tauri && cargo test     # testes Rust
 
 `lint` e `typecheck` executam o mesmo `tsc --noEmit`: o projeto ainda não tem linter de verdade, e `clippy` ainda não roda no CI. Não tratar "lint verde" como cobertura de estilo.
 
+**Pré-requisito de build no Windows**: o build script do `llama_cpp_sys` procura as binutils da LLVM e aborta com `No suitable tool equivalent to "nm"/"objcopy" has been found`. A LLVM traz as duas, mas não entra no PATH:
+
+```bash
+export PATH="/c/Program Files/LLVM/bin:$PATH"   # antes de cargo build/test
+```
+
+Pôr o diretório inteiro no PATH, e não `NM_PATH`/`OBJCOPY_PATH` uma a uma: ele pede a próxima ferramenta só depois de achar a anterior, então resolver individualmente vira uma falha por rodada de build.
+
+Só morde em checkout novo — worktree recém-cortada tem `target/` vazio e roda o build script do zero.
+
 Falhou qualquer um deles: **parar e reportar a saída**. Não contornar, não desabilitar regra, não marcar teste como skip para seguir.
 
 ## Git e Pull Request
