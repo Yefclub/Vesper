@@ -31,7 +31,7 @@ npm run tauri build
 
 ## Hygiene
 
-- Ignore models, recordings, `.env`, `CLAUDE.local.md`, `SPEC.md`
+- Ignore models, recordings, `.env`, `CLAUDE.local.md`, `SPEC.md`, `PENDENCIAS.md`
 - No competitor names in user-facing strings or README marketing
 - MIT license; open-source ready
 

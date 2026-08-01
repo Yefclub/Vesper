@@ -20,6 +20,7 @@ src-tauri/target/
 # Local / personal (not versioned)
 CLAUDE.local.md
 SPEC.md
+PENDENCIAS.md
 .claude/settings.local.json
 .claude/worktrees/
 .grok/
