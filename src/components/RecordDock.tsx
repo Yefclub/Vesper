@@ -119,111 +119,121 @@ export function RecordDock({
         </AnimatePresence>
       </div>
 
-      <motion.div
-        layout
-        transition={transition.base}
-        onHoverStart={() => setHovered(true)}
-        onHoverEnd={() => setHovered(false)}
-        onFocusCapture={() => setFocused(true)}
-        onBlurCapture={(e) => {
-          // Only clear once focus has left the dock entirely, or tabbing between
-          // its own buttons would close it under the user.
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) setFocused(false);
-        }}
-        data-testid="record-dock"
-        className="pointer-events-auto overflow-hidden rounded-2xl border border-border bg-surface-2/95 backdrop-blur-md"
-      >
-        <div className="flex items-center justify-center gap-3 px-3 py-2.5">
-          {/* A dead mirror of the gear. `justify-center` centres the whole row,
-              so a gear on one side only would push Gravar off centre by half its
-              width — which is the misalignment this change set out to fix.
-              Balancing it here keeps the primary action on the dock's axis, and
-              the axis is what the eye tracks. Kept in sync with the gear below:
-              w-8 is p-2 either side of a 16px icon. */}
-          {!recording && <span aria-hidden className="w-8 shrink-0" />}
-          {!recording && (
-            <button
-              data-testid="btn-record"
-              disabled={busy || blocked}
-              onClick={onStart}
-              className="flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
-            >
-              <Mic size={16} aria-hidden /> {t("record.start")}
-            </button>
-          )}
-          {!recording && (
-            /* Beside the primary action, not stacked under a paragraph. Same
-               height and radius so the pair reads as one control group. */
-            <button
-              data-testid="btn-dock-settings"
-              onClick={onOpenSettings}
-              title={t("nav.settings")}
-              aria-label={t("nav.settings")}
-              className="rounded-xl bg-surface-3 p-2 text-muted transition-colors hover:bg-border hover:text-foreground focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
-            >
-              <Settings size={16} />
-            </button>
-          )}
-          {recording && (
-            <>
+      {/* The gear sits beside the dock, not inside it, and the row is padded on
+          the left by exactly what the gear and its gap take on the right. The
+          padding is transparent background, so the dock stays a pill with no
+          empty half — the previous balance was a spacer *inside* the dock, which
+          bought the centring at the cost of a visible dead area next to Gravar.
+          `items-start` keeps the gear level with the control row instead of
+          drifting down when the device panel expands below. */}
+      <div className={`flex items-start gap-3 ${recording ? "" : "pl-[70px]"}`}>
+        <motion.div
+          layout
+          transition={transition.base}
+          onHoverStart={() => setHovered(true)}
+          onHoverEnd={() => setHovered(false)}
+          onFocusCapture={() => setFocused(true)}
+          onBlurCapture={(e) => {
+            // Only clear once focus has left the dock entirely, or tabbing between
+            // its own buttons would close it under the user.
+            if (!e.currentTarget.contains(e.relatedTarget as Node)) setFocused(false);
+          }}
+          data-testid="record-dock"
+          className="pointer-events-auto overflow-hidden rounded-2xl border border-border bg-surface-2/95 backdrop-blur-md"
+        >
+          <div className="flex items-center justify-center gap-3 px-3 py-2.5">
+            {!recording && (
               <button
-                data-testid="btn-stop"
-                onClick={onStop}
-                className="flex items-center gap-2 rounded-xl bg-danger/15 px-4 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger/25 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-danger)]"
+                data-testid="btn-record"
+                disabled={busy || blocked}
+                onClick={onStart}
+                className="flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
               >
-                <Square size={14} aria-hidden /> {t("record.stop")}
+                <Mic size={16} aria-hidden /> {t("record.start")}
               </button>
-              <button
-                data-testid="btn-pause"
-                onClick={onPauseResume}
-                aria-label={status?.paused ? t("record.resume") : t("record.pause")}
-                className="rounded-xl bg-surface-3 p-2 text-foreground transition-colors hover:bg-border focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
-              >
-                {status?.paused ? <Play size={16} /> : <Pause size={16} />}
-              </button>
-              {/* tabular-nums so the elapsed time does not shift the controls
-                  beside it every time a digit changes width. */}
-              <span
-                data-testid="elapsed"
-                className="min-w-[5ch] text-center text-sm tabular-nums text-muted"
-              >
-                {formatDuration(status?.elapsed_ms ?? 0)}
-              </span>
-              {status && <LevelMeter levels={status.levels} />}
-            </>
-          )}
-        </div>
+            )}
+            {recording && (
+              <>
+                <button
+                  data-testid="btn-stop"
+                  onClick={onStop}
+                  className="flex items-center gap-2 rounded-xl bg-danger/15 px-4 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger/25 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-danger)]"
+                >
+                  <Square size={14} aria-hidden /> {t("record.stop")}
+                </button>
+                <button
+                  data-testid="btn-pause"
+                  onClick={onPauseResume}
+                  aria-label={status?.paused ? t("record.resume") : t("record.pause")}
+                  className="rounded-xl bg-surface-3 p-2 text-foreground transition-colors hover:bg-border focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
+                >
+                  {status?.paused ? <Play size={16} /> : <Pause size={16} />}
+                </button>
+                {/* tabular-nums so the elapsed time does not shift the controls
+                    beside it every time a digit changes width. */}
+                <span
+                  data-testid="elapsed"
+                  className="min-w-[5ch] text-center text-sm tabular-nums text-muted"
+                >
+                  {formatDuration(status?.elapsed_ms ?? 0)}
+                </span>
+                {status && <LevelMeter levels={status.levels} />}
+              </>
+            )}
+          </div>
 
-        {/* The lower panel is the device readout and nothing else now. The
-            blocked reason moved out to a balloon, so a long sentence no longer
-            stretches the dock and drags the button off centre. */}
-        <AnimatePresence initial={false}>
-          {expanded && !blocked && (
-            <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: "auto" }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={transition.base}
-              className="border-t border-border/60"
-            >
-              <div className="flex items-center justify-center gap-4 px-4 py-2.5 text-[11px] text-muted">
-                <span className="flex items-center gap-1.5">
-                  <span className="h-1.5 w-1.5 rounded-full bg-me" aria-hidden />
-                  <span className="max-w-[14rem] truncate">
-                    {deviceName(micDeviceId, "mic")}
+          {/* The lower panel is the device readout and nothing else now. The
+              blocked reason moved out to a balloon, so a long sentence no longer
+              stretches the dock and drags the button off centre. */}
+          <AnimatePresence initial={false}>
+            {expanded && !blocked && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={transition.base}
+                className="border-t border-border/60"
+              >
+                <div className="flex items-center justify-center gap-4 px-4 py-2.5 text-[11px] text-muted">
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-me" aria-hidden />
+                    <span className="max-w-[14rem] truncate">
+                      {deviceName(micDeviceId, "mic")}
+                    </span>
                   </span>
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="h-1.5 w-1.5 rounded-full bg-others" aria-hidden />
-                  <span className="max-w-[14rem] truncate">
-                    {deviceName(systemDeviceId, "system")}
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-others" aria-hidden />
+                    <span className="max-w-[14rem] truncate">
+                      {deviceName(systemDeviceId, "system")}
+                    </span>
                   </span>
-                </span>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </motion.div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </motion.div>
+
+        {/* Its own pill, sized to the dock's collapsed height: 1px border plus
+            p-2.5 either side of a 36px control is the same 58px the record row
+            comes to. The 70px of padding on the row above is this pill plus the
+            gap, so the dock — and Gravar inside it — keeps the screen's axis. */}
+        {!recording && (
+          <button
+            data-testid="btn-dock-settings"
+            onClick={onOpenSettings}
+            title={t("nav.settings")}
+            aria-label={t("nav.settings")}
+            className="group pointer-events-auto rounded-2xl border border-border bg-surface-2/95 p-2.5 backdrop-blur-md focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]"
+          >
+            {/* group-hover, not hover: the padding is part of the target, and a
+                hover that only lights up on the inner square feels dead at the
+                pill's edges. */}
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-surface-3 text-muted transition-colors group-hover:bg-border group-hover:text-foreground">
+              <Settings size={16} />
+            </span>
+          </button>
+        )}
+      </div>
     </div>
   );
 }

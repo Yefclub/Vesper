@@ -13,6 +13,13 @@ import {
 import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
 
+// Backend names, not translated: "Local" and "OpenRouter" read the same in
+// every locale the app ships.
+const PROVIDERS = [
+  { value: "local", label: "Local" },
+  { value: "openrouter", label: "OpenRouter" },
+];
+
 interface Props {
   settings: AppSettings;
   models: ModelInfo[];
@@ -142,47 +149,82 @@ export function SettingsPanel({
           </button>
         </div>
 
+        {/* Above the tabs, because these two govern them. Both used to sit
+            inside a tab — STT under Local, LLM under OpenRouter — so switching
+            STT to OpenRouter left you looking at the local model list with
+            nothing on screen acknowledging the change, and the LLM switch was
+            invisible unless you happened to open the cloud tab. */}
+        <div className="grid grid-cols-2 gap-3 border-b border-border px-5 py-4">
+          <FieldSelect
+            label={t("settings.stt_provider")}
+            value={draft.stt_provider}
+            onChange={(v) =>
+              setDraft((d) => ({
+                ...d,
+                stt_provider: v as AppSettings["stt_provider"],
+              }))
+            }
+            options={PROVIDERS}
+          />
+          <FieldSelect
+            label={t("settings.llm_provider")}
+            value={draft.llm_provider}
+            onChange={(v) =>
+              setDraft((d) => ({
+                ...d,
+                llm_provider: v as AppSettings["llm_provider"],
+              }))
+            }
+            options={PROVIDERS}
+          />
+        </div>
+
         <div className="flex gap-1 border-b border-border px-3 pt-2">
           {(
             [
-              ["local", t("settings.local")],
-              ["cloud", t("settings.cloud")],
-              ["devices", t("settings.devices")],
-              ["lang", t("settings.language")],
+              ["local", t("settings.local"), "local"],
+              ["cloud", t("settings.cloud"), "openrouter"],
+              ["devices", t("settings.devices"), null],
+              ["lang", t("settings.language"), null],
             ] as const
-          ).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setTab(id)}
-              className={`rounded-t-lg px-3 py-2 text-xs ${
-                tab === id
-                  ? "bg-surface-3 text-foreground"
-                  : "text-muted hover:text-foreground"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+          ).map(([id, label, backend]) => {
+            // The tab that is actually doing the work is marked. Without it the
+            // two backend tabs look interchangeable and the provider choice
+            // above has nowhere to land.
+            const inUse =
+              backend !== null &&
+              (draft.stt_provider === backend || draft.llm_provider === backend);
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setTab(id)}
+                // A dot carries no accessible name of its own — a bare
+                // `aria-label` on a span with no role is dropped — so the state
+                // goes on the tab itself.
+                aria-label={inUse ? `${label} — ${t("settings.in_use")}` : undefined}
+                title={inUse ? t("settings.in_use") : undefined}
+                className={`flex items-center gap-1.5 rounded-t-lg px-3 py-2 text-xs ${
+                  tab === id
+                    ? "bg-surface-3 text-foreground"
+                    : "text-muted hover:text-foreground"
+                }`}
+              >
+                {label}
+                {inUse && (
+                  <span
+                    aria-hidden
+                    className="h-1.5 w-1.5 rounded-full bg-accent"
+                  />
+                )}
+              </button>
+            );
+          })}
         </div>
 
         <div className="flex-1 space-y-5 overflow-y-auto p-5">
           {tab === "local" && (
             <>
-              <FieldSelect
-                label={t("settings.stt_provider")}
-                value={draft.stt_provider}
-                onChange={(v) =>
-                  setDraft((d) => ({
-                    ...d,
-                    stt_provider: v as AppSettings["stt_provider"],
-                  }))
-                }
-                options={[
-                  { value: "local", label: "Local" },
-                  { value: "openrouter", label: "OpenRouter" },
-                ]}
-              />
               {/* Bound to the catalog rather than free text. Typing the id by
                   hand meant downloading "Whisper Base" from the list below and
                   then having to know it is called `whisper-base`. */}
@@ -315,20 +357,6 @@ export function SettingsPanel({
                   ))}
                 </select>
               </label>
-              <FieldSelect
-                label={t("settings.llm_provider")}
-                value={draft.llm_provider}
-                onChange={(v) =>
-                  setDraft((d) => ({
-                    ...d,
-                    llm_provider: v as AppSettings["llm_provider"],
-                  }))
-                }
-                options={[
-                  { value: "local", label: "Local" },
-                  { value: "openrouter", label: "OpenRouter" },
-                ]}
-              />
               <label className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
