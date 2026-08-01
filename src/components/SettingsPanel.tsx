@@ -119,13 +119,34 @@ export function SettingsPanel({
       }
       await onRefreshModels();
       showText(`${id} ready`);
+      adoptIfDraftUnusable(id);
     } catch (e) {
       showText(String(e));
     }
   }
 
+  /** The draft still holds whatever was saved before the download — on a fresh
+   *  machine that is `whisper-tiny`, which is not installed. Without this,
+   *  downloading Whisper Base leaves the select showing "Whisper Base" (the
+   *  only option) while the draft says `whisper-tiny`, and Save writes the
+   *  wrong one. `models` here is the pre-refresh list, which is exactly what
+   *  "was the draft usable before?" needs to read. */
+  function adoptIfDraftUnusable(id: string) {
+    const kind = models.find((m) => m.id === id)?.kind;
+    if (kind !== "stt" && kind !== "llm") return;
+    const field = kind === "stt" ? "local_stt_model" : "local_llm_model";
+    setDraft((d) =>
+      models.find((m) => m.id === d[field])?.ready ? d : { ...d, [field]: id },
+    );
+  }
+
   const mics = devices.filter((d) => d.kind === "mic");
   const systems = devices.filter((d) => d.kind === "system");
+  // The dropdown is an inventory, the catalog below is a shop. `ready` and not
+  // `present`: a downloaded-but-unverified model is refused by the same gate
+  // that refuses a missing one, so offering it is the same dead end.
+  const readyStt = models.filter((m) => m.kind === "stt" && m.ready);
+  const readyLlm = models.filter((m) => m.kind === "llm" && m.ready);
 
   return (
     <motion.div
@@ -227,22 +248,40 @@ export function SettingsPanel({
               {/* Bound to the catalog rather than free text. Typing the id by
                   hand meant downloading "Whisper Base" from the list below and
                   then having to know it is called `whisper-base`. */}
-              <FieldSelect
-                label={t("settings.local_stt")}
-                value={draft.local_stt_model}
-                onChange={(v) => setDraft((d) => ({ ...d, local_stt_model: v }))}
-                options={models
-                  .filter((m) => m.kind === "stt")
-                  .map((m) => ({ value: m.id, label: m.label }))}
-              />
-              <FieldSelect
-                label={t("settings.local_llm")}
-                value={draft.local_llm_model}
-                onChange={(v) => setDraft((d) => ({ ...d, local_llm_model: v }))}
-                options={models
-                  .filter((m) => m.kind === "llm")
-                  .map((m) => ({ value: m.id, label: m.label }))}
-              />
+              {readyStt.length ? (
+                <FieldSelect
+                  label={t("settings.local_stt")}
+                  value={draft.local_stt_model}
+                  onChange={(v) => setDraft((d) => ({ ...d, local_stt_model: v }))}
+                  options={withStaleValue(
+                    readyStt,
+                    draft.local_stt_model,
+                    t("model.not_downloaded"),
+                  )}
+                />
+              ) : (
+                <FieldEmpty
+                  label={t("settings.local_stt")}
+                  text={t("settings.no_local_stt")}
+                />
+              )}
+              {readyLlm.length ? (
+                <FieldSelect
+                  label={t("settings.local_llm")}
+                  value={draft.local_llm_model}
+                  onChange={(v) => setDraft((d) => ({ ...d, local_llm_model: v }))}
+                  options={withStaleValue(
+                    readyLlm,
+                    draft.local_llm_model,
+                    t("model.not_downloaded"),
+                  )}
+                />
+              ) : (
+                <FieldEmpty
+                  label={t("settings.local_llm")}
+                  text={t("settings.no_local_llm")}
+                />
+              )}
               <div className="space-y-2">
                 {models.map((m) => (
                   <div
@@ -511,6 +550,29 @@ function Field({
   );
 }
 
+interface SelectOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+/** A `<select>` whose value matches no option renders — and reports — the first
+ *  option as selected. The shipped defaults are `whisper-tiny` / `qwen2.5-0.5b`
+ *  and neither is installed on a fresh machine, so without this the panel would
+ *  claim a model the user never picked and Save would persist it. The stale id
+ *  gets its own disabled option instead, so the field keeps telling the truth
+ *  and cannot be re-selected. */
+function withStaleValue(
+  models: ModelInfo[],
+  value: string,
+  missingLabel: string,
+): SelectOption[] {
+  const options = models.map((m) => ({ value: m.id, label: m.label }));
+  return options.some((o) => o.value === value)
+    ? options
+    : [{ value, label: `${value} — ${missingLabel}`, disabled: true }, ...options];
+}
+
 function FieldSelect({
   label,
   value,
@@ -520,7 +582,7 @@ function FieldSelect({
   label: string;
   value: string;
   onChange: (v: string) => void;
-  options: { value: string; label: string }[];
+  options: SelectOption[];
 }) {
   return (
     <label className="block text-sm">
@@ -531,11 +593,26 @@ function FieldSelect({
         className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
       >
         {options.map((o) => (
-          <option key={o.value} value={o.value}>
+          <option key={o.value} value={o.value} disabled={o.disabled}>
             {o.label}
           </option>
         ))}
       </select>
     </label>
+  );
+}
+
+/** Same box, same label, no control. Not an empty select and not a fake "None":
+ *  `validate_models()` rejects an empty model id, so "None" would be unsaveable.
+ *  The dashed edge reads as an empty slot, and keeping the box means the panel
+ *  does not reflow when a download finishes and the select takes its place. */
+function FieldEmpty({ label, text }: { label: string; text: string }) {
+  return (
+    <div className="text-sm">
+      <span className="mb-1 block text-xs text-fg-subtle">{label}</span>
+      <div className="rounded-md border border-dashed border-border bg-surface-2 px-3 py-2 text-sm text-fg-subtle">
+        {text}
+      </div>
+    </div>
   );
 }
