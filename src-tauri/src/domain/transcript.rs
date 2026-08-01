@@ -47,7 +47,10 @@ impl LiveTranscript {
         let mut seg = segment;
         seg.text = text;
         // Keep sorted by start_ms; stable insert for equal starts.
-        match self.segments.binary_search_by_key(&seg.start_ms, |s| s.start_ms) {
+        match self
+            .segments
+            .binary_search_by_key(&seg.start_ms, |s| s.start_ms)
+        {
             Ok(mut idx) => {
                 // Find end of equal start_ms run and insert after.
                 while idx < self.segments.len() && self.segments[idx].start_ms == seg.start_ms {
@@ -95,7 +98,12 @@ mod tests {
     #[test]
     fn append_orders_by_start_ms() {
         let mut t = LiveTranscript::new();
-        t.append(TranscriptSegment::new(Speaker::Others, "second", 2000, 3000));
+        t.append(TranscriptSegment::new(
+            Speaker::Others,
+            "second",
+            2000,
+            3000,
+        ));
         t.append(TranscriptSegment::new(Speaker::Me, "first", 0, 1000));
         t.append(TranscriptSegment::new(Speaker::Me, "mid", 1000, 2000));
         let texts: Vec<_> = t.segments().iter().map(|s| s.text.as_str()).collect();

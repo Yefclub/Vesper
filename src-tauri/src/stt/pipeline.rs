@@ -1,6 +1,6 @@
+use crate::domain::settings::{AppSettings, SttProvider};
 use crate::domain::speaker::Speaker;
 use crate::domain::transcript::{LiveTranscript, TranscriptSegment};
-use crate::domain::settings::{AppSettings, SttProvider};
 use crate::stt::local::LocalSttEngine;
 use crate::stt::openrouter::OpenRouterStt;
 use serde::{Deserialize, Serialize};
@@ -80,7 +80,9 @@ impl SttService {
                 .map_err(|e| format!("transcription task failed: {e}"))??
             }
             SttProvider::OpenRouter => {
-                settings.require_openrouter_key().map_err(|e| e.to_string())?;
+                settings
+                    .require_openrouter_key()
+                    .map_err(|e| e.to_string())?;
                 self.remote
                     .transcribe(
                         pcm,

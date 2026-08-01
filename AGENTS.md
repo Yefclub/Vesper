@@ -26,7 +26,7 @@ npm run lint                   # alias de typecheck — não há ESLint configur
 cd src-tauri && cargo test     # testes Rust
 ```
 
-`lint` e `typecheck` executam o mesmo `tsc --noEmit`: o projeto ainda não tem linter de verdade, e `clippy` ainda não roda no CI. Não tratar "lint verde" como cobertura de estilo.
+`lint` e `typecheck` executam o mesmo `tsc --noEmit`: o projeto ainda não tem linter de verdade do lado do front. Não tratar "lint verde" como cobertura de estilo. Do lado Rust, o CI roda `cargo fmt --check` e `cargo clippy -- -D warnings -A dead_code` em Linux e Windows.
 
 **Pré-requisito de build no Windows**: o build script do `llama_cpp_sys` procura as binutils da LLVM e aborta com `No suitable tool equivalent to "nm"/"objcopy" has been found`. A LLVM traz as duas, mas não entra no PATH:
 

@@ -1,0 +1,63 @@
+name: release
+
+# Cutting a release is a deliberate act, so this only ever runs from a tag or by
+# hand. Nothing here fires on a push to a branch.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (for example v0.0.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: --target x86_64-pc-windows-msvc
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          - platform: ubuntu-latest
+            args: --target x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux deps
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev libpipewire-0.3-dev libclang-dev cmake pkg-config
+      - run: npm ci
+
+      # The signing key is what makes an update verifiable. Without these the
+      # build either fails while signing or ships a latest.json that no existing
+      # install will accept — see updater_pubkey_is_real in commands.rs, which
+      # fails the test suite if the public half is ever replaced by a placeholder.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: Vesper ${{ github.event.inputs.tag || github.ref_name }}
+          # Published as a draft so a human decides when installs start seeing it.
+          # The updater endpoint reads the latest *published* release, so nothing
+          # reaches anyone until that button is pressed.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

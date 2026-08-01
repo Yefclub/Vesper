@@ -144,11 +144,13 @@ pub fn build_summary_prompt(template: SummaryTemplate, transcript: &str) -> Stri
 /// Offline extractive fallback when no LLM is available.
 pub fn extractive_summary(transcript: &str, max_sentences: usize) -> MeetingInsights {
     let sentences: Vec<&str> = transcript
-        .split(|c| c == '.' || c == '!' || c == '?')
+        .split(['.', '!', '?'])
         .map(str::trim)
         .filter(|s| s.len() > 12)
         .collect();
-    let take = max_sentences.min(sentences.len()).max(1.min(sentences.len()));
+    let take = max_sentences
+        .min(sentences.len())
+        .max(1.min(sentences.len()));
     let summary = sentences
         .iter()
         .take(take)

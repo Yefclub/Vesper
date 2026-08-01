@@ -26,14 +26,17 @@ pub fn recommend_from_probe(probe: &CapabilityProbe) -> CapabilityReport {
     let cores = probe.cpu_cores.max(1);
     let mut notes = Vec::new();
     let (stt, llm, backend) = if probe.cuda_available {
-        notes.push("CUDA GPU detected — prefer GPU-accelerated local models when available.".into());
+        notes
+            .push("CUDA GPU detected — prefer GPU-accelerated local models when available.".into());
         (
             "whisper-base".to_string(),
             "qwen2.5-1.5b".to_string(),
             "cuda".to_string(),
         )
     } else {
-        notes.push("No CUDA GPU found — using CPU-friendly defaults (whisper-tiny / Qwen 0.5B).".into());
+        notes.push(
+            "No CUDA GPU found — using CPU-friendly defaults (whisper-tiny / Qwen 0.5B).".into(),
+        );
         (
             "whisper-tiny".to_string(),
             "qwen2.5-0.5b".to_string(),

@@ -95,8 +95,7 @@ pub fn pcm_to_wav_bytes(pcm: &[i16], sample_rate: u32) -> Result<Vec<u8>, String
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
-        let mut writer =
-            WavWriter::new(&mut cursor, spec).map_err(|e| e.to_string())?;
+        let mut writer = WavWriter::new(&mut cursor, spec).map_err(|e| e.to_string())?;
         for s in pcm {
             writer.write_sample(*s).map_err(|e| e.to_string())?;
         }

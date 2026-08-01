@@ -174,7 +174,7 @@ impl DualChannelRecorder {
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
-                let _ = stream.stop();
+                stream.stop();
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
 
@@ -221,7 +221,7 @@ impl DualChannelRecorder {
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
-                let _ = stream.stop();
+                stream.stop();
                 inner_sys.lock().system_loopback_active = false;
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
@@ -418,7 +418,9 @@ pub fn read_wav_mono(path: &Path) -> Result<(Vec<i16>, u32), CaptureError> {
 /// Guessing from the file size does not: 8-bit mono is one byte per sample on
 /// disk and two in memory, so a byte-based bound lets four times the intended
 /// number of samples through.
-fn reject_overlong_wav(reader: &hound::WavReader<std::io::BufReader<std::fs::File>>) -> Result<(), CaptureError> {
+fn reject_overlong_wav(
+    reader: &hound::WavReader<std::io::BufReader<std::fs::File>>,
+) -> Result<(), CaptureError> {
     let channels = reader.spec().channels.max(1) as usize;
     let frames = reader.len() as usize / channels;
     if frames > crate::audio::decode::MAX_DECODED_SAMPLES {
@@ -524,7 +526,11 @@ mod tests {
         let path = dir.path().join("meeting.wav");
         rec.flush_recording_for_test(&path).unwrap();
         let (mic, sys, _) = read_dual_wav(&path).unwrap();
-        assert_eq!(mic.len(), 4000, "final WAV must keep all samples after live STT drains");
+        assert_eq!(
+            mic.len(),
+            4000,
+            "final WAV must keep all samples after live STT drains"
+        );
         assert_eq!(sys.len(), 4000);
         // Spot-check channels still distinct (Me vs Others)
         assert_eq!(mic[0], 100);

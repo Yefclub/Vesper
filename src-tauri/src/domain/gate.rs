@@ -78,15 +78,18 @@ mod tests {
     use crate::domain::settings::{AppSettings, SttProvider};
 
     fn base() -> AppSettings {
-        let mut s = AppSettings::default();
-        s.onboarding_complete = true;
-        s
+        AppSettings {
+            onboarding_complete: true,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn blocks_before_onboarding() {
-        let mut s = AppSettings::default();
-        s.onboarding_complete = false;
+        let s = AppSettings {
+            onboarding_complete: false,
+            ..Default::default()
+        };
         let g = can_start_recording(&s, true, false);
         assert!(!g.allowed);
         assert_eq!(g.reason_key.as_deref(), Some("gate.onboarding"));

@@ -185,7 +185,11 @@ pub fn parse_openrouter_llm_models(body: &str) -> Result<Vec<OrModel>, String> {
         .ok_or_else(|| "missing data array".to_string())?;
     let mut out = Vec::new();
     for m in data {
-        let id = m.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let id = m
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         if id.is_empty() {
             continue;
         }
@@ -232,7 +236,7 @@ fn is_text_llm(m: &Value, id: &str) -> bool {
     if let Some(arr) = m.get("output_modalities").and_then(|x| x.as_array()) {
         let outs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
         if !outs.is_empty() {
-            return outs.iter().any(|s| *s == "text");
+            return outs.contains(&"text");
         }
     }
     let modality = m
@@ -322,7 +326,8 @@ mod tests {
 
     #[test]
     fn stt_empty_falls_back() {
-        let body = r#"{"data":[{"id":"openai/gpt-4o-mini","name":"Mini","output_modalities":["text"]}]}"#;
+        let body =
+            r#"{"data":[{"id":"openai/gpt-4o-mini","name":"Mini","output_modalities":["text"]}]}"#;
         let models = parse_openrouter_stt_models(body).unwrap();
         assert!(!models.is_empty());
         assert!(models.iter().all(|m| m.kind == "stt"));

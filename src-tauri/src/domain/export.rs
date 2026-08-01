@@ -65,8 +65,7 @@ pub fn export_markdown_to_path(path: &Path, markdown: &str) -> std::io::Result<(
 }
 
 pub fn export_pdf_to_path(path: &Path, title: &str, body: &str) -> Result<(), String> {
-    let (doc, page1, layer1) =
-        PdfDocument::new(title, Mm(210.0), Mm(297.0), "Layer 1");
+    let (doc, page1, layer1) = PdfDocument::new(title, Mm(210.0), Mm(297.0), "Layer 1");
     let font = doc
         .add_builtin_font(BuiltinFont::Helvetica)
         .map_err(|e| e.to_string())?;
@@ -92,9 +91,8 @@ pub fn export_pdf_to_path(path: &Path, title: &str, body: &str) -> Result<(), St
 }
 
 pub fn export_docx_to_path(path: &Path, title: &str, body: &str) -> Result<(), String> {
-    let mut docx = Docx::new().add_paragraph(
-        Paragraph::new().add_run(Run::new().add_text(title).bold()),
-    );
+    let mut docx =
+        Docx::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text(title).bold()));
     for line in body.lines() {
         docx = docx.add_paragraph(Paragraph::new().add_run(Run::new().add_text(line)));
     }

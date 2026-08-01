@@ -1,9 +1,9 @@
 use crate::domain::job::{MeetingRecord, MeetingStatus};
 use crate::domain::search::SearchHit;
 use crate::domain::settings::AppSettings;
+use crate::domain::speaker::Speaker;
 use crate::domain::summary::MeetingInsights;
 use crate::domain::transcript::{LiveTranscript, TranscriptSegment};
-use crate::domain::speaker::Speaker;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -232,7 +232,7 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query(params![id]).map_err(|e| e.to_string())?;
         if let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            Ok(Some(row_to_meeting(&row)?))
+            Ok(Some(row_to_meeting(row)?))
         } else {
             Ok(None)
         }
@@ -283,8 +283,11 @@ impl Database {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM meetings_fts WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM transcript_segments WHERE meeting_id=?1", params![id])
-            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM transcript_segments WHERE meeting_id=?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM chat_messages WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM meetings WHERE id=?1", params![id])
@@ -293,7 +296,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn save_transcript(&self, meeting_id: &str, transcript: &LiveTranscript) -> Result<(), String> {
+    pub fn save_transcript(
+        &self,
+        meeting_id: &str,
+        transcript: &LiveTranscript,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM transcript_segments WHERE meeting_id=?1",
@@ -353,7 +360,11 @@ impl Database {
         Ok(t)
     }
 
-    pub fn save_insights(&self, meeting_id: &str, insights: &MeetingInsights) -> Result<(), String> {
+    pub fn save_insights(
+        &self,
+        meeting_id: &str,
+        insights: &MeetingInsights,
+    ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE meetings SET summary=?1, action_items=?2, key_points=?3, updated_at=?4 WHERE id=?5",
@@ -379,12 +390,13 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_chat(&self, meeting_id: &str) -> Result<Vec<crate::domain::chat::ChatMessage>, String> {
+    pub fn list_chat(
+        &self,
+        meeting_id: &str,
+    ) -> Result<Vec<crate::domain::chat::ChatMessage>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare(
-                "SELECT role, content FROM chat_messages WHERE meeting_id=?1 ORDER BY id ASC",
-            )
+            .prepare("SELECT role, content FROM chat_messages WHERE meeting_id=?1 ORDER BY id ASC")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![meeting_id], |row| {
@@ -461,11 +473,7 @@ impl Database {
     }
 
     /// Persists settings, dropping the API key when the keychain is holding it.
-    pub fn save_settings_with(
-        &self,
-        settings: &AppSettings,
-        home: KeyHome,
-    ) -> Result<(), String> {
+    pub fn save_settings_with(&self, settings: &AppSettings, home: KeyHome) -> Result<(), String> {
         let mut on_disk = settings.clone();
         if home == KeyHome::Keychain {
             on_disk.openrouter_api_key = None;
@@ -635,8 +643,10 @@ mod tests {
         assert_eq!(t2.segments()[0].text, "hello");
         let hits = db.search("hello", 5).unwrap();
         assert_eq!(hits.len(), 1);
-        let mut settings = AppSettings::default();
-        settings.language = "pt".into();
+        let settings = AppSettings {
+            language: "pt".into(),
+            ..Default::default()
+        };
         db.save_settings_with(&settings, KeyHome::Keychain).unwrap();
         let s2 = db.load_settings().unwrap();
         assert_eq!(s2.language, "pt");
@@ -646,14 +656,18 @@ mod tests {
     fn the_api_key_never_reaches_the_database() {
         let dir = tempdir().unwrap();
         let db = Database::open(dir.path()).unwrap();
-        let mut settings = AppSettings::default();
-        settings.openrouter_api_key = Some("sk-or-must-not-be-written".into());
+        let settings = AppSettings {
+            openrouter_api_key: Some("sk-or-must-not-be-written".into()),
+            ..Default::default()
+        };
         db.save_settings_with(&settings, KeyHome::Keychain).unwrap();
 
         let stored: String = {
             let conn = db.conn.lock().unwrap();
-            conn.query_row("SELECT value FROM settings WHERE key='app'", [], |r| r.get(0))
-                .unwrap()
+            conn.query_row("SELECT value FROM settings WHERE key='app'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
         assert!(
             !stored.contains("sk-or-must-not-be-written"),
@@ -666,12 +680,15 @@ mod tests {
     fn keep_in_row_leaves_the_key_where_the_keychain_could_not_take_it() {
         let dir = tempdir().unwrap();
         let db = Database::open(dir.path()).unwrap();
-        let mut settings = AppSettings::default();
-        settings.openrouter_api_key = Some("sk-or-nowhere-else-to-go".into());
+        let settings = AppSettings {
+            openrouter_api_key: Some("sk-or-nowhere-else-to-go".into()),
+            ..Default::default()
+        };
 
         // The keychain refused. Stripping the row here would leave the user's key
         // stored nowhere at all.
-        db.save_settings_with(&settings, KeyHome::KeepInRow).unwrap();
+        db.save_settings_with(&settings, KeyHome::KeepInRow)
+            .unwrap();
         assert_eq!(
             db.legacy_api_key().unwrap().as_deref(),
             Some("sk-or-nowhere-else-to-go")
@@ -688,8 +705,10 @@ mod tests {
         let db = Database::open(dir.path()).unwrap();
 
         // Exactly what an older build wrote: the whole struct, key included.
-        let mut legacy = AppSettings::default();
-        legacy.openrouter_api_key = Some("sk-or-legacy".into());
+        let legacy = AppSettings {
+            openrouter_api_key: Some("sk-or-legacy".into()),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&legacy).unwrap();
         {
             let conn = db.conn.lock().unwrap();
@@ -700,16 +719,24 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(db.legacy_api_key().unwrap().as_deref(), Some("sk-or-legacy"));
+        assert_eq!(
+            db.legacy_api_key().unwrap().as_deref(),
+            Some("sk-or-legacy")
+        );
 
         // Reading must not destroy it: the keychain write can still fail.
-        assert_eq!(db.legacy_api_key().unwrap().as_deref(), Some("sk-or-legacy"));
+        assert_eq!(
+            db.legacy_api_key().unwrap().as_deref(),
+            Some("sk-or-legacy")
+        );
 
         db.clear_legacy_api_key().unwrap();
         let stored: String = {
             let conn = db.conn.lock().unwrap();
-            conn.query_row("SELECT value FROM settings WHERE key='app'", [], |r| r.get(0))
-                .unwrap()
+            conn.query_row("SELECT value FROM settings WHERE key='app'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
         assert!(!stored.contains("sk-or-legacy"), "key survived: {stored}");
 
@@ -744,7 +771,13 @@ mod tests {
         m.transcript_text = "the budget for Q3 was approved".into();
         db.upsert_meeting(&m).unwrap();
 
-        for q in ["budget: Q3", "budget*", "budget AND", "budget \"quoted", "(budget)"] {
+        for q in [
+            "budget: Q3",
+            "budget*",
+            "budget AND",
+            "budget \"quoted",
+            "(budget)",
+        ] {
             let hits = db.search(q, 10);
             assert!(hits.is_ok(), "query {q:?} errored: {:?}", hits.err());
         }
@@ -875,7 +908,8 @@ mod tests {
         let db = Database::open(dir.path()).unwrap();
         let on: i64 = {
             let conn = db.conn.lock().unwrap();
-            conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap()
+            conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+                .unwrap()
         };
         assert_eq!(on, 1, "cascade deletes are decorative without this pragma");
     }
