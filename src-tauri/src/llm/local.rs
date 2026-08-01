@@ -43,9 +43,10 @@ impl LocalLlm {
         self.models_dir.join(model_id).join("model.gguf")
     }
 
+    /// Ready means "verified against the catalog digest" — llama.cpp parses this
+    /// file, so an unverified GGUF must not reach it.
     pub fn is_ready(&self, model_id: &str) -> bool {
-        let p = self.model_file(model_id);
-        p.is_file() && std::fs::metadata(&p).map(|m| m.len() > 1_000_000).unwrap_or(false)
+        crate::models::artifact_is_verified(&self.model_file(model_id), model_id)
     }
 
     pub fn summarize(

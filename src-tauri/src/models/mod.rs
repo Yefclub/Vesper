@@ -75,7 +75,10 @@ pub fn list_models() -> Vec<ModelInfo> {
         .into_iter()
         .map(|(id, kind, label, url, size, sha256)| {
             let path = model_artifact_path(id, kind);
-            let ready = path.is_file()
+            let ready = std::fs::read_to_string(artifact_marker_path(&path))
+                .map(|recorded| recorded.trim().eq_ignore_ascii_case(sha256))
+                .unwrap_or(false)
+                && path.is_file()
                 && std::fs::metadata(&path)
                     .map(|m| m.len() > 1_000_000)
                     .unwrap_or(false);
@@ -91,6 +94,52 @@ pub fn list_models() -> Vec<ModelInfo> {
             }
         })
         .collect()
+}
+
+/// Sidecar holding the digest this code verified for an artifact.
+///
+/// Its absence is meaningful: it marks bytes that were never checked, which is
+/// exactly the state left behind by the old download path that accepted a URL
+/// from the front end. Verifying only fresh downloads would leave the artifact
+/// already on disk trusted forever.
+pub fn artifact_marker_path(artifact: &Path) -> PathBuf {
+    let mut name = artifact.file_name().unwrap_or_default().to_os_string();
+    name.push(".sha256");
+    artifact.with_file_name(name)
+}
+
+/// Digest the catalog expects for a model id.
+pub fn catalog_sha256(model_id: &str) -> Option<String> {
+    list_models()
+        .into_iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.sha256)
+}
+
+/// Whether an artifact may be handed to whisper.cpp / llama.cpp.
+///
+/// Reads the 64-byte sidecar instead of hashing: this is called from the record
+/// gate and from the settings screen, and re-hashing a gigabyte there would make
+/// the UI hang. The hash itself is computed once, on download or on the
+/// verify-in-place path.
+pub fn artifact_is_verified(artifact: &Path, model_id: &str) -> bool {
+    let plausible = artifact.is_file()
+        && std::fs::metadata(artifact)
+            .map(|m| m.len() > 1_000_000)
+            .unwrap_or(false);
+    if !plausible {
+        return false;
+    }
+    let Some(expected) = catalog_sha256(model_id) else {
+        return false;
+    };
+    std::fs::read_to_string(artifact_marker_path(artifact))
+        .map(|recorded| recorded.trim().eq_ignore_ascii_case(&expected))
+        .unwrap_or(false)
+}
+
+fn write_artifact_marker(artifact: &Path, sha256: &str) -> Result<(), String> {
+    std::fs::write(artifact_marker_path(artifact), sha256).map_err(|e| e.to_string())
 }
 
 fn model_artifact_path(id: &str, kind: &str) -> PathBuf {
@@ -126,6 +175,35 @@ where
     let dest = PathBuf::from(&info.path);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    // An artifact may already be on disk from a build that did not verify anything.
+    // Hash it before pulling hundreds of MB again: if it is genuine, this costs a
+    // few seconds and records the marker; if it is not, the download proceeds and
+    // replaces it.
+    if dest.is_file() {
+        on_progress(DownloadProgress {
+            model_id: model_id.into(),
+            downloaded_bytes: 0,
+            total_bytes: info.size_hint_bytes,
+            done: false,
+            error: None,
+            phase: "verifying".into(),
+        });
+        if let Ok(existing) = sha256_file(&dest) {
+            if existing.eq_ignore_ascii_case(&info.sha256) {
+                write_artifact_marker(&dest, &info.sha256)?;
+                on_progress(DownloadProgress {
+                    model_id: model_id.into(),
+                    downloaded_bytes: std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
+                    total_bytes: info.size_hint_bytes,
+                    done: true,
+                    error: None,
+                    phase: "done".into(),
+                });
+                return Ok(dest);
+            }
+        }
     }
 
     on_progress(DownloadProgress {
@@ -221,6 +299,7 @@ where
             "downloaded artifact too small ({final_len} bytes) — URL may not be a model file"
         ));
     }
+    write_artifact_marker(&dest, &info.sha256)?;
 
     on_progress(DownloadProgress {
         model_id: model_id.into(),
@@ -328,6 +407,38 @@ mod tests {
             .unwrap()
             .sha256;
         assert!(!sha256_file(&p).unwrap().eq_ignore_ascii_case(&expected));
+    }
+
+    /// The marker records that *this code* checked these bytes once. It is not a
+    /// defence against someone who can already write inside the app data directory —
+    /// they could rewrite the marker too. It exists to stop artifacts of unknown
+    /// provenance, including everything downloaded before checksums existed, from
+    /// being handed to a C++ parser.
+    #[test]
+    fn an_unverified_artifact_is_never_ready() {
+        let dir = tempdir().unwrap();
+        let artifact = dir.path().join("model.bin");
+        std::fs::write(&artifact, vec![0u8; 1_100_000]).unwrap();
+        let expected = catalog_sha256("whisper-tiny").unwrap();
+
+        // Big file, no marker: this is the state left by the old download path.
+        assert!(!artifact_is_verified(&artifact, "whisper-tiny"));
+
+        // Marker from a different model must not vouch for this one.
+        write_artifact_marker(&artifact, &catalog_sha256("whisper-base").unwrap()).unwrap();
+        assert!(!artifact_is_verified(&artifact, "whisper-tiny"));
+
+        write_artifact_marker(&artifact, &expected).unwrap();
+        assert!(artifact_is_verified(&artifact, "whisper-tiny"));
+    }
+
+    #[test]
+    fn a_marked_but_tiny_artifact_is_not_ready() {
+        let dir = tempdir().unwrap();
+        let artifact = dir.path().join("model.bin");
+        std::fs::write(&artifact, b"too small to be a model").unwrap();
+        write_artifact_marker(&artifact, &catalog_sha256("whisper-tiny").unwrap()).unwrap();
+        assert!(!artifact_is_verified(&artifact, "whisper-tiny"));
     }
 
     #[test]

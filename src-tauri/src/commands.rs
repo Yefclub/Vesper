@@ -711,11 +711,16 @@ pub fn check_updates_config() -> serde_json::Value {
 
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
 
-/// True only when the updater public key is a real signing key.
+/// True only when the updater public key is structurally a minisign public key.
 ///
-/// A minisign public key carries an untrusted comment in its payload, and the
-/// placeholder shipped for development says so in plain text. Until a real key is
-/// wired through CI, the honest answer is `false`.
+/// Checking for the placeholder's wording would be enough to catch today's value
+/// and nothing else: any other base64 string — `dGVzdA==` decodes to `test` —
+/// would pass while still being unusable for signature verification, putting the
+/// command right back to claiming a guarantee the build does not have.
+///
+/// A minisign public key file is an untrusted-comment line followed by a base64
+/// line carrying 42 bytes: a two-byte algorithm tag, an eight-byte key id and the
+/// 32-byte key. The development placeholder has no such line at all.
 fn updater_pubkey_is_real(conf: &serde_json::Value) -> bool {
     use base64::Engine as _;
     let Some(pubkey) = conf
@@ -724,12 +729,69 @@ fn updater_pubkey_is_real(conf: &serde_json::Value) -> bool {
     else {
         return false;
     };
-    if pubkey.trim().is_empty() {
-        return false;
-    }
-    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(pubkey) else {
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(pubkey.trim()) else {
         return false;
     };
-    let text = String::from_utf8_lossy(&decoded).to_ascii_lowercase();
-    !text.contains("placeholder") && !text.contains("dev only")
+    String::from_utf8_lossy(&decoded)
+        .lines()
+        .any(is_minisign_key_line)
+}
+
+fn is_minisign_key_line(line: &str) -> bool {
+    use base64::Engine as _;
+    let line = line.trim();
+    // "Ed" is the only signature algorithm minisign emits for public keys.
+    base64::engine::general_purpose::STANDARD
+        .decode(line)
+        .map(|raw| raw.len() == 42 && raw.starts_with(b"Ed"))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn conf_with_pubkey(pubkey: &str) -> serde_json::Value {
+        serde_json::json!({ "plugins": { "updater": { "pubkey": pubkey } } })
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn the_shipped_placeholder_is_not_a_configured_key() {
+        let conf: serde_json::Value = serde_json::from_str(TAURI_CONF).unwrap();
+        assert!(
+            !updater_pubkey_is_real(&conf),
+            "tauri.conf.json still carries a development placeholder; reporting it as \
+             configured would claim a signature guarantee the build does not have"
+        );
+    }
+
+    #[test]
+    fn an_arbitrary_base64_string_is_not_a_key() {
+        // Decodes to "test": no minisign key line, so it cannot verify anything.
+        assert!(!updater_pubkey_is_real(&conf_with_pubkey("dGVzdA==")));
+        assert!(!updater_pubkey_is_real(&conf_with_pubkey("")));
+        assert!(!updater_pubkey_is_real(&conf_with_pubkey("not base64 at all")));
+        assert!(!updater_pubkey_is_real(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn a_structurally_valid_minisign_key_is_accepted() {
+        let mut raw = Vec::from(*b"Ed");
+        raw.extend_from_slice(&[7u8; 8]); // key id
+        raw.extend_from_slice(&[9u8; 32]); // key
+        let file = format!("untrusted comment: minisign public key\n{}\n", b64(&raw));
+        assert!(updater_pubkey_is_real(&conf_with_pubkey(&b64(file.as_bytes()))));
+    }
+
+    #[test]
+    fn a_key_line_of_the_wrong_length_is_rejected() {
+        let raw = Vec::from(*b"Ed");
+        let file = format!("untrusted comment: truncated\n{}\n", b64(&raw));
+        assert!(!updater_pubkey_is_real(&conf_with_pubkey(&b64(file.as_bytes()))));
+    }
 }
