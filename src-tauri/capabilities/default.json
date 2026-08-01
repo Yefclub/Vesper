@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for Vesper",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "dialog:default",
+    "fs:default",
+    "notification:default",
+    "process:default",
+    "updater:default",
+    "global-shortcut:default"
+  ]
+}

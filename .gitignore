@@ -1,0 +1,71 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+dist/
+dist-ssr/
+build/
+*.tsbuildinfo
+.vite/
+target/
+src-tauri/target/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.key
+*.pem
+
+# Local / personal (not versioned)
+CLAUDE.local.md
+SPEC.md
+.claude/settings.local.json
+.claude/worktrees/
+.grok/
+
+# Models / large binaries (downloaded at runtime)
+models/
+*.gguf
+*.onnx
+# keep source placeholders if any
+!**/src/**/*.bin
+
+# App data / recordings (local only)
+data/
+recordings/
+*.wav
+*.mp3
+*.m4a
+*.webm
+
+# IDE / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Logs / coverage
+*.log
+logs/
+coverage/
+.nyc_output/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test artifacts
+playwright-report/
+test-results/
+
+# Tauri gen (local)
+src-tauri/gen/schemas/*.json
+!src-tauri/gen/schemas/.gitkeep
