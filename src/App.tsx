@@ -30,6 +30,7 @@ import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise, segmentArrive } from "./lib/motion";
 import { Button, FOCUS } from "./components/Button";
+import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { RecordDock } from "./components/RecordDock";
@@ -123,6 +124,7 @@ function AppShell({
   /// component owns the meetings, the transcript, the chat and the recorder
   /// status — a state write here would re-render the whole shell per frame.
   const pinnedRef = useRef(true);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -329,6 +331,22 @@ function AppShell({
     },
     [pinToBottom],
   );
+
+  // The composer grows with what is typed into it, between `min-h-9` and
+  // `max-h-40`, both of which stay in CSS so the clamp survives this write.
+  // `tab` is a dependency because the element only exists on the chat tab, so
+  // mounting it is what needs the first measurement.
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [question, tab]);
+
+  /// `handleChat` appends the question, awaits, then appends the answer — so
+  /// the thread shows nothing at all in between. Keyed on the last message
+  /// rather than on `busy`, which is also raised by summarizing and importing.
+  const pending = busy && chat[chat.length - 1]?.role === "user";
 
   /// The dock and the hotkey both go through here, so the reminder cannot be
   /// skipped by starting a recording from the keyboard.
@@ -774,43 +792,100 @@ function AppShell({
                     <motion.div
                       key="chat"
                       {...fadeRise}
-                      className="mx-auto flex h-full max-w-reading flex-col"
+                      className="mx-auto max-w-reading space-y-4"
                       data-testid="chat-panel"
                     >
-                      <div className="flex-1 space-y-3 overflow-y-auto pb-4">
-                        {chat.map((m, i) => (
+                      {chat.map((m, i) => (
+                        // Alignment lives on the row, not on the bubble: an
+                        // `ml-auto` on the bubble left the assistant with no
+                        // alignment class at all and the row with nothing to
+                        // hang a hover affordance off.
+                        <div
+                          key={i}
+                          className={`flex w-full ${
+                            m.role === "user" ? "justify-end" : "justify-start"
+                          }`}
+                        >
+                          {/* The bubble is what says "a person typed this". The
+                              model's answer is the document, so it gets no fill,
+                              no border and the full width. */}
                           <div
-                            key={i}
-                            className={`rounded-lg border border-border px-4 py-3 text-sm ${
+                            className={
                               m.role === "user"
-                                ? "ml-auto max-w-[80%] bg-surface-2"
-                                : "max-w-[90%] bg-surface-1"
-                            }`}
+                                ? "max-w-[85%] rounded-lg bg-surface-2 px-4 py-2 text-base"
+                                : "w-full p-0 text-base"
+                            }
                           >
                             {m.content}
                           </div>
-                        ))}
-                      </div>
-                      <div className="flex gap-2 border-t border-border pt-3">
-                        <input
-                          value={question}
-                          onChange={(e) => setQuestion(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && handleChat()}
-                          placeholder={t("chat.placeholder")}
-                          className="flex-1 rounded-md border border-border bg-surface-2 px-4 py-2 text-sm outline-none focus:border-accent"
-                        />
-                        <button
-                          onClick={handleChat}
-                          disabled={busy}
-                          className="flex items-center gap-1 rounded-md bg-accent px-4 py-2 text-sm font-medium text-background disabled:opacity-50"
-                        >
-                          <MessageSquare size={16} /> {t("action.send")}
-                        </button>
-                      </div>
+                        </div>
+                      ))}
+                      {pending && (
+                        // Flat, full-width and already in the assistant's shape,
+                        // so nothing reflows when the real answer replaces it.
+                        <div className="flex w-full justify-start">
+                          <p className="shimmer-text w-full text-base">
+                            {t("chat.thinking")}
+                          </p>
+                        </div>
+                      )}
                     </motion.div>
                   )}
                 </AnimatePresence>
               </div>
+
+              {/* Pinned to the pane, outside the scroll container. It used to
+                  live inside it, which put a second scrollbar inside the first
+                  one. No `border-t` above it either — it carries its own border,
+                  and a divider 1px away from that is two hard divides in a row. */}
+              {tab === "chat" && (
+                <form
+                  className="px-6 pb-6"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void handleChat();
+                  }}
+                >
+                  <div className="mx-auto flex max-w-reading items-end gap-1 rounded-lg border border-border bg-surface-2 p-1 focus-within:border-border-strong">
+                    <textarea
+                      ref={composerRef}
+                      value={question}
+                      rows={1}
+                      onChange={(e) => setQuestion(e.target.value)}
+                      onKeyDown={(e) => {
+                        // `isComposing` guards the IME: confirming a candidate
+                        // with Enter used to send the half-typed question.
+                        // Shift+Enter is the newline, which is why this is a
+                        // textarea and not the input it replaced — a pasted
+                        // multi-line question was invisible past line one.
+                        if (
+                          e.key === "Enter" &&
+                          !e.shiftKey &&
+                          !e.nativeEvent.isComposing
+                        ) {
+                          e.preventDefault();
+                          void handleChat();
+                        }
+                      }}
+                      placeholder={t("chat.placeholder")}
+                      aria-label={t("chat.placeholder")}
+                      className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-3 py-1 text-base outline-none placeholder:text-fg-subtle"
+                    />
+                    {/* Inside the field, and not `bg-accent`: one accent fill
+                        per screen, and the record dock owns it. */}
+                    <Button
+                      type="submit"
+                      variant="secondary"
+                      size="icon"
+                      disabled={busy || !question.trim()}
+                      title={t("action.send")}
+                      aria-label={t("action.send")}
+                    >
+                      <MessageSquare size={16} />
+                    </Button>
+                  </div>
+                </form>
+              )}
             </>
           ) : (
             <div className="flex flex-1 items-center justify-center p-8">
@@ -943,9 +1018,10 @@ function Section({ title, body }: { title: string; body: string }) {
       <h2 className="mb-2 text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
         {title}
       </h2>
-      <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-fg">
-        {body}
-      </pre>
+      {/* Not a `<pre>`. The summariser is asked for markdown, so the app's
+          headline deliverable — the first thing read after a recording stops —
+          was reaching the screen as literal `**` and `- `. */}
+      <Markdown text={body} />
     </section>
   );
 }
