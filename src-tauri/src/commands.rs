@@ -39,9 +39,10 @@ pub struct AppState {
     /// Whether the API key is known to be in the OS keychain. False means a
     /// legacy row still holds it and the migration has yet to succeed.
     pub key_in_keychain: AtomicBool,
-    /// Guards live transcription so overlapping polls cannot drain the audio
-    /// buffer twice. See SttFlight.
-    pub stt_in_flight: AtomicBool,
+    /// Held for the duration of a transcription pass. `try_lock` gives the live
+    /// poll its single-flight behaviour; `lock().await` lets stop wait for a pass
+    /// that is already running instead of racing it to the transcript.
+    pub stt_flight: tokio::sync::Mutex<()>,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -61,7 +62,7 @@ impl AppState {
             live: Mutex::new(HashMap::new()),
             active_meeting: Mutex::new(None),
             key_in_keychain: AtomicBool::new(in_keychain),
-            stt_in_flight: AtomicBool::new(false),
+            stt_flight: tokio::sync::Mutex::new(()),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -113,26 +114,6 @@ pub struct RecorderStatus {
 #[tauri::command]
 pub fn get_settings(state: State<'_, Arc<AppState>>) -> AppSettings {
     state.settings.lock().public_view()
-}
-
-/// Marks live transcription as in progress and clears the flag on drop, so an
-/// early return or a `?` cannot leave the recorder permanently "busy".
-struct SttFlight<'a>(&'a AtomicBool);
-
-impl<'a> SttFlight<'a> {
-    fn acquire(state: &'a AppState) -> Option<Self> {
-        state
-            .stt_in_flight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| Self(&state.stt_in_flight))
-    }
-}
-
-impl Drop for SttFlight<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
 }
 
 /// Blank and absent mean the same thing for a credential; comparing the raw
@@ -487,6 +468,13 @@ pub async fn stop_recording(
     state.db.upsert_meeting(&meeting)?;
     *state.active_meeting.lock() = None;
 
+    // Wait for a live poll that is still transcribing before reading the
+    // transcript. Without this, stopping mid-chunk reads a transcript that is
+    // missing the tail, persists it, marks the meeting ready — and the poll then
+    // writes its result into the in-memory map only. Reopening the meeting shows
+    // the transcript with the last chunk gone.
+    let _flight = state.stt_flight.lock().await;
+
     // Final dual-channel STT pass on saved stereo WAV (L=Me, R=Others)
     let settings = state.settings.lock().clone();
     let mut live = state
@@ -553,9 +541,8 @@ pub async fn poll_live_stt(
     // whatever `elapsed_ms` reads at drain time, and the transcript comes out in
     // the wrong order. Overlapping polls now just return what is already there;
     // the audio stays in the buffer for the next turn.
-    let _flight = match SttFlight::acquire(&state) {
-        Some(guard) => guard,
-        None => return Ok(state.live.lock().get(&id).cloned().unwrap_or_default()),
+    let Ok(_flight) = state.stt_flight.try_lock() else {
+        return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
     };
     let (mic, sys, sr) = state.recorder.drain_chunks();
     if mic.is_empty() && sys.is_empty() {
@@ -653,18 +640,9 @@ pub async fn import_audio(
     title: Option<String>,
 ) -> Result<MeetingRecord, String> {
     let path = PathBuf::from(path);
-    // Decoding materialises the whole file as PCM in memory, so an unbounded
-    // import is an out-of-memory crash waiting for a long recording. Twelve hours
-    // is far past any real meeting and still only a few hundred MB decoded.
-    const MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-    let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
-    if size > MAX_IMPORT_BYTES {
-        return Err(format!(
-            "audio file is too large to import ({} MB); split it into shorter recordings",
-            size / (1024 * 1024)
-        ));
-    }
-    // Multi-format: wav/mp3/m4a/ogg/flac/webm via decode layer
+    // Multi-format: wav/mp3/m4a/ogg/flac/webm via decode layer.
+    // The length ceiling lives in the decoder, where it can stop before the
+    // allocation happens — see MAX_DECODED_SAMPLES.
     let (pcm, sr) = decode_audio_file(&path).map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
