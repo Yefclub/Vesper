@@ -133,16 +133,25 @@ fn normalised_key(key: &Option<String>) -> Option<String> {
 fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSettings, String> {
     // The front end only ever sees a redacted key, so a redacted value coming
     // back means "unchanged", not "set it to these characters".
-    let previous = {
+    let (previous, previous_llm_model) = {
         let current = state.settings.lock();
         if let Some(k) = &settings.openrouter_api_key {
             if k.contains('…') || k == "****" {
                 settings.openrouter_api_key = current.openrouter_api_key.clone();
             }
         }
-        normalised_key(&current.openrouter_api_key)
+        (
+            normalised_key(&current.openrouter_api_key),
+            current.openrouter_llm_model.clone(),
+        )
     };
     settings.validate_models().map_err(|e| e.to_string())?;
+    // Only an actual change counts as a pick: every save comes through here, and a
+    // save that touched the microphone must not reshuffle the model list.
+    if settings.openrouter_llm_model != previous_llm_model {
+        let picked = settings.openrouter_llm_model.clone();
+        settings.remember_recent_llm_model(&picked);
+    }
     // The key must be somewhere durable before the row is allowed to drop it, and
     // there are two candidate homes while a migration is outstanding. Decide which
     // one is holding it first, then write the row accordingly — `KeyHome` exists so
