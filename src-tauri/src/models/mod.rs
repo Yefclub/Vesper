@@ -1,9 +1,13 @@
+use crate::domain::download::{
+    backoff, describe, is_retryable_status, plan_resume, ProgressPacer, ResumeAction, Sample,
+};
 use crate::paths::models_dir;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tar::Archive;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +37,57 @@ pub struct DownloadProgress {
     pub done: bool,
     pub error: Option<String>,
     pub phase: String,
+    pub bytes_per_sec: Option<u64>,
+    pub eta_secs: Option<u64>,
+    pub attempt: u32,
+    pub resumed_from_bytes: u64,
+}
+
+impl DownloadProgress {
+    /// A frame that reports where the download stands, not how fast it is moving.
+    fn phase(
+        model_id: &str,
+        phase: &str,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        done: bool,
+    ) -> Self {
+        Self {
+            model_id: model_id.into(),
+            downloaded_bytes,
+            total_bytes,
+            done,
+            error: None,
+            phase: phase.into(),
+            bytes_per_sec: None,
+            eta_secs: None,
+            attempt: 1,
+            resumed_from_bytes: 0,
+        }
+    }
+
+    /// A frame from inside the transfer loop, already paced.
+    fn transfer(
+        model_id: &str,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        sample: Sample,
+        attempt: u32,
+        resumed_from_bytes: u64,
+    ) -> Self {
+        Self {
+            model_id: model_id.into(),
+            downloaded_bytes,
+            total_bytes,
+            done: false,
+            error: None,
+            phase: "downloading".into(),
+            bytes_per_sec: sample.bytes_per_sec,
+            eta_secs: sample.eta_secs,
+            attempt,
+            resumed_from_bytes,
+        }
+    }
 }
 
 /// Catalog of local models with **direct** artifact URLs (not empty placeholders).
@@ -189,110 +244,107 @@ where
     // few seconds and records the marker; if it is not, the download proceeds and
     // replaces it.
     if dest.is_file() {
-        on_progress(DownloadProgress {
-            model_id: model_id.into(),
-            downloaded_bytes: 0,
-            total_bytes: info.size_hint_bytes,
-            done: false,
-            error: None,
-            phase: "verifying".into(),
-        });
+        on_progress(DownloadProgress::phase(
+            model_id,
+            "verifying",
+            0,
+            info.size_hint_bytes,
+            false,
+        ));
         if let Ok(existing) = sha256_file(&dest) {
             if existing.eq_ignore_ascii_case(&info.sha256) {
                 write_artifact_marker(&dest, &info.sha256)?;
-                on_progress(DownloadProgress {
-                    model_id: model_id.into(),
-                    downloaded_bytes: std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
-                    total_bytes: info.size_hint_bytes,
-                    done: true,
-                    error: None,
-                    phase: "done".into(),
-                });
+                on_progress(DownloadProgress::phase(
+                    model_id,
+                    "done",
+                    std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
+                    info.size_hint_bytes,
+                    true,
+                ));
                 return Ok(dest);
             }
         }
     }
 
-    on_progress(DownloadProgress {
-        model_id: model_id.into(),
-        downloaded_bytes: 0,
-        total_bytes: info.size_hint_bytes,
-        done: false,
-        error: None,
-        phase: "connecting".into(),
-    });
+    on_progress(DownloadProgress::phase(
+        model_id,
+        "connecting",
+        0,
+        info.size_hint_bytes,
+        false,
+    ));
 
     let client = reqwest::Client::builder()
         .user_agent("Vesper/0.1")
+        .connect_timeout(Duration::from_secs(10))
+        // Deliberately no total `.timeout()`: qwen2.5-1.5b is 1.1 GB, and a deadline
+        // on the whole transfer is a manufactured failure on any slow link.
+        // `read_timeout` resets on every successful read, so it only fires on a
+        // stream that has genuinely died — which used to hang forever.
+        .read_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
-    let res = client.get(url).send().await.map_err(|e| e.to_string())?;
-    if !res.status().is_success() {
-        let status = res.status();
-        return Err(format!("download failed: {status}"));
-    }
-    let total = res.content_length().or(info.size_hint_bytes);
-    let tmp = dest.with_extension("part");
-    let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    let mut downloaded = 0u64;
-    let mut stream = res.bytes_stream();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        file.write_all(&chunk).map_err(|e| e.to_string())?;
-        downloaded += chunk.len() as u64;
-        on_progress(DownloadProgress {
-            model_id: model_id.into(),
-            downloaded_bytes: downloaded,
-            total_bytes: total,
-            done: false,
-            error: None,
-            phase: "downloading".into(),
-        });
-    }
-    file.flush().map_err(|e| e.to_string())?;
-    drop(file);
+    let tmp = dest.with_extension("part");
+    let mut pacer = ProgressPacer::new();
+    let downloaded = fetch_to_file(
+        &client,
+        model_id,
+        url,
+        &tmp,
+        info.size_hint_bytes,
+        &mut pacer,
+        &mut on_progress,
+    )
+    .await?;
+    let total = Some(downloaded);
 
     // Verify what came off the network, before anything reads or extracts it.
-    on_progress(DownloadProgress {
-        model_id: model_id.into(),
-        downloaded_bytes: downloaded,
-        total_bytes: total,
-        done: false,
-        error: None,
-        phase: "verifying".into(),
-    });
-    let actual = sha256_file(&tmp)?;
+    on_progress(DownloadProgress::phase(
+        model_id,
+        "verifying",
+        downloaded,
+        total,
+        false,
+    ));
+    // Hashing a gigabyte takes seconds; on a runtime worker that blocks every other
+    // task on the executor, including the event pump feeding the UI.
+    let hashed = tmp.clone();
+    let actual = tokio::task::spawn_blocking(move || sha256_file(&hashed))
+        .await
+        .map_err(|e| e.to_string())??;
     if !actual.eq_ignore_ascii_case(&info.sha256) {
         let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(part_etag_path(&tmp));
         return Err(format!(
             "checksum mismatch for {model_id}: expected {}, got {actual} — artifact discarded",
             info.sha256
         ));
     }
+    // The bytes are complete and vouched for; the resume sidecar has nothing left to
+    // guard.
+    let _ = std::fs::remove_file(part_etag_path(&tmp));
 
     // Archive handling
     let lower = url.to_ascii_lowercase();
     if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        on_progress(DownloadProgress {
-            model_id: model_id.into(),
-            downloaded_bytes: downloaded,
-            total_bytes: total,
-            done: false,
-            error: None,
-            phase: "extracting".into(),
-        });
+        on_progress(DownloadProgress::phase(
+            model_id,
+            "extracting",
+            downloaded,
+            total,
+            false,
+        ));
         extract_tar_gz(&tmp, dest.parent().unwrap(), &dest)?;
         let _ = std::fs::remove_file(&tmp);
     } else if lower.ends_with(".tar") {
-        on_progress(DownloadProgress {
-            model_id: model_id.into(),
-            downloaded_bytes: downloaded,
-            total_bytes: total,
-            done: false,
-            error: None,
-            phase: "extracting".into(),
-        });
+        on_progress(DownloadProgress::phase(
+            model_id,
+            "extracting",
+            downloaded,
+            total,
+            false,
+        ));
         extract_tar(&tmp, dest.parent().unwrap(), &dest)?;
         let _ = std::fs::remove_file(&tmp);
     } else {
@@ -308,15 +360,204 @@ where
     }
     write_artifact_marker(&dest, &info.sha256)?;
 
-    on_progress(DownloadProgress {
-        model_id: model_id.into(),
-        downloaded_bytes: final_len,
-        total_bytes: Some(final_len),
-        done: true,
-        error: None,
-        phase: "done".into(),
-    });
+    on_progress(DownloadProgress::phase(
+        model_id,
+        "done",
+        final_len,
+        Some(final_len),
+        true,
+    ));
     Ok(dest)
+}
+
+/// Sidecar holding the ETag of the object a `.part` file was cut from.
+///
+/// Sent back as `If-Range` on a resume so that an artifact which changed between
+/// attempts comes back whole instead of spliced onto stale bytes.
+fn part_etag_path(part: &Path) -> PathBuf {
+    let mut name = part.file_name().unwrap_or_default().to_os_string();
+    name.push(".etag");
+    part.with_file_name(name)
+}
+
+fn store_part_etag(etag_path: &Path, response: &reqwest::Response) {
+    match response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(etag) => {
+            let _ = std::fs::write(etag_path, etag);
+        }
+        None => {
+            let _ = std::fs::remove_file(etag_path);
+        }
+    }
+}
+
+/// Sleep out the backoff, or surface `reason` once the budget is spent.
+async fn wait_before_retry(consecutive_failures: u32, reason: String) -> Result<(), String> {
+    match backoff(consecutive_failures) {
+        Some(delay) => {
+            tokio::time::sleep(delay).await;
+            Ok(())
+        }
+        None => Err(reason),
+    }
+}
+
+/// Stream `url` into `tmp`, resuming from whatever is already there and retrying a
+/// dropped connection until the budget runs out.
+///
+/// **Private, and it stays private.** `download_model_with_progress` is the only
+/// entry point and it resolves the URL from the internal catalog; a `pub` here would
+/// hand the IPC boundary a way to choose where the bytes come from, and the bytes go
+/// straight into a C++ parser.
+async fn fetch_to_file(
+    client: &reqwest::Client,
+    model_id: &str,
+    url: &str,
+    tmp: &Path,
+    size_hint: Option<u64>,
+    pacer: &mut ProgressPacer,
+    on_progress: &mut (dyn FnMut(DownloadProgress) + Send),
+) -> Result<u64, String> {
+    let etag_path = part_etag_path(tmp);
+    let mut consecutive_failures = 0u32;
+    let mut attempt = 1u32;
+
+    loop {
+        let part_len = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
+        let mut request = client.get(url);
+        if part_len > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={part_len}-"));
+            if let Ok(etag) = std::fs::read_to_string(&etag_path) {
+                if !etag.trim().is_empty() {
+                    request = request.header(reqwest::header::IF_RANGE, etag.trim());
+                }
+            }
+        }
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                consecutive_failures += 1;
+                wait_before_retry(consecutive_failures, describe(&error)).await?;
+                attempt += 1;
+                continue;
+            }
+        };
+
+        let status = response.status().as_u16();
+        let content_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let (file, mut downloaded, total) = match plan_resume(
+            part_len,
+            status,
+            response.content_length(),
+            content_range.as_deref(),
+        ) {
+            ResumeAction::Append { from, total } => (
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(tmp)
+                    .map_err(|e| e.to_string())?,
+                from,
+                total.or(size_hint),
+            ),
+            ResumeAction::Restart { total } => {
+                store_part_etag(&etag_path, &response);
+                (
+                    std::fs::File::create(tmp).map_err(|e| e.to_string())?,
+                    0,
+                    total.or(size_hint),
+                )
+            }
+            ResumeAction::DiscardAndRestart => {
+                let _ = std::fs::remove_file(tmp);
+                let _ = std::fs::remove_file(&etag_path);
+                // Costs a retry slot on purpose: the next request carries no `Range`,
+                // so a server that answers 416 again is broken and must not be looped on.
+                consecutive_failures += 1;
+                wait_before_retry(
+                    consecutive_failures,
+                    format!("download failed: HTTP {status}"),
+                )
+                .await?;
+                attempt += 1;
+                continue;
+            }
+            ResumeAction::Fail(status) => {
+                let reason = format!("download failed: HTTP {status}");
+                if !is_retryable_status(status) {
+                    return Err(reason);
+                }
+                consecutive_failures += 1;
+                wait_before_retry(consecutive_failures, reason).await?;
+                attempt += 1;
+                continue;
+            }
+        };
+
+        let resumed_from = downloaded;
+        // Forced: a retry boundary changes what the row says, and the bar would
+        // otherwise sit still through the backoff.
+        if let Some(sample) = pacer.tick(Instant::now(), downloaded, total, true) {
+            on_progress(DownloadProgress::transfer(
+                model_id,
+                downloaded,
+                total,
+                sample,
+                attempt,
+                resumed_from,
+            ));
+        }
+
+        let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+        let mut stream = response.bytes_stream();
+        let mut transport_error = None;
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    transport_error = Some(describe(&error));
+                    break;
+                }
+            };
+            writer.write_all(&chunk).map_err(|e| e.to_string())?;
+            downloaded += chunk.len() as u64;
+            if let Some(sample) = pacer.tick(Instant::now(), downloaded, total, false) {
+                on_progress(DownloadProgress::transfer(
+                    model_id,
+                    downloaded,
+                    total,
+                    sample,
+                    attempt,
+                    resumed_from,
+                ));
+            }
+        }
+        writer.flush().map_err(|e| e.to_string())?;
+        drop(writer);
+
+        let Some(reason) = transport_error else {
+            return Ok(downloaded);
+        };
+
+        // The `.part` file is never removed on this path. Those bytes are the resume
+        // point, and throwing them away is what turned one dropped connection into a
+        // fresh 276 MB download.
+        consecutive_failures = if downloaded > resumed_from {
+            0
+        } else {
+            consecutive_failures + 1
+        };
+        wait_before_retry(consecutive_failures, reason).await?;
+        attempt += 1;
+    }
 }
 
 /// Streaming SHA-256 of a file — models are hundreds of MB, so never read one whole.
@@ -454,5 +695,111 @@ mod tests {
         assert!(stt.ends_with("model.bin"));
         let llm = model_artifact_path("qwen2.5-0.5b", "llm");
         assert!(llm.ends_with("model.gguf"));
+    }
+
+    /// The one test that exercises the whole transfer path. A connection that dies
+    /// mid-stream must come back where it left off — the old loop truncated the
+    /// `.part` on every attempt, so a drop at 56% cost the user all 276 MB.
+    #[tokio::test]
+    async fn a_dropped_connection_resumes_from_the_part_file() {
+        const TOTAL: usize = 1024 * 1024;
+        const CUT: usize = TOTAL / 2;
+        let body: Vec<u8> = (0..TOTAL).map(|i| (i % 251) as u8).collect();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = body.clone();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut heads: Vec<String> = Vec::new();
+            for request in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let read = socket.read(&mut buf).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..read]);
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+
+                if request == 0 {
+                    socket
+                        .write_all(
+                            format!("HTTP/1.1 200 OK\r\nContent-Length: {TOTAL}\r\nAccept-Ranges: bytes\r\nETag: \"v1\"\r\n\r\n")
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    // Half a body against a declared full length, then the socket
+                    // goes away: exactly the shape that printed "error decoding
+                    // response body" and nothing else.
+                    socket.write_all(&served[..CUT]).await.unwrap();
+                } else {
+                    let from: usize = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("range: bytes=")
+                                .map(str::to_owned)
+                        })
+                        .and_then(|value| value.trim_end_matches('-').parse().ok())
+                        .expect("the retry must carry a Range header");
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{}/{TOTAL}\r\n\r\n",
+                                TOTAL - from,
+                                TOTAL - 1
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    socket.write_all(&served[from..]).await.unwrap();
+                }
+                socket.shutdown().await.unwrap();
+                heads.push(head);
+            }
+            heads
+        });
+
+        let dir = tempdir().unwrap();
+        let tmp = dir.path().join("model.part");
+        let client = reqwest::Client::builder().build().unwrap();
+        let mut pacer = ProgressPacer::new();
+        let mut events: Vec<DownloadProgress> = Vec::new();
+        let downloaded = fetch_to_file(
+            &client,
+            "test-model",
+            &format!("http://{addr}/model.gguf"),
+            &tmp,
+            Some(TOTAL as u64),
+            &mut pacer,
+            &mut |p: DownloadProgress| events.push(p),
+        )
+        .await
+        .unwrap();
+        let heads = server.await.unwrap();
+
+        assert_eq!(downloaded, TOTAL as u64);
+        assert_eq!(
+            std::fs::read(&tmp).unwrap(),
+            body,
+            "the resumed file is not byte-identical to what was served"
+        );
+        assert!(
+            heads[1].contains(&format!("bytes={CUT}-")),
+            "the retry started over instead of resuming:\n{}",
+            heads[1]
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.attempt == 2 && e.resumed_from_bytes == CUT as u64),
+            "the resume never reached the UI payload"
+        );
     }
 }

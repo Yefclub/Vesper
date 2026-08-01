@@ -1,5 +1,6 @@
 pub mod capabilities;
 pub mod chat;
+pub mod download;
 pub mod export;
 pub mod gate;
 pub mod i18n;

@@ -816,7 +816,13 @@ pub fn list_models_cmd() -> Vec<ModelInfo> {
 #[tauri::command]
 pub async fn download_model_cmd(app: AppHandle, model_id: String) -> Result<String, String> {
     let path = download_model_with_progress(&model_id, move |p: DownloadProgress| {
-        let _ = app.emit("models://download-progress", &p);
+        // A dropped frame is how the freeze looked from the UI: the queue to the
+        // window thread saturates, the emit fails, and the percentage stops moving
+        // while bytes keep arriving. The pacer should make this unreachable — if it
+        // ever fires, that is the thing to look at.
+        if let Err(e) = app.emit("models://download-progress", &p) {
+            tracing::warn!("progress event dropped: {e}");
+        }
     })
     .await?;
     Ok(path.display().to_string())
