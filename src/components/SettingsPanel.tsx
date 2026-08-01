@@ -12,6 +12,8 @@ import {
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
+import { Button, FOCUS } from "./Button";
+import { Tabs } from "./Tabs";
 
 // Backend names, not translated: "Local" and "OpenRouter" read the same in
 // every locale the app ships.
@@ -141,12 +143,9 @@ export function SettingsPanel({
       >
         <div className="flex items-center justify-between border-b border-border px-4 py-4">
           <h2 className="text-base font-semibold">{t("settings.title")}</h2>
-          <button
-            onClick={onClose}
-            className="rounded-md p-1 text-fg-muted hover:bg-surface-3"
-          >
-            <X size={18} />
-          </button>
+          <Button variant="ghost" size="icon" onClick={onClose}>
+            <X size={16} />
+          </Button>
         </div>
 
         {/* Above the tabs, because these two govern them. Both used to sit
@@ -179,8 +178,12 @@ export function SettingsPanel({
           />
         </div>
 
-        <div className="flex gap-1 border-b border-border px-3 pt-2">
-          {(
+        <Tabs
+          idPrefix="settings"
+          className="px-4"
+          value={tab}
+          onChange={setTab}
+          items={(
             [
               ["local", t("settings.local"), "local"],
               ["cloud", t("settings.cloud"), "openrouter"],
@@ -190,39 +193,35 @@ export function SettingsPanel({
           ).map(([id, label, backend]) => {
             // The tab that is actually doing the work is marked. Without it the
             // two backend tabs look interchangeable and the provider choice
-            // above has nowhere to land.
+            // above has nowhere to land. The dot is success, not accent — the
+            // accent is reserved for the primary action.
             const inUse =
               backend !== null &&
               (draft.stt_provider === backend || draft.llm_provider === backend);
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setTab(id)}
-                // A dot carries no accessible name of its own — a bare
-                // `aria-label` on a span with no role is dropped — so the state
-                // goes on the tab itself.
-                aria-label={inUse ? `${label} — ${t("settings.in_use")}` : undefined}
-                title={inUse ? t("settings.in_use") : undefined}
-                className={`flex items-center gap-2 rounded-t-md px-3 py-2 text-xs ${
-                  tab === id
-                    ? "bg-surface-3 text-fg"
-                    : "text-fg-subtle hover:text-fg"
-                }`}
-              >
-                {label}
-                {inUse && (
-                  <span
-                    aria-hidden
-                    className="h-1.5 w-1.5 rounded-full bg-accent"
-                  />
-                )}
-              </button>
-            );
+            return {
+              id,
+              label,
+              // A dot carries no accessible name of its own — a bare
+              // `aria-label` on a span with no role is dropped — so the state
+              // goes on the tab itself.
+              ariaLabel: inUse ? `${label} — ${t("settings.in_use")}` : undefined,
+              title: inUse ? t("settings.in_use") : undefined,
+              badge: inUse ? (
+                <span
+                  aria-hidden
+                  className="h-1.5 w-1.5 rounded-full bg-success"
+                />
+              ) : undefined,
+            };
           })}
-        </div>
+        />
 
-        <div className="flex-1 space-y-4 overflow-y-auto p-4">
+        <div
+          id={`settings-panel-${tab}`}
+          role="tabpanel"
+          aria-labelledby={`settings-tab-${tab}`}
+          className="flex-1 space-y-4 overflow-y-auto p-4"
+        >
           {tab === "local" && (
             <>
               {/* Bound to the catalog rather than free text. Typing the id by
@@ -257,13 +256,13 @@ export function SettingsPanel({
                       </div>
                     </div>
                     {!m.ready && (
-                      <button
-                        type="button"
+                      <Button
+                        variant="secondary"
+                        size="xs"
                         onClick={() => download(m.id)}
-                        className="rounded-md bg-surface-3 px-2 py-1 text-xs hover:bg-hover"
                       >
                         {m.present ? t("model.verify") : t("model.download")}
-                      </button>
+                      </Button>
                     )}
                   </div>
                 ))}
@@ -303,7 +302,7 @@ export function SettingsPanel({
                 </span>
                 <select
                   data-testid="or-stt-select"
-                  className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+                  className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
                   value={draft.openrouter_stt_model}
                   onChange={(e) =>
                     setDraft((d) => ({
@@ -333,7 +332,7 @@ export function SettingsPanel({
                 </span>
                 <select
                   data-testid="or-llm-select"
-                  className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+                  className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
                   value={draft.openrouter_llm_model}
                   onChange={(e) =>
                     setDraft((d) => ({
@@ -367,6 +366,7 @@ export function SettingsPanel({
                       reasoning_enabled: e.target.checked,
                     }))
                   }
+                  className={FOCUS}
                 />
                 {t("settings.reasoning")}
               </label>
@@ -380,6 +380,7 @@ export function SettingsPanel({
                       auto_summarize: e.target.checked,
                     }))
                   }
+                  className={FOCUS}
                 />
                 {t("settings.auto_summarize")}
               </label>
@@ -394,7 +395,7 @@ export function SettingsPanel({
                 </span>
                 <select
                   data-testid="settings-mic"
-                  className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
+                  className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
                   value={draft.mic_device_id ?? ""}
                   onChange={(e) =>
                     setDraft((d) => ({
@@ -420,7 +421,7 @@ export function SettingsPanel({
                 </span>
                 <select
                   data-testid="settings-system"
-                  className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
+                  className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
                   value={draft.system_device_id ?? ""}
                   onChange={(e) =>
                     setDraft((d) => ({
@@ -452,7 +453,7 @@ export function SettingsPanel({
                   onClick={() =>
                     setDraft((d) => ({ ...d, ui_locale: l.code }))
                   }
-                  className={`flex-1 rounded-md border px-3 py-3 text-sm ${
+                  className={`flex-1 rounded-md border px-3 py-3 text-sm ${FOCUS} ${
                     draft.ui_locale === l.code
                       ? "border-accent bg-accent/10"
                       : "border-border"
@@ -469,14 +470,14 @@ export function SettingsPanel({
           {(msgKey || msg) && (
             <p className="mb-2 text-xs text-fg-muted">{msgKey ? t(msgKey) : msg}</p>
           )}
-          <button
-            type="button"
+          <Button
+            size="md"
+            className="w-full"
             onClick={save}
             disabled={saving}
-            className="w-full rounded-md bg-accent py-2 text-sm font-medium text-background disabled:opacity-50"
           >
             {t("settings.save")}
-          </button>
+          </Button>
         </div>
       </motion.div>
     </motion.div>
@@ -504,7 +505,7 @@ function Field({
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+        className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
       />
     </label>
   );
@@ -527,7 +528,7 @@ function FieldSelect({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+        className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

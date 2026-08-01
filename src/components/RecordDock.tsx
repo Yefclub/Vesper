@@ -4,6 +4,7 @@ import { Mic, Pause, Play, Settings, Square } from "lucide-react";
 import { AudioDevice, RecorderStatus, StartGate, formatDuration } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { transition } from "../lib/motion";
+import { Button, FOCUS } from "./Button";
 import { LevelMeter } from "./LevelMeter";
 
 interface Props {
@@ -98,12 +99,13 @@ export function RecordDock({
                   {/* The sentence is foreground, not red. Red is the accent that
                       says "look here"; a whole red paragraph just shouts. */}
                   <p className="text-xs leading-relaxed text-fg">{gateReason}</p>
-                  <button
+                  <Button
+                    variant="link"
+                    className="text-xs text-accent"
                     onClick={onOpenSettings}
-                    className="text-xs font-medium text-accent underline-offset-2 transition-colors hover:underline focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-3),0_0_0_4px_var(--color-accent)]"
                   >
                     {t("gate.fix")}
-                  </button>
+                  </Button>
                 </div>
               </div>
               {/* The arrow is the same surface and border as the balloon, rotated
@@ -143,14 +145,14 @@ export function RecordDock({
         >
           <div className="flex items-center justify-center gap-3 px-3 py-2">
             {!recording && (
-              <button
+              <Button
+                size="md"
                 data-testid="btn-record"
                 disabled={busy || blocked}
                 onClick={onStart}
-                className="flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-background transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
               >
                 <Mic size={16} aria-hidden /> {t("record.start")}
-              </button>
+              </Button>
             )}
             {recording && (
               <>
@@ -223,7 +225,7 @@ export function RecordDock({
             onClick={onOpenSettings}
             title={t("nav.settings")}
             aria-label={t("nav.settings")}
-            className="group pointer-events-auto rounded-lg border border-border bg-surface-2/95 p-2 backdrop-blur-md focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]"
+            className={`group pointer-events-auto rounded-lg border border-border bg-surface-2/95 p-2 backdrop-blur-md ${FOCUS}`}
           >
             {/* group-hover, not hover: the padding is part of the target, and a
                 hover that only lights up on the inner square feels dead at the

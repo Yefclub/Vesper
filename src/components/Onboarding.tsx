@@ -8,6 +8,7 @@ import {
   OrModel,
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
+import { Button, FOCUS } from "./Button";
 import logo from "../assets/logo.png";
 
 interface Props {
@@ -129,7 +130,7 @@ export function Onboarding({ settings, onDone }: Props) {
                     setDraft((d) => ({ ...d, ui_locale: l.code }));
                     setLocale(l.code);
                   }}
-                  className={`flex-1 rounded-md border px-3 py-3 text-sm ${
+                  className={`flex-1 rounded-md border px-3 py-3 text-sm ${FOCUS} ${
                     draft.ui_locale === l.code
                       ? "border-accent bg-accent/10 text-accent"
                       : "border-border hover:bg-surface-3"
@@ -162,7 +163,7 @@ export function Onboarding({ settings, onDone }: Props) {
                   </span>
                   <input
                     type="password"
-                    className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
+                    className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
                     value={draft.openrouter_api_key ?? ""}
                     onChange={(e) =>
                       setDraft((d) => ({
@@ -178,7 +179,7 @@ export function Onboarding({ settings, onDone }: Props) {
                     {t("settings.pick_stt_model")}
                   </span>
                   <select
-                    className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
+                    className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
                     value={draft.openrouter_stt_model}
                     onChange={(e) =>
                       setDraft((d) => ({
@@ -218,7 +219,7 @@ export function Onboarding({ settings, onDone }: Props) {
                     <span>
                       <input
                         type="radio"
-                        className="mr-2"
+                        className={`mr-2 ${FOCUS}`}
                         checked={draft.local_stt_model === m.id}
                         onChange={() =>
                           setDraft((d) => ({ ...d, local_stt_model: m.id }))
@@ -257,7 +258,7 @@ export function Onboarding({ settings, onDone }: Props) {
                     </span>
                     <input
                       type="password"
-                      className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
+                      className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
                       value={draft.openrouter_api_key ?? ""}
                       onChange={(e) =>
                         setDraft((d) => ({
@@ -275,7 +276,7 @@ export function Onboarding({ settings, onDone }: Props) {
                   </span>
                   <select
                     data-testid="or-llm-select"
-                    className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
+                    className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
                     value={draft.openrouter_llm_model}
                     onChange={(e) =>
                       setDraft((d) => ({
@@ -313,7 +314,7 @@ export function Onboarding({ settings, onDone }: Props) {
               </span>
               <select
                 data-testid="select-mic"
-                className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
+                className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
                 value={draft.mic_device_id ?? ""}
                 onChange={(e) =>
                   setDraft((d) => ({
@@ -337,7 +338,7 @@ export function Onboarding({ settings, onDone }: Props) {
               </span>
               <select
                 data-testid="select-system"
-                className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
+                className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
                 value={draft.system_device_id ?? ""}
                 onChange={(e) =>
                   setDraft((d) => ({
@@ -384,31 +385,22 @@ export function Onboarding({ settings, onDone }: Props) {
         {err && <p className="mt-3 text-xs text-danger">{err}</p>}
 
         <div className="mt-6 flex justify-between">
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="md"
             disabled={step === 0}
             onClick={() => setStep((s) => Math.max(0, s - 1))}
-            className="rounded-md px-4 py-2 text-sm text-fg-muted hover:bg-surface-3 disabled:opacity-30"
           >
             {t("onboarding.back")}
-          </button>
+          </Button>
           {step < steps - 1 ? (
-            <button
-              type="button"
-              onClick={() => setStep((s) => s + 1)}
-              className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-background"
-            >
+            <Button size="md" onClick={() => setStep((s) => s + 1)}>
               {t("onboarding.next")}
-            </button>
+            </Button>
           ) : (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={finish}
-              className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-background disabled:opacity-50"
-            >
+            <Button size="md" disabled={busy} onClick={finish}>
               {t("onboarding.finish")}
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -433,7 +425,7 @@ function SelectPath({
           key={o.v}
           type="button"
           onClick={() => onChange(o.v)}
-          className={`flex-1 rounded-md border px-3 py-2 text-sm ${
+          className={`flex-1 rounded-md border px-3 py-2 text-sm ${FOCUS} ${
             value === o.v
               ? "border-accent bg-accent/10"
               : "border-border hover:bg-surface-3"

@@ -3,6 +3,7 @@ import { FileUp, Search, Trash2 } from "lucide-react";
 import { MeetingRecord, SearchHit, formatDuration } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { transition } from "../lib/motion";
+import { Button, FOCUS } from "./Button";
 
 interface Props {
   meetings: MeetingRecord[];
@@ -14,11 +15,6 @@ interface Props {
   onDelete: (id: string) => void;
   onImport: () => void;
 }
-
-/** Focus ring as a box-shadow rather than an outline: outline ignores the
- *  rounded corners and draws a rectangle around a pill. */
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]";
 
 /** Local midnight for a timestamp, so comparisons are by calendar day. */
 function startOfDay(d: Date) {
@@ -77,14 +73,15 @@ export function Sidebar({
               </span>
             )}
           </h2>
-          <button
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={onImport}
             title={t("nav.import")}
             aria-label={t("nav.import")}
-            className={`rounded-md p-1.5 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg ${FOCUS_RING}`}
           >
             <FileUp size={16} />
-          </button>
+          </Button>
         </div>
 
         <div className="relative">
@@ -101,7 +98,7 @@ export function Sidebar({
             onChange={(e) => onSearch(e.target.value)}
             placeholder={t("nav.search")}
             aria-label={t("nav.search")}
-            className="w-full rounded-md border border-border bg-surface-2 py-2 pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-fg-subtle focus:border-accent/50"
+            className={`w-full rounded-md border border-border bg-surface-2 py-2 pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-fg-subtle focus:border-border-strong ${FOCUS}`}
           />
         </div>
       </div>
@@ -117,7 +114,7 @@ export function Sidebar({
               <button
                 key={h.meeting_id}
                 onClick={() => onSelect(h.meeting_id)}
-                className={`mb-1 w-full rounded-sm px-3 py-2 text-left transition-colors hover:bg-surface-2 ${FOCUS_RING}`}
+                className={`mb-1 w-full rounded-sm px-3 py-2 text-left transition-colors hover:bg-surface-2 ${FOCUS}`}
               >
                 <div className="truncate text-sm font-medium">{h.title}</div>
                 <div className="truncate text-xs text-fg-muted">{h.snippet}</div>
@@ -127,12 +124,14 @@ export function Sidebar({
         ) : meetings.length === 0 ? (
           <div className="px-3 py-8 text-center">
             <p className="text-xs leading-relaxed text-fg-muted">{t("sidebar.empty")}</p>
-            <button
+            <Button
+              variant="secondary"
+              size="xs"
+              className="mt-3"
               onClick={onImport}
-              className={`mt-3 rounded-md border border-border px-3 py-1 text-xs transition-colors hover:bg-surface-2 ${FOCUS_RING}`}
             >
               {t("sidebar.empty_cta")}
-            </button>
+            </Button>
           </div>
         ) : (
           groupByAge(meetings, t).map((group) => (
@@ -159,7 +158,7 @@ export function Sidebar({
                         aria-current={active ? "true" : undefined}
                         className={`min-w-0 flex-1 rounded-sm px-3 py-2 text-left transition-colors ${
                           active ? "" : "hover:bg-surface-2/60"
-                        } ${FOCUS_RING}`}
+                        } ${FOCUS}`}
                       >
                         <div className="truncate text-sm font-medium">{m.title}</div>
                         <div className="mt-0.5 flex items-center gap-2 text-2xs text-fg-muted">
@@ -182,7 +181,7 @@ export function Sidebar({
                         onClick={() => onDelete(m.id)}
                         title={t("nav.delete")}
                         aria-label={t("nav.delete")}
-                        className={`mr-2 mt-2 rounded-md p-1.5 text-fg-muted opacity-0 transition-colors hover:text-danger focus-visible:opacity-100 group-hover:opacity-100 ${FOCUS_RING}`}
+                        className={`mr-2 mt-2 rounded-md p-1.5 text-fg-muted opacity-0 transition-colors hover:text-danger focus-visible:opacity-100 group-hover:opacity-100 ${FOCUS}`}
                       >
                         <Trash2 size={14} />
                       </button>

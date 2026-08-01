@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { useI18n } from "../lib/i18n";
 import { backdropFade, transition } from "../lib/motion";
+import { Button } from "./Button";
 
 interface Props {
   title: string;
@@ -68,22 +69,18 @@ export function ConfirmDialog({
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">{body}</p>
         {extra && <div className="mt-4">{extra}</div>}
         <div className="mt-5 flex justify-end gap-2">
-          <button
-            onClick={onCancel}
-            className="rounded-md px-3 py-2 text-sm text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
-          >
+          <Button variant="ghost" size="md" onClick={onCancel}>
             {t("confirm.cancel")}
-          </button>
-          <button
+          </Button>
+          <Button
             ref={confirmRef}
+            variant={danger ? "danger" : "primary"}
+            size="md"
             data-testid="confirm-accept"
             onClick={onConfirm}
-            className={`rounded-md px-4 py-2 text-sm font-medium transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)] ${
-              danger ? "bg-danger text-background" : "bg-accent text-background"
-            }`}
           >
             {confirmLabel}
-          </button>
+          </Button>
         </div>
       </motion.div>
     </motion.div>

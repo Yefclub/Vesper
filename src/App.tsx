@@ -28,6 +28,8 @@ import {
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise } from "./lib/motion";
+import { Button, FOCUS } from "./components/Button";
+import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { RecordDock } from "./components/RecordDock";
 import { Sidebar } from "./components/Sidebar";
@@ -469,29 +471,31 @@ function AppShell({
           </div>
 
           <div className="flex items-center justify-end gap-3">
-            <button
+            <Button
+              variant="ghost"
+              size="icon"
               onClick={() => setShowSettings(true)}
-              className="rounded-md p-2 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]"
               title={t("nav.settings")}
               aria-label={t("nav.settings")}
             >
-              <Settings size={18} />
-            </button>
+              <Settings size={16} />
+            </Button>
           </div>
         </header>
 
         {error && (
           <div className="border-b border-danger/30 bg-danger/10 px-6 py-2 text-sm text-danger">
             {error}
-            <button className="ml-3 underline" onClick={() => setError(null)}>
+            <Button variant="link" className="ml-3" onClick={() => setError(null)}>
               {t("action.dismiss")}
-            </button>
+            </Button>
           </div>
         )}
         {pendingUpdate && (
           <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
             <span>{t("update.available").replace("{version}", pendingUpdate.version)}</span>
-            <button
+            <Button
+              size="xs"
               data-testid="update-install"
               onClick={async () => {
                 const update = pendingUpdate;
@@ -509,16 +513,12 @@ function AppShell({
                   setPendingUpdate(update);
                 }
               }}
-              className="rounded-md bg-accent px-3 py-1 text-xs font-medium text-background hover:brightness-110"
             >
               {t("update.install")}
-            </button>
-            <button
-              onClick={() => setPendingUpdate(null)}
-              className="text-xs underline"
-            >
+            </Button>
+            <Button variant="link" onClick={() => setPendingUpdate(null)}>
               {t("update.later")}
-            </button>
+            </Button>
           </div>
         )}
         {updateNote && (
@@ -537,66 +537,63 @@ function AppShell({
                     {selected.status} · {formatDuration(selected.duration_ms)}
                   </p>
                 </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => handleSummarize("general")}
-                    className="flex items-center gap-1 rounded-md bg-surface-3 px-3 py-1 text-xs hover:bg-hover"
-                  >
-                    <Sparkles size={14} /> {t("action.summarize")}
-                  </button>
-                  <button
-                    onClick={() => handleExport("md")}
-                    className="rounded-md bg-surface-3 px-3 py-1 text-xs hover:bg-hover"
-                  >
-                    MD
-                  </button>
-                  <button
-                    onClick={() => handleExport("pdf")}
-                    className="rounded-md bg-surface-3 px-3 py-1 text-xs hover:bg-hover"
-                  >
-                    PDF
-                  </button>
-                  <button
-                    onClick={() => handleExport("docx")}
-                    className="rounded-md bg-surface-3 px-3 py-1 text-xs hover:bg-hover"
-                  >
-                    DOCX
-                  </button>
-                  <button
+                {/* Five siblings used to read as five equal actions. Summarize
+                    is the one primary; MD/PDF/DOCX are one action with a format
+                    parameter, so they sit inside a single bordered group.
+                    The inset is horizontal only: a `p-1` shell would stand 34px
+                    tall between two 24px chips, and a group that is half again
+                    the height of its neighbours reads as a different tier of
+                    control rather than a bracket around three of them. */}
+                <div className="flex items-center gap-2">
+                  <Button size="xs" onClick={() => handleSummarize("general")}>
+                    <Sparkles size={16} /> {t("action.summarize")}
+                  </Button>
+                  <div className="flex items-center gap-1 rounded-md border border-border px-1">
+                    {(["md", "pdf", "docx"] as const).map((format) => (
+                      <Button
+                        key={format}
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => handleExport(format)}
+                      >
+                        {format.toUpperCase()}
+                      </Button>
+                    ))}
+                  </div>
+                  <Button
+                    size="xs"
+                    variant="secondary"
                     onClick={() =>
                       selectedId &&
                       api.retranscribe(selectedId).then((m) => loadMeeting(m.id))
                     }
-                    className="flex items-center gap-1 rounded-md bg-surface-3 px-3 py-1 text-xs hover:bg-hover"
                   >
-                    <FileAudio size={14} /> {t("action.retranscribe")}
-                  </button>
+                    <FileAudio size={16} /> {t("action.retranscribe")}
+                  </Button>
                 </div>
               </div>
 
-              <div className="flex gap-1 border-b border-border px-6">
-                {(
-                  [
-                    ["transcript", t("tab.transcript")],
-                    ["summary", t("tab.summary")],
-                    ["chat", t("tab.chat")],
-                  ] as const
-                ).map(([id, label]) => (
-                  <button
-                    key={id}
-                    onClick={() => setTab(id)}
-                    className={`border-b-2 px-3 py-2 text-sm transition ${
-                      tab === id
-                        ? "border-accent text-fg"
-                        : "border-transparent text-fg-subtle hover:text-fg"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              <Tabs
+                idPrefix="content"
+                className="px-6"
+                value={tab}
+                onChange={setTab}
+                items={[
+                  { id: "transcript", label: t("tab.transcript") },
+                  { id: "summary", label: t("tab.summary") },
+                  { id: "chat", label: t("tab.chat") },
+                ]}
+              />
 
-              <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-36 pt-4">
+              {/* The scroll container is the tab panel: the three panes swap
+                  inside it, so the id follows the selected tab rather than
+                  living on a pane that unmounts. */}
+              <div
+                id={`content-panel-${tab}`}
+                role="tabpanel"
+                aria-labelledby={`content-tab-${tab}`}
+                className="min-h-0 flex-1 overflow-y-auto px-6 pb-36 pt-4"
+              >
                 <AnimatePresence mode="wait">
                   {tab === "transcript" && (
                     <motion.div
@@ -731,6 +728,7 @@ function AppShell({
                   type="checkbox"
                   checked={skipRecordReminder}
                   onChange={(e) => setSkipRecordReminder(e.target.checked)}
+                  className={FOCUS}
                 />
                 {t("confirm.record_dont_ask")}
               </label>
