@@ -320,10 +320,16 @@ function AppShell({
   const transcriptMark = `${segmentCount}:${
     transcript.segments?.[segmentCount - 1]?.end_ms ?? 0
   }`;
+  // `selectedId` is in here as well as in the effect that sets the pin. Two
+  // meetings can share a segment count and a final `end_ms` — two 4-line
+  // imports of the same length do — and then `transcriptMark` is identical
+  // across the switch, nothing re-runs, and the second transcript opens at the
+  // first one's scroll offset. The pane is not remounted either, so the ref
+  // callback below does not cover it.
   useEffect(() => {
     if (tab !== "transcript" || !pinnedRef.current) return;
     pinToBottom();
-  }, [transcriptMark, tab, pinToBottom]);
+  }, [transcriptMark, tab, selectedId, pinToBottom]);
 
   /// The pane mounts after the outgoing one has animated away, which is a DOM
   /// change with no render of this component behind it — the effect above

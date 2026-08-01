@@ -376,6 +376,14 @@ export function SettingsPanel({
                     key={m.id}
                     model={m}
                     progress={progress?.model_id === m.id ? progress : null}
+                    // Every row is out of action while any row is transferring.
+                    // Without this the other rows saw `progress={null}`, kept an
+                    // enabled button, and a second click started a concurrent
+                    // download that overwrote the first one's readout — and, with
+                    // append-mode resume behind it, wrote into the same `.part`.
+                    // A failed transfer is not busy: its own row still offers
+                    // Retry.
+                    busy={progress !== null && progress.error == null}
                     onDownload={download}
                   />
                 ))}
@@ -744,10 +752,13 @@ function resumePoint(p: DownloadProgress, total: number): string {
 const ModelRow = memo(function ModelRow({
   model,
   progress,
+  busy,
   onDownload,
 }: {
   model: ModelInfo;
   progress: DownloadProgress | null;
+  /** Some row — not necessarily this one — is transferring. */
+  busy: boolean;
   onDownload: (id: string) => void;
 }) {
   const { t } = useI18n();
@@ -826,7 +837,7 @@ const ModelRow = memo(function ModelRow({
           <Button
             variant="secondary"
             size="xs"
-            disabled={running}
+            disabled={busy}
             onClick={() => onDownload(model.id)}
           >
             {failed
