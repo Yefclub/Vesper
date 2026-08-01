@@ -36,9 +36,11 @@ it never blocks.
 reviewable and nothing merges.
 
 **`submit` publishes every branch in the stack at once.** Per-layer selection exists only in the
-interactive editor, so `--auto` fires CI on all layers simultaneously. Build the stack incrementally
-instead — each `submit` only creates PRs for branches that don't have one yet, and re-points the
-bases of the ones that do:
+interactive editor, so `--auto` fires CI on all layers simultaneously. Checking out a lower layer
+does **not** scope it: running `gh stack submit` from the bottom branch still publishes every branch
+above it. The only way to publish one layer at a time is for the upper layers not to exist yet.
+Build the stack incrementally — each `submit` creates PRs only for branches that don't have one, and
+re-points the bases of the ones that do:
 
 ```bash
 gh stack init --base dev layer-1     # commit layer 1 first
