@@ -56,12 +56,7 @@ impl MeetingStatus {
             (Failed, StartRecording) => Recording,
             // Allow re-transcribe from ready/failed
             (Failed, StartTranscribe) => Transcribing,
-            _ => {
-                return Err(TransitionError::Invalid {
-                    from: self,
-                    event,
-                })
-            }
+            _ => return Err(TransitionError::Invalid { from: self, event }),
         };
         Ok(next)
     }

@@ -103,10 +103,7 @@ pub fn run_whisper(
 
     let key = model_path.display().to_string();
     let mut cache = whisper_cache().lock();
-    let need_load = cache
-        .as_ref()
-        .map(|(k, _)| k != &key)
-        .unwrap_or(true);
+    let need_load = cache.as_ref().map(|(k, _)| k != &key).unwrap_or(true);
     if need_load {
         let ctx = WhisperContext::new_with_params(
             model_path.to_str().ok_or("non-utf8 model path")?,
@@ -168,10 +165,7 @@ pub fn resample_to_16k_f32(pcm: &[i16], sample_rate: u32) -> Vec<f32> {
     let sr = sample_rate.max(1) as f64;
     let target = 16_000f64;
     if (sr - target).abs() < 1.0 {
-        return pcm
-            .iter()
-            .map(|s| *s as f32 / i16::MAX as f32)
-            .collect();
+        return pcm.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
     }
     let ratio = target / sr;
     let out_len = ((pcm.len() as f64) * ratio).round().max(1.0) as usize;

@@ -24,13 +24,14 @@ impl LlmService {
         template: SummaryTemplate,
     ) -> Result<MeetingInsights, String> {
         match settings.llm_provider {
-            LlmProvider::Local => self.local.summarize(
-                transcript,
-                template,
-                &settings.local_llm_model,
-            ),
+            LlmProvider::Local => {
+                self.local
+                    .summarize(transcript, template, &settings.local_llm_model)
+            }
             LlmProvider::OpenRouter => {
-                settings.require_openrouter_key().map_err(|e| e.to_string())?;
+                settings
+                    .require_openrouter_key()
+                    .map_err(|e| e.to_string())?;
                 self.remote
                     .summarize(
                         settings.openrouter_api_key.as_deref().unwrap_or(""),
@@ -62,9 +63,13 @@ impl LlmService {
             12_000,
         );
         match settings.llm_provider {
-            LlmProvider::Local => self.local.chat(&messages, transcript, &settings.local_llm_model),
+            LlmProvider::Local => self
+                .local
+                .chat(&messages, transcript, &settings.local_llm_model),
             LlmProvider::OpenRouter => {
-                settings.require_openrouter_key().map_err(|e| e.to_string())?;
+                settings
+                    .require_openrouter_key()
+                    .map_err(|e| e.to_string())?;
                 self.remote
                     .complete(
                         settings.openrouter_api_key.as_deref().unwrap_or(""),

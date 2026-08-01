@@ -187,8 +187,10 @@ mod tests {
 
     #[test]
     fn public_view_redacts_key() {
-        let mut s = AppSettings::default();
-        s.openrouter_api_key = Some("sk-abcdefghij".into());
+        let s = AppSettings {
+            openrouter_api_key: Some("sk-abcdefghij".into()),
+            ..Default::default()
+        };
         let p = s.public_view();
         assert_ne!(p.openrouter_api_key.as_deref(), Some("sk-abcdefghij"));
     }
@@ -197,8 +199,10 @@ mod tests {
     fn public_view_survives_multibyte_key() {
         // Byte 4 falls inside a char here — slicing by byte would panic on the
         // boot path, leaving the app stuck on the loading screen.
-        let mut s = AppSettings::default();
-        s.openrouter_api_key = Some("sk-ção-chave-secreta".into());
+        let s = AppSettings {
+            openrouter_api_key: Some("sk-ção-chave-secreta".into()),
+            ..Default::default()
+        };
         let p = s.public_view();
         let redacted = p.openrouter_api_key.unwrap();
         assert!(redacted.ends_with('…'));
@@ -207,11 +211,13 @@ mod tests {
 
     #[test]
     fn device_ids_roundtrip_serde() {
-        let mut s = AppSettings::default();
-        s.mic_device_id = Some("mic-1".into());
-        s.system_device_id = Some("sys-1".into());
-        s.onboarding_complete = true;
-        s.ui_locale = "pt-BR".into();
+        let s = AppSettings {
+            mic_device_id: Some("mic-1".into()),
+            system_device_id: Some("sys-1".into()),
+            onboarding_complete: true,
+            ui_locale: "pt-BR".into(),
+            ..Default::default()
+        };
         let j = serde_json::to_string(&s).unwrap();
         let s2: AppSettings = serde_json::from_str(&j).unwrap();
         assert_eq!(s2.mic_device_id.as_deref(), Some("mic-1"));

@@ -130,10 +130,7 @@ fn normalised_key(key: &Option<String>) -> Option<String> {
 /// Both callers need the same three steps in the same order — restore a redacted
 /// key, put the key in the keychain, then persist everything else — and the
 /// keychain step is easy to forget when it is copied by hand.
-fn persist_settings(
-    state: &AppState,
-    mut settings: AppSettings,
-) -> Result<AppSettings, String> {
+fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSettings, String> {
     // The front end only ever sees a redacted key, so a redacted value coming
     // back means "unchanged", not "set it to these characters".
     let previous = {
@@ -220,7 +217,10 @@ pub fn switch_llm_provider(
 }
 
 #[tauri::command]
-pub fn set_reasoning(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<AppSettings, String> {
+pub fn set_reasoning(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<AppSettings, String> {
     let mut s = state.settings.lock().clone();
     s.set_reasoning(enabled);
     Ok(persist_settings(&state, s)?.public_view())
@@ -350,7 +350,11 @@ pub fn start_recording(
         return Err("already recording".into());
     }
     let settings = state.settings.lock().clone();
-    let gate = can_start_recording(&settings, local_stt_ready(&settings), settings.onboarding_complete);
+    let gate = can_start_recording(
+        &settings,
+        local_stt_ready(&settings),
+        settings.onboarding_complete,
+    );
     if !gate.allowed {
         return Err(gate
             .reason
@@ -476,12 +480,7 @@ pub async fn stop_recording(
     let _flight = state.stt_flight.lock().await;
 
     let settings = state.settings.lock().clone();
-    let mut live = state
-        .live
-        .lock()
-        .get(&id)
-        .cloned()
-        .unwrap_or_default();
+    let mut live = state.live.lock().get(&id).cloned().unwrap_or_default();
 
     if live.segments().is_empty() {
         // Nothing was transcribed live — cloud STT down, or a recording short
@@ -502,9 +501,8 @@ pub async fn stop_recording(
         // segment existed — silently dropped the end of every meeting.
         let (mic, sys, sr) = state.recorder.drain_chunks();
         if !mic.is_empty() || !sys.is_empty() {
-            let tail_ms = duration.saturating_sub(
-                (mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64,
-            );
+            let tail_ms = duration
+                .saturating_sub((mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64);
             match state
                 .stt
                 .transcribe_dual(&settings, &mic, &sys, sr, tail_ms)
@@ -528,7 +526,11 @@ pub async fn stop_recording(
         let _ = app.emit("meeting://summarizing", &id);
         let insights = state
             .llm
-            .summarize(&settings, &meeting.transcript_text, SummaryTemplate::General)
+            .summarize(
+                &settings,
+                &meeting.transcript_text,
+                SummaryTemplate::General,
+            )
             .await?;
         state.db.save_insights(&id, &insights)?;
         meeting.summary = Some(insights.summary.clone());
@@ -569,9 +571,10 @@ pub async fn poll_live_stt(
     if mic.is_empty() && sys.is_empty() {
         return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
     }
-    let start_ms = state.recorder.elapsed_ms().saturating_sub(
-        (mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64,
-    );
+    let start_ms = state
+        .recorder
+        .elapsed_ms()
+        .saturating_sub((mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64);
     let settings = state.settings.lock().clone();
     let chunks = state
         .stt
@@ -674,8 +677,7 @@ pub async fn import_audio(
     });
     // Persist a dual-channel WAV copy under recordings for retranscription
     let wav_path = recordings_dir().join(format!("{id}.wav"));
-    crate::audio::capture::write_dual_wav(&wav_path, sr, &pcm, &[])
-        .map_err(|e| e.to_string())?;
+    crate::audio::capture::write_dual_wav(&wav_path, sr, &pcm, &[]).map_err(|e| e.to_string())?;
     let mut meeting = MeetingRecord {
         id: id.clone(),
         title,
@@ -895,7 +897,9 @@ mod tests {
         // Decodes to "test": no minisign key line, so it cannot verify anything.
         assert!(!updater_pubkey_is_real(&conf_with_pubkey("dGVzdA==")));
         assert!(!updater_pubkey_is_real(&conf_with_pubkey("")));
-        assert!(!updater_pubkey_is_real(&conf_with_pubkey("not base64 at all")));
+        assert!(!updater_pubkey_is_real(&conf_with_pubkey(
+            "not base64 at all"
+        )));
         assert!(!updater_pubkey_is_real(&serde_json::json!({})));
     }
 
@@ -905,13 +909,17 @@ mod tests {
         raw.extend_from_slice(&[7u8; 8]); // key id
         raw.extend_from_slice(&[9u8; 32]); // key
         let file = format!("untrusted comment: minisign public key\n{}\n", b64(&raw));
-        assert!(updater_pubkey_is_real(&conf_with_pubkey(&b64(file.as_bytes()))));
+        assert!(updater_pubkey_is_real(&conf_with_pubkey(&b64(
+            file.as_bytes()
+        ))));
     }
 
     #[test]
     fn a_key_line_of_the_wrong_length_is_rejected() {
         let raw = Vec::from(*b"Ed");
         let file = format!("untrusted comment: truncated\n{}\n", b64(&raw));
-        assert!(!updater_pubkey_is_real(&conf_with_pubkey(&b64(file.as_bytes()))));
+        assert!(!updater_pubkey_is_real(&conf_with_pubkey(&b64(
+            file.as_bytes()
+        ))));
     }
 }

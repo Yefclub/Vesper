@@ -43,7 +43,11 @@ pub fn filter_by_kind(devices: &[AudioDevice], kind: DeviceKind) -> Vec<AudioDev
 }
 
 /// Resolve selected id or fall back to first default / first device of kind.
-pub fn resolve_device_id(devices: &[AudioDevice], kind: DeviceKind, preferred: Option<&str>) -> Option<String> {
+pub fn resolve_device_id(
+    devices: &[AudioDevice],
+    kind: DeviceKind,
+    preferred: Option<&str>,
+) -> Option<String> {
     let of_kind = filter_by_kind(devices, kind);
     if let Some(p) = preferred {
         if of_kind.iter().any(|d| d.id == p) {
@@ -113,6 +117,8 @@ mod tests {
         // Structural: only Mic + SystemLoopback mapped — verified via enum match in map_flex_devices.
         // Build synthetic via AudioDevice path already covers resolve.
         let d = sample();
-        assert!(d.iter().all(|x| matches!(x.kind, DeviceKind::Mic | DeviceKind::System)));
+        assert!(d
+            .iter()
+            .all(|x| matches!(x.kind, DeviceKind::Mic | DeviceKind::System)));
     }
 }

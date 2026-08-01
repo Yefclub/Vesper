@@ -87,9 +87,7 @@ impl LocalLlm {
                 .find(|m| m.role == "system")
                 .map(|m| m.content.as_str())
                 .unwrap_or("You are Vesper, a private meeting assistant.");
-            let prompt = format!(
-                "{system}\n\nUser: {question}\nAssistant:"
-            );
+            let prompt = format!("{system}\n\nUser: {question}\nAssistant:");
             return run_llama(&self.model_file(model_id), &prompt, 384);
         }
         if self.soft_fallback {

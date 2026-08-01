@@ -24,61 +24,56 @@ jobs:
       - run: npm run build
 
   rust:
-    runs-on: ubuntu-latest
+    # Windows is the platform most of this is used on and the one whose build
+    # script is fussiest, so a Linux-only job was checking the easier half.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - name: Install system deps
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev libpipewire-0.3-dev libclang-dev cmake pkg-config
+      # llama_cpp_sys looks for the LLVM binutils and aborts with "No suitable
+      # tool equivalent to nm/objcopy has been found". The Windows image ships
+      # LLVM but does not put it on PATH — the same prerequisite AGENTS.md
+      # documents for a local checkout.
+      - name: LLVM binutils on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.os }}
+      - name: Formatting
+        working-directory: src-tauri
+        run: cargo fmt --check
+      # dead_code is allowed on purpose. There are unused variants and helpers
+      # that predate this pipeline, and the project rule is to point at
+      # pre-existing dead code rather than delete it inside an unrelated change.
+      # Everything else is an error, so new lint debt cannot accumulate quietly.
+      - name: Clippy
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            export LIBCLANG_PATH=$(dirname $(find /usr -name 'libclang.so*' 2>/dev/null | head -1) || echo /usr/lib)
+          fi
+          cargo clippy --all-targets -- -D warnings -A dead_code
       - name: Unit tests
         working-directory: src-tauri
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        shell: bash
         run: |
-          export LIBCLANG_PATH=$(dirname $(find /usr -name 'libclang.so*' 2>/dev/null | head -1) || echo /usr/lib)
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            export LIBCLANG_PATH=$(dirname $(find /usr -name 'libclang.so*' 2>/dev/null | head -1) || echo /usr/lib)
+          fi
           cargo test --lib
-
-  # Desktop package matrix — runs on tags or manual; keeps local-first workflow unblocked
-  package:
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    needs: [frontend, rust]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: windows-latest
-            args: --target x86_64-pc-windows-msvc
-          - platform: macos-latest
-            args: --target aarch64-apple-darwin
-          - platform: ubuntu-latest
-            args: --target x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.platform }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Linux deps
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev libpipewire-0.3-dev libclang-dev cmake pkg-config
-      - run: npm ci
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # createUpdaterArtifacts is on and tauri.conf.json now carries a real
-          # public key, so the build has to be able to sign. Without these the
-          # packaging step fails, or ships a latest.json no install will accept.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          args: ${{ matrix.args }}
