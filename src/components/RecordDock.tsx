@@ -85,19 +85,19 @@ export function RecordDock({
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 4, scale: 0.98 }}
               transition={transition.base}
-              className="pointer-events-auto relative mb-2 max-w-xs rounded-xl border border-border bg-surface-3 px-3.5 py-3 shadow-none"
+              className="pointer-events-auto relative mb-2 max-w-xs rounded-lg border border-border bg-surface-3 px-3 py-3"
             >
-              <div className="flex gap-2.5">
+              <div className="flex gap-2">
                 <span
                   aria-hidden
-                  className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-danger/15 text-[10px] font-semibold text-danger"
+                  className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-danger/15 text-2xs font-semibold text-danger"
                 >
                   !
                 </span>
                 <div className="flex flex-col items-start gap-2">
                   {/* The sentence is foreground, not red. Red is the accent that
                       says "look here"; a whole red paragraph just shouts. */}
-                  <p className="text-xs leading-relaxed text-foreground">{gateReason}</p>
+                  <p className="text-xs leading-relaxed text-fg">{gateReason}</p>
                   <button
                     onClick={onOpenSettings}
                     className="text-xs font-medium text-accent underline-offset-2 transition-colors hover:underline focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-3),0_0_0_4px_var(--color-accent)]"
@@ -126,7 +126,7 @@ export function RecordDock({
           bought the centring at the cost of a visible dead area next to Gravar.
           `items-start` keeps the gear level with the control row instead of
           drifting down when the device panel expands below. */}
-      <div className={`flex items-start gap-3 ${recording ? "" : "pl-[70px]"}`}>
+      <div className={`flex items-start gap-3 ${recording ? "" : "pl-[66px]"}`}>
         <motion.div
           layout
           transition={transition.base}
@@ -139,15 +139,15 @@ export function RecordDock({
             if (!e.currentTarget.contains(e.relatedTarget as Node)) setFocused(false);
           }}
           data-testid="record-dock"
-          className="pointer-events-auto overflow-hidden rounded-2xl border border-border bg-surface-2/95 backdrop-blur-md"
+          className="pointer-events-auto overflow-hidden rounded-lg border border-border bg-surface-2/95 backdrop-blur-md"
         >
-          <div className="flex items-center justify-center gap-3 px-3 py-2.5">
+          <div className="flex items-center justify-center gap-3 px-3 py-2">
             {!recording && (
               <button
                 data-testid="btn-record"
                 disabled={busy || blocked}
                 onClick={onStart}
-                className="flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
+                className="flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-background transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
               >
                 <Mic size={16} aria-hidden /> {t("record.start")}
               </button>
@@ -157,7 +157,7 @@ export function RecordDock({
                 <button
                   data-testid="btn-stop"
                   onClick={onStop}
-                  className="flex items-center gap-2 rounded-xl bg-danger/15 px-4 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger/25 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-danger)]"
+                  className="flex items-center gap-2 rounded-md bg-danger/15 px-4 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger/25 focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-danger)]"
                 >
                   <Square size={14} aria-hidden /> {t("record.stop")}
                 </button>
@@ -165,7 +165,7 @@ export function RecordDock({
                   data-testid="btn-pause"
                   onClick={onPauseResume}
                   aria-label={status?.paused ? t("record.resume") : t("record.pause")}
-                  className="rounded-xl bg-surface-3 p-2 text-foreground transition-colors hover:bg-border focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
+                  className="rounded-md bg-surface-3 p-2 text-fg transition-colors hover:bg-hover focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-surface-2),0_0_0_4px_var(--color-accent)]"
                 >
                   {status?.paused ? <Play size={16} /> : <Pause size={16} />}
                 </button>
@@ -173,7 +173,7 @@ export function RecordDock({
                     beside it every time a digit changes width. */}
                 <span
                   data-testid="elapsed"
-                  className="min-w-[5ch] text-center text-sm tabular-nums text-muted"
+                  className="min-w-[7ch] text-center text-sm tabular-nums text-fg-muted"
                 >
                   {formatDuration(status?.elapsed_ms ?? 0)}
                 </span>
@@ -194,14 +194,14 @@ export function RecordDock({
                 transition={transition.base}
                 className="border-t border-border/60"
               >
-                <div className="flex items-center justify-center gap-4 px-4 py-2.5 text-[11px] text-muted">
-                  <span className="flex items-center gap-1.5">
+                <div className="flex items-center justify-center gap-4 px-4 py-2 text-2xs text-fg-muted">
+                  <span className="flex items-center gap-2">
                     <span className="h-1.5 w-1.5 rounded-full bg-me" aria-hidden />
                     <span className="max-w-[14rem] truncate">
                       {deviceName(micDeviceId, "mic")}
                     </span>
                   </span>
-                  <span className="flex items-center gap-1.5">
+                  <span className="flex items-center gap-2">
                     <span className="h-1.5 w-1.5 rounded-full bg-others" aria-hidden />
                     <span className="max-w-[14rem] truncate">
                       {deviceName(systemDeviceId, "system")}
@@ -214,8 +214,8 @@ export function RecordDock({
         </motion.div>
 
         {/* Its own pill, sized to the dock's collapsed height: 1px border plus
-            p-2.5 either side of a 36px control is the same 58px the record row
-            comes to. The 70px of padding on the row above is this pill plus the
+            p-2 either side of a 36px control is the same 54px the record row
+            comes to. The 66px of padding on the row above is this pill plus the
             gap, so the dock — and Gravar inside it — keeps the screen's axis. */}
         {!recording && (
           <button
@@ -223,12 +223,12 @@ export function RecordDock({
             onClick={onOpenSettings}
             title={t("nav.settings")}
             aria-label={t("nav.settings")}
-            className="group pointer-events-auto rounded-2xl border border-border bg-surface-2/95 p-2.5 backdrop-blur-md focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]"
+            className="group pointer-events-auto rounded-lg border border-border bg-surface-2/95 p-2 backdrop-blur-md focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]"
           >
             {/* group-hover, not hover: the padding is part of the target, and a
                 hover that only lights up on the inner square feels dead at the
                 pill's edges. */}
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-surface-3 text-muted transition-colors group-hover:bg-border group-hover:text-foreground">
+            <span className="flex h-9 w-9 items-center justify-center rounded-md bg-surface-3 text-fg-muted transition-colors group-hover:bg-hover group-hover:text-fg">
               <Settings size={16} />
             </span>
           </button>

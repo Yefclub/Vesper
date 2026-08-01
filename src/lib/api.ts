@@ -163,13 +163,14 @@ export const api = {
   updatesConfig: () => invoke<Record<string, unknown>>("check_updates_config"),
 };
 
+/** Rolls the hour out of the minutes field once there is one. Without it a
+ *  90-minute meeting read `90:00`, and the clock is the one number a meeting
+ *  recorder must get right. */
 export function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor(s / 60) % 60;
   const r = s % 60;
-  return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
-}
-
-export function formatTs(ms: number): string {
-  return `[${formatDuration(ms)}]`;
+  const rest = `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+  return h > 0 ? `${h}:${rest}` : rest;
 }

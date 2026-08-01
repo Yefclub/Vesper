@@ -65,14 +65,14 @@ export function Sidebar({
   return (
     <aside
       data-testid="sidebar"
-      className="flex w-72 shrink-0 flex-col border-r border-border bg-surface"
+      className="flex w-72 shrink-0 flex-col border-r border-border bg-background"
     >
       <div className="flex flex-col gap-3 px-4 pb-3 pt-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-muted">
+          <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
             {t("nav.meetings")}
             {meetings.length > 0 && (
-              <span className="ml-1.5 font-normal tabular-nums text-muted/50">
+              <span className="ml-1.5 font-normal tabular-nums text-fg-subtle">
                 {meetings.length}
               </span>
             )}
@@ -81,7 +81,7 @@ export function Sidebar({
             onClick={onImport}
             title={t("nav.import")}
             aria-label={t("nav.import")}
-            className={`rounded-lg p-1.5 text-muted transition-colors hover:bg-surface-3 hover:text-foreground ${FOCUS_RING}`}
+            className={`rounded-md p-1.5 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg ${FOCUS_RING}`}
           >
             <FileUp size={16} />
           </button>
@@ -93,7 +93,7 @@ export function Sidebar({
           <Search
             size={14}
             aria-hidden
-            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted/60"
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-subtle"
           />
           <input
             data-testid="search-input"
@@ -101,7 +101,7 @@ export function Sidebar({
             onChange={(e) => onSearch(e.target.value)}
             placeholder={t("nav.search")}
             aria-label={t("nav.search")}
-            className="w-full rounded-xl border border-border bg-surface-2 py-2 pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted/60 focus:border-accent/50"
+            className="w-full rounded-md border border-border bg-surface-2 py-2 pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-fg-subtle focus:border-accent/50"
           />
         </div>
       </div>
@@ -109,7 +109,7 @@ export function Sidebar({
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {showingHits ? (
           hits.length === 0 ? (
-            <p className="px-3 py-6 text-center text-xs text-muted">
+            <p className="px-3 py-6 text-center text-xs text-fg-muted">
               {t("sidebar.no_matches")}
             </p>
           ) : (
@@ -117,19 +117,19 @@ export function Sidebar({
               <button
                 key={h.meeting_id}
                 onClick={() => onSelect(h.meeting_id)}
-                className={`mb-1 w-full rounded-xl px-3 py-2 text-left transition-colors hover:bg-surface-2 ${FOCUS_RING}`}
+                className={`mb-1 w-full rounded-sm px-3 py-2 text-left transition-colors hover:bg-surface-2 ${FOCUS_RING}`}
               >
                 <div className="truncate text-sm font-medium">{h.title}</div>
-                <div className="truncate text-xs text-muted">{h.snippet}</div>
+                <div className="truncate text-xs text-fg-muted">{h.snippet}</div>
               </button>
             ))
           )
         ) : meetings.length === 0 ? (
           <div className="px-3 py-8 text-center">
-            <p className="text-xs leading-relaxed text-muted">{t("sidebar.empty")}</p>
+            <p className="text-xs leading-relaxed text-fg-muted">{t("sidebar.empty")}</p>
             <button
               onClick={onImport}
-              className={`mt-3 rounded-lg border border-border px-3 py-1.5 text-xs transition-colors hover:bg-surface-2 ${FOCUS_RING}`}
+              className={`mt-3 rounded-md border border-border px-3 py-1 text-xs transition-colors hover:bg-surface-2 ${FOCUS_RING}`}
             >
               {t("sidebar.empty_cta")}
             </button>
@@ -137,7 +137,7 @@ export function Sidebar({
         ) : (
           groupByAge(meetings, t).map((group) => (
             <section key={group.key}>
-              <h3 className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wider text-muted/50">
+              <h3 className="px-3 pb-1 pt-3 text-2xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
                 {group.label}
               </h3>
               {group.items.map((m) => {
@@ -150,23 +150,23 @@ export function Sidebar({
                       <motion.div
                         layoutId="sidebar-active"
                         transition={transition.fast}
-                        className="absolute inset-0 rounded-xl bg-surface-3"
+                        className="absolute inset-0 rounded-sm bg-surface-3"
                       />
                     )}
                     <div className="relative flex items-start">
                       <button
                         onClick={() => onSelect(m.id)}
                         aria-current={active ? "true" : undefined}
-                        className={`min-w-0 flex-1 rounded-xl px-3 py-2.5 text-left transition-colors ${
+                        className={`min-w-0 flex-1 rounded-sm px-3 py-2 text-left transition-colors ${
                           active ? "" : "hover:bg-surface-2/60"
                         } ${FOCUS_RING}`}
                       >
                         <div className="truncate text-sm font-medium">{m.title}</div>
-                        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted">
+                        <div className="mt-0.5 flex items-center gap-2 text-2xs text-fg-muted">
                           <span className="capitalize">{m.status}</span>
                           {m.duration_ms > 0 && (
                             <>
-                              <span aria-hidden className="text-muted/40">
+                              <span aria-hidden className="text-fg-faint">
                                 ·
                               </span>
                               <span className="tabular-nums">
@@ -182,7 +182,7 @@ export function Sidebar({
                         onClick={() => onDelete(m.id)}
                         title={t("nav.delete")}
                         aria-label={t("nav.delete")}
-                        className={`mr-2 mt-2 rounded-lg p-1.5 text-muted opacity-0 transition-colors hover:text-danger focus-visible:opacity-100 group-hover:opacity-100 ${FOCUS_RING}`}
+                        className={`mr-2 mt-2 rounded-md p-1.5 text-fg-muted opacity-0 transition-colors hover:text-danger focus-visible:opacity-100 group-hover:opacity-100 ${FOCUS_RING}`}
                       >
                         <Trash2 size={14} />
                       </button>

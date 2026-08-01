@@ -103,12 +103,12 @@ export function Onboarding({ settings, onDone }: Props) {
       className="fixed inset-0 z-[100] flex items-center justify-center bg-background p-6"
       data-testid="onboarding"
     >
-      <div className="w-full max-w-lg rounded-3xl border border-border bg-surface p-6 shadow-2xl">
+      <div className="w-full max-w-lg rounded-lg border border-border bg-surface-1 p-6">
         <div className="mb-6 flex items-center gap-3">
-          <img src={logo} alt="Vesper" className="h-12 w-12 rounded-2xl" />
+          <img src={logo} alt="Vesper" className="h-12 w-12 rounded-lg" />
           <div>
             <h1 className="text-xl font-semibold">{t("onboarding.title")}</h1>
-            <p className="text-xs text-muted">
+            <p className="text-xs text-fg-muted">
               {step + 1}/{steps}
             </p>
           </div>
@@ -129,7 +129,7 @@ export function Onboarding({ settings, onDone }: Props) {
                     setDraft((d) => ({ ...d, ui_locale: l.code }));
                     setLocale(l.code);
                   }}
-                  className={`flex-1 rounded-xl border px-3 py-3 text-sm ${
+                  className={`flex-1 rounded-md border px-3 py-3 text-sm ${
                     draft.ui_locale === l.code
                       ? "border-accent bg-accent/10 text-accent"
                       : "border-border hover:bg-surface-3"
@@ -157,12 +157,12 @@ export function Onboarding({ settings, onDone }: Props) {
             {draft.stt_provider === "openrouter" ? (
               <>
                 <label className="block text-sm">
-                  <span className="mb-1 block text-xs text-muted">
+                  <span className="mb-1 block text-xs text-fg-subtle">
                     {t("onboarding.api_key")}
                   </span>
                   <input
                     type="password"
-                    className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
                     value={draft.openrouter_api_key ?? ""}
                     onChange={(e) =>
                       setDraft((d) => ({
@@ -174,11 +174,11 @@ export function Onboarding({ settings, onDone }: Props) {
                   />
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 block text-xs text-muted">
+                  <span className="mb-1 block text-xs text-fg-subtle">
                     {t("settings.pick_stt_model")}
                   </span>
                   <select
-                    className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
                     value={draft.openrouter_stt_model}
                     onChange={(e) =>
                       setDraft((d) => ({
@@ -205,11 +205,11 @@ export function Onboarding({ settings, onDone }: Props) {
               </>
             ) : (
               <div className="space-y-2">
-                <p className="text-xs text-muted">{t("onboarding.local_models")}</p>
+                <p className="text-xs text-fg-muted">{t("onboarding.local_models")}</p>
                 {sttModels.map((m) => (
                   <label
                     key={m.id}
-                    className={`flex cursor-pointer items-center justify-between rounded-xl border px-3 py-2 text-sm ${
+                    className={`flex cursor-pointer items-center justify-between rounded-md border px-3 py-2 text-sm ${
                       draft.local_stt_model === m.id
                         ? "border-accent"
                         : "border-border"
@@ -226,7 +226,7 @@ export function Onboarding({ settings, onDone }: Props) {
                       />
                       {m.label}
                     </span>
-                    <span className="text-xs text-muted">
+                    <span className="text-xs text-fg-muted">
                       {m.ready ? "✓" : "—"}
                     </span>
                   </label>
@@ -252,12 +252,12 @@ export function Onboarding({ settings, onDone }: Props) {
               <>
                 {!draft.openrouter_api_key && draft.stt_provider !== "openrouter" && (
                   <label className="block text-sm">
-                    <span className="mb-1 block text-xs text-muted">
+                    <span className="mb-1 block text-xs text-fg-subtle">
                       {t("onboarding.api_key")}
                     </span>
                     <input
                       type="password"
-                      className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                      className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
                       value={draft.openrouter_api_key ?? ""}
                       onChange={(e) =>
                         setDraft((d) => ({
@@ -270,12 +270,12 @@ export function Onboarding({ settings, onDone }: Props) {
                   </label>
                 )}
                 <label className="block text-sm">
-                  <span className="mb-1 block text-xs text-muted">
+                  <span className="mb-1 block text-xs text-fg-subtle">
                     {t("settings.pick_llm_model")}
                   </span>
                   <select
                     data-testid="or-llm-select"
-                    className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
                     value={draft.openrouter_llm_model}
                     onChange={(e) =>
                       setDraft((d) => ({
@@ -308,12 +308,12 @@ export function Onboarding({ settings, onDone }: Props) {
           <section className="space-y-4" data-testid="device-pickers">
             <h2 className="text-sm font-medium">{t("onboarding.devices")}</h2>
             <label className="block text-sm">
-              <span className="mb-1 block text-xs text-muted">
+              <span className="mb-1 block text-xs text-fg-subtle">
                 {t("onboarding.mic")}
               </span>
               <select
                 data-testid="select-mic"
-                className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
                 value={draft.mic_device_id ?? ""}
                 onChange={(e) =>
                   setDraft((d) => ({
@@ -332,12 +332,12 @@ export function Onboarding({ settings, onDone }: Props) {
               </select>
             </label>
             <label className="block text-sm">
-              <span className="mb-1 block text-xs text-muted">
+              <span className="mb-1 block text-xs text-fg-subtle">
                 {t("onboarding.system")}
               </span>
               <select
                 data-testid="select-system"
-                className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
                 value={draft.system_device_id ?? ""}
                 onChange={(e) =>
                   setDraft((d) => ({
@@ -364,7 +364,7 @@ export function Onboarding({ settings, onDone }: Props) {
           <section className="space-y-3 text-sm">
             <h2 className="font-medium">{t("settings.capabilities")}</h2>
             {caps && (
-              <ul className="space-y-1 text-muted">
+              <ul className="space-y-1 text-fg-muted">
                 <li>
                   CPU cores: {caps.cpu_cores} · {t("cap.cuda")}:{" "}
                   {caps.cuda_available ? caps.cuda_device_name : "—"}
@@ -374,7 +374,7 @@ export function Onboarding({ settings, onDone }: Props) {
                 ))}
               </ul>
             )}
-            <p className="text-xs text-muted">
+            <p className="text-xs text-fg-muted">
               STT: {draft.stt_provider} · LLM: {draft.llm_provider} · locale:{" "}
               {draft.ui_locale}
             </p>
@@ -388,7 +388,7 @@ export function Onboarding({ settings, onDone }: Props) {
             type="button"
             disabled={step === 0}
             onClick={() => setStep((s) => Math.max(0, s - 1))}
-            className="rounded-xl px-4 py-2 text-sm text-muted hover:bg-surface-3 disabled:opacity-30"
+            className="rounded-md px-4 py-2 text-sm text-fg-muted hover:bg-surface-3 disabled:opacity-30"
           >
             {t("onboarding.back")}
           </button>
@@ -396,7 +396,7 @@ export function Onboarding({ settings, onDone }: Props) {
             <button
               type="button"
               onClick={() => setStep((s) => s + 1)}
-              className="rounded-xl bg-accent px-5 py-2 text-sm font-medium text-black"
+              className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-background"
             >
               {t("onboarding.next")}
             </button>
@@ -405,7 +405,7 @@ export function Onboarding({ settings, onDone }: Props) {
               type="button"
               disabled={busy}
               onClick={finish}
-              className="rounded-xl bg-accent px-5 py-2 text-sm font-medium text-black disabled:opacity-50"
+              className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-background disabled:opacity-50"
             >
               {t("onboarding.finish")}
             </button>
@@ -433,7 +433,7 @@ function SelectPath({
           key={o.v}
           type="button"
           onClick={() => onChange(o.v)}
-          className={`flex-1 rounded-xl border px-3 py-2 text-sm ${
+          className={`flex-1 rounded-md border px-3 py-2 text-sm ${
             value === o.v
               ? "border-accent bg-accent/10"
               : "border-border hover:bg-surface-3"

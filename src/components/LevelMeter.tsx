@@ -30,7 +30,7 @@ function Bar({
       <div className="flex h-7 w-2 items-end overflow-hidden rounded-full bg-surface-3">
         <div className={`w-full rounded-full ${color}`} style={{ height: h }} />
       </div>
-      <span className="text-[9px] text-muted">{label}</span>
+      <span className="text-2xs text-fg-muted">{label}</span>
     </div>
   );
 }

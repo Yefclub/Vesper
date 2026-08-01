@@ -18,7 +18,6 @@ import {
   AudioDevice,
   ChatMessage,
   formatDuration,
-  formatTs,
   LiveTranscript,
   MeetingRecord,
   ModelInfo,
@@ -58,7 +57,7 @@ export default function App() {
 
   if (!ready || !settings) {
     return (
-      <div className="flex h-full items-center justify-center bg-background text-muted">
+      <div className="flex h-full items-center justify-center bg-background text-fg-muted">
         Vesper
       </div>
     );
@@ -412,7 +411,7 @@ function AppShell({
 
 
   return (
-    <div className="flex h-full bg-background text-foreground">
+    <div className="flex h-full bg-background text-fg">
       {showOnboarding && (
         <Onboarding
           settings={settings}
@@ -445,14 +444,13 @@ function AppShell({
             whenever the recording state changed the width of either side. The
             centre column is now anchored to the header, and its contents can grow
             and shrink without dragging anything with them. */}
-        <header className="grid grid-cols-[1fr_auto_1fr] items-center gap-4 border-b border-border bg-surface px-6 py-4">
-          <div className="flex items-center gap-2.5">
-            <img src={logo} alt="" className="h-8 w-8 rounded-lg" />
-            {/* Negative tracking on the wordmark: at this size the default
-                spacing reads loose. */}
-            <span className="bg-gradient-to-r from-accent to-accent-2 bg-clip-text text-lg font-semibold tracking-[-0.02em] text-transparent">
-              {t("app.name")}
-            </span>
+        <header className="grid grid-cols-[1fr_auto_1fr] items-center gap-4 border-b border-border bg-background px-6 py-4">
+          <div className="flex items-center gap-2">
+            <img src={logo} alt="" className="h-8 w-8 rounded-md" />
+            {/* Flat, not a gradient: the gradient made the brightest, most
+                saturated thing on screen a piece of chrome the user cannot act
+                on, and it was the only reason --color-accent-2 existed. */}
+            <span className="text-lg font-semibold text-fg">{t("app.name")}</span>
           </div>
 
           {/* Centre column reserved for status. The recording controls moved to
@@ -473,7 +471,7 @@ function AppShell({
           <div className="flex items-center justify-end gap-3">
             <button
               onClick={() => setShowSettings(true)}
-              className="rounded-lg p-2 text-muted transition-colors hover:bg-surface-3 hover:text-foreground focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]"
+              className="rounded-md p-2 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline-none focus-visible:shadow-[0_0_0_2px_var(--color-background),0_0_0_4px_var(--color-accent)]"
               title={t("nav.settings")}
               aria-label={t("nav.settings")}
             >
@@ -511,7 +509,7 @@ function AppShell({
                   setPendingUpdate(update);
                 }
               }}
-              className="rounded-lg bg-accent px-3 py-1 text-xs font-medium text-black hover:brightness-110"
+              className="rounded-md bg-accent px-3 py-1 text-xs font-medium text-background hover:brightness-110"
             >
               {t("update.install")}
             </button>
@@ -535,32 +533,32 @@ function AppShell({
               <div className="flex items-center justify-between border-b border-border px-6 py-3">
                 <div>
                   <h1 className="text-base font-medium">{selected.title}</h1>
-                  <p className="text-xs text-muted">
+                  <p className="text-xs text-fg-muted">
                     {selected.status} · {formatDuration(selected.duration_ms)}
                   </p>
                 </div>
                 <div className="flex gap-2">
                   <button
                     onClick={() => handleSummarize("general")}
-                    className="flex items-center gap-1 rounded-lg bg-surface-3 px-3 py-1.5 text-xs hover:bg-border"
+                    className="flex items-center gap-1 rounded-md bg-surface-3 px-3 py-1 text-xs hover:bg-hover"
                   >
                     <Sparkles size={14} /> {t("action.summarize")}
                   </button>
                   <button
                     onClick={() => handleExport("md")}
-                    className="rounded-lg bg-surface-3 px-3 py-1.5 text-xs hover:bg-border"
+                    className="rounded-md bg-surface-3 px-3 py-1 text-xs hover:bg-hover"
                   >
                     MD
                   </button>
                   <button
                     onClick={() => handleExport("pdf")}
-                    className="rounded-lg bg-surface-3 px-3 py-1.5 text-xs hover:bg-border"
+                    className="rounded-md bg-surface-3 px-3 py-1 text-xs hover:bg-hover"
                   >
                     PDF
                   </button>
                   <button
                     onClick={() => handleExport("docx")}
-                    className="rounded-lg bg-surface-3 px-3 py-1.5 text-xs hover:bg-border"
+                    className="rounded-md bg-surface-3 px-3 py-1 text-xs hover:bg-hover"
                   >
                     DOCX
                   </button>
@@ -569,7 +567,7 @@ function AppShell({
                       selectedId &&
                       api.retranscribe(selectedId).then((m) => loadMeeting(m.id))
                     }
-                    className="flex items-center gap-1 rounded-lg bg-surface-3 px-3 py-1.5 text-xs hover:bg-border"
+                    className="flex items-center gap-1 rounded-md bg-surface-3 px-3 py-1 text-xs hover:bg-hover"
                   >
                     <FileAudio size={14} /> {t("action.retranscribe")}
                   </button>
@@ -589,8 +587,8 @@ function AppShell({
                     onClick={() => setTab(id)}
                     className={`border-b-2 px-3 py-2 text-sm transition ${
                       tab === id
-                        ? "border-accent text-foreground"
-                        : "border-transparent text-muted hover:text-foreground"
+                        ? "border-accent text-fg"
+                        : "border-transparent text-fg-subtle hover:text-fg"
                     }`}
                   >
                     {label}
@@ -605,18 +603,18 @@ function AppShell({
                       key="transcript"
                       {...fadeRise}
                       exit={{ opacity: 0 }}
-                      className="mx-auto flex max-w-3xl flex-col gap-3"
+                      className="mx-auto flex max-w-reading flex-col gap-3"
                       data-testid="transcript-panel"
                     >
                       {transcript.segments?.length ? (
                         transcript.segments.map((s) => (
                           <div
                             key={s.id}
-                            className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-                              s.speaker === "me" ? "bubble-me ml-auto" : "bubble-others"
+                            className={`max-w-[85%] rounded-lg border border-border px-4 py-3 text-sm leading-relaxed ${
+                              s.speaker === "me" ? "ml-auto bg-surface-2" : "bg-surface-1"
                             }`}
                           >
-                            <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted">
+                            <div className="mb-1 flex items-center gap-2 text-2xs uppercase tracking-wide text-fg-subtle">
                               <span
                                 className={
                                   s.speaker === "me" ? "text-me" : "text-others"
@@ -626,7 +624,7 @@ function AppShell({
                                   ? t("speaker.me")
                                   : t("speaker.others")}
                               </span>
-                              <span>{formatTs(s.start_ms)}</span>
+                              <span>{formatDuration(s.start_ms)}</span>
                             </div>
                             {s.text}
                           </div>
@@ -645,7 +643,7 @@ function AppShell({
                     <motion.div
                       key="summary"
                       {...fadeRise}
-                      className="mx-auto max-w-3xl space-y-6"
+                      className="mx-auto max-w-reading space-y-6"
                       data-testid="summary-panel"
                     >
                       <Section title={t("section.summary")} body={selected.summary || "—"} />
@@ -658,17 +656,17 @@ function AppShell({
                     <motion.div
                       key="chat"
                       {...fadeRise}
-                      className="mx-auto flex h-full max-w-3xl flex-col"
+                      className="mx-auto flex h-full max-w-reading flex-col"
                       data-testid="chat-panel"
                     >
                       <div className="flex-1 space-y-3 overflow-y-auto pb-4">
                         {chat.map((m, i) => (
                           <div
                             key={i}
-                            className={`rounded-2xl px-4 py-3 text-sm ${
+                            className={`rounded-lg border border-border px-4 py-3 text-sm ${
                               m.role === "user"
-                                ? "bubble-me ml-auto max-w-[80%]"
-                                : "bubble-others max-w-[90%]"
+                                ? "ml-auto max-w-[80%] bg-surface-2"
+                                : "max-w-[90%] bg-surface-1"
                             }`}
                           >
                             {m.content}
@@ -681,12 +679,12 @@ function AppShell({
                           onChange={(e) => setQuestion(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && handleChat()}
                           placeholder={t("chat.placeholder")}
-                          className="flex-1 rounded-xl border border-border bg-surface-2 px-4 py-2.5 text-sm outline-none focus:border-accent"
+                          className="flex-1 rounded-md border border-border bg-surface-2 px-4 py-2 text-sm outline-none focus:border-accent"
                         />
                         <button
                           onClick={handleChat}
                           disabled={busy}
-                          className="flex items-center gap-1 rounded-xl bg-accent px-4 py-2 text-sm font-medium text-black disabled:opacity-50"
+                          className="flex items-center gap-1 rounded-md bg-accent px-4 py-2 text-sm font-medium text-background disabled:opacity-50"
                         >
                           <MessageSquare size={16} /> {t("action.send")}
                         </button>
@@ -728,7 +726,7 @@ function AppShell({
             body={t("confirm.record_body")}
             confirmLabel={t("confirm.record_accept")}
             extra={
-              <label className="flex items-center gap-2 text-xs text-muted">
+              <label className="flex items-center gap-2 text-xs text-fg-muted">
                 <input
                   type="checkbox"
                   checked={skipRecordReminder}
@@ -816,11 +814,11 @@ function AppShell({
 
 function Section({ title, body }: { title: string; body: string }) {
   return (
-    <section className="rounded-2xl border border-border bg-surface-2 p-4">
-      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">
+    <section className="rounded-lg border border-border bg-surface-2 p-4">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
         {title}
       </h2>
-      <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-foreground">
+      <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-fg">
         {body}
       </pre>
     </section>
@@ -841,11 +839,11 @@ function Empty({
 }) {
   return (
     <div className="mx-auto max-w-md text-center">
-      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-surface-3 text-accent">
+      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg bg-surface-3 text-accent">
         {icon}
       </div>
-      <h2 className="text-lg font-medium tracking-[-0.01em]">{title}</h2>
-      <p className="mt-2 text-sm leading-relaxed text-muted">{body}</p>
+      <h2 className="text-lg font-medium">{title}</h2>
+      <p className="mt-2 text-sm leading-relaxed text-fg-muted">{body}</p>
     </div>
   );
 }

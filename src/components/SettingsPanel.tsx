@@ -128,7 +128,7 @@ export function SettingsPanel({
   return (
     <motion.div
       {...backdropFade}
-      className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex justify-end bg-background/70 backdrop-blur-sm"
       // Clicking away closes, which is what every drawer does and what someone
       // who opened this by accident will try first.
       onClick={onClose}
@@ -137,13 +137,13 @@ export function SettingsPanel({
         {...slideInRight}
         data-testid="settings-panel"
         onClick={(e) => e.stopPropagation()}
-        className="flex h-full w-full max-w-md flex-col border-l border-border bg-surface"
+        className="flex h-full w-full max-w-md flex-col border-l border-border bg-surface-1"
       >
-        <div className="flex items-center justify-between border-b border-border px-5 py-4">
+        <div className="flex items-center justify-between border-b border-border px-4 py-4">
           <h2 className="text-base font-semibold">{t("settings.title")}</h2>
           <button
             onClick={onClose}
-            className="rounded-lg p-1 text-muted hover:bg-surface-3"
+            className="rounded-md p-1 text-fg-muted hover:bg-surface-3"
           >
             <X size={18} />
           </button>
@@ -154,7 +154,7 @@ export function SettingsPanel({
             STT to OpenRouter left you looking at the local model list with
             nothing on screen acknowledging the change, and the LLM switch was
             invisible unless you happened to open the cloud tab. */}
-        <div className="grid grid-cols-2 gap-3 border-b border-border px-5 py-4">
+        <div className="grid grid-cols-2 gap-3 border-b border-border px-4 py-4">
           <FieldSelect
             label={t("settings.stt_provider")}
             value={draft.stt_provider}
@@ -204,10 +204,10 @@ export function SettingsPanel({
                 // goes on the tab itself.
                 aria-label={inUse ? `${label} — ${t("settings.in_use")}` : undefined}
                 title={inUse ? t("settings.in_use") : undefined}
-                className={`flex items-center gap-1.5 rounded-t-lg px-3 py-2 text-xs ${
+                className={`flex items-center gap-2 rounded-t-md px-3 py-2 text-xs ${
                   tab === id
-                    ? "bg-surface-3 text-foreground"
-                    : "text-muted hover:text-foreground"
+                    ? "bg-surface-3 text-fg"
+                    : "text-fg-subtle hover:text-fg"
                 }`}
               >
                 {label}
@@ -222,7 +222,7 @@ export function SettingsPanel({
           })}
         </div>
 
-        <div className="flex-1 space-y-5 overflow-y-auto p-5">
+        <div className="flex-1 space-y-4 overflow-y-auto p-4">
           {tab === "local" && (
             <>
               {/* Bound to the catalog rather than free text. Typing the id by
@@ -248,11 +248,11 @@ export function SettingsPanel({
                 {models.map((m) => (
                   <div
                     key={m.id}
-                    className="flex items-center justify-between rounded-xl border border-border bg-surface-2 px-3 py-2"
+                    className="flex items-center justify-between rounded-md border border-border bg-surface-2 px-3 py-2"
                   >
                     <div>
                       <div className="text-sm">{m.label}</div>
-                      <div className="text-[11px] text-muted">
+                      <div className="text-2xs text-fg-muted">
                         {m.ready ? t("model.ready") : m.present ? t("model.unverified") : t("model.not_downloaded")}
                       </div>
                     </div>
@@ -260,7 +260,7 @@ export function SettingsPanel({
                       <button
                         type="button"
                         onClick={() => download(m.id)}
-                        className="rounded-lg bg-surface-3 px-2 py-1 text-xs hover:bg-border"
+                        className="rounded-md bg-surface-3 px-2 py-1 text-xs hover:bg-hover"
                       >
                         {m.present ? t("model.verify") : t("model.download")}
                       </button>
@@ -269,8 +269,8 @@ export function SettingsPanel({
                 ))}
               </div>
               {caps && (
-                <div className="rounded-xl border border-border bg-surface-2 p-3 text-xs text-muted">
-                  <div className="mb-1 font-medium text-foreground">
+                <div className="rounded-md border border-border bg-surface-2 p-3 text-xs text-fg-muted">
+                  <div className="mb-1 font-medium text-fg">
                     {t("settings.capabilities")}
                   </div>
                   <div>
@@ -298,12 +298,12 @@ export function SettingsPanel({
                 placeholder="sk-or-…"
               />
               <label className="block text-sm">
-                <span className="mb-1 block text-xs text-muted">
+                <span className="mb-1 block text-xs text-fg-subtle">
                   {t("settings.pick_stt_model")}
                 </span>
                 <select
                   data-testid="or-stt-select"
-                  className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+                  className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
                   value={draft.openrouter_stt_model}
                   onChange={(e) =>
                     setDraft((d) => ({
@@ -328,12 +328,12 @@ export function SettingsPanel({
                 </select>
               </label>
               <label className="block text-sm">
-                <span className="mb-1 block text-xs text-muted">
+                <span className="mb-1 block text-xs text-fg-subtle">
                   {t("settings.pick_llm_model")}
                 </span>
                 <select
                   data-testid="or-llm-select"
-                  className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+                  className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
                   value={draft.openrouter_llm_model}
                   onChange={(e) =>
                     setDraft((d) => ({
@@ -389,12 +389,12 @@ export function SettingsPanel({
           {tab === "devices" && (
             <div className="space-y-4" data-testid="settings-devices">
               <label className="block text-sm">
-                <span className="mb-1 block text-xs text-muted">
+                <span className="mb-1 block text-xs text-fg-subtle">
                   {t("onboarding.mic")}
                 </span>
                 <select
                   data-testid="settings-mic"
-                  className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                  className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
                   value={draft.mic_device_id ?? ""}
                   onChange={(e) =>
                     setDraft((d) => ({
@@ -415,12 +415,12 @@ export function SettingsPanel({
                 </select>
               </label>
               <label className="block text-sm">
-                <span className="mb-1 block text-xs text-muted">
+                <span className="mb-1 block text-xs text-fg-subtle">
                   {t("onboarding.system")}
                 </span>
                 <select
                   data-testid="settings-system"
-                  className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm"
+                  className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
                   value={draft.system_device_id ?? ""}
                   onChange={(e) =>
                     setDraft((d) => ({
@@ -452,7 +452,7 @@ export function SettingsPanel({
                   onClick={() =>
                     setDraft((d) => ({ ...d, ui_locale: l.code }))
                   }
-                  className={`flex-1 rounded-xl border px-3 py-3 text-sm ${
+                  className={`flex-1 rounded-md border px-3 py-3 text-sm ${
                     draft.ui_locale === l.code
                       ? "border-accent bg-accent/10"
                       : "border-border"
@@ -467,13 +467,13 @@ export function SettingsPanel({
 
         <div className="border-t border-border p-4">
           {(msgKey || msg) && (
-            <p className="mb-2 text-xs text-muted">{msgKey ? t(msgKey) : msg}</p>
+            <p className="mb-2 text-xs text-fg-muted">{msgKey ? t(msgKey) : msg}</p>
           )}
           <button
             type="button"
             onClick={save}
             disabled={saving}
-            className="w-full rounded-xl bg-accent py-2.5 text-sm font-medium text-black disabled:opacity-50"
+            className="w-full rounded-md bg-accent py-2 text-sm font-medium text-background disabled:opacity-50"
           >
             {t("settings.save")}
           </button>
@@ -498,13 +498,13 @@ function Field({
 }) {
   return (
     <label className="block text-sm">
-      <span className="mb-1 block text-xs text-muted">{label}</span>
+      <span className="mb-1 block text-xs text-fg-subtle">{label}</span>
       <input
         type={type}
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+        className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
       />
     </label>
   );
@@ -523,11 +523,11 @@ function FieldSelect({
 }) {
   return (
     <label className="block text-sm">
-      <span className="mb-1 block text-xs text-muted">{label}</span>
+      <span className="mb-1 block text-xs text-fg-subtle">{label}</span>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+        className="w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>
