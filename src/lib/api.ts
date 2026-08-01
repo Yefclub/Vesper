@@ -35,6 +35,10 @@ export interface AppSettings {
   openrouter_api_key?: string | null;
   openrouter_stt_model: string;
   openrouter_llm_model: string;
+  /** Ids the user picked before, most recent first, capped by the backend.
+   *  Optional because the field lands in a separate change — every consumer
+   *  renders without it and it lights up on its own the day it arrives. */
+  recent_openrouter_llm_models?: string[];
   local_stt_model: string;
   local_llm_model: string;
   reasoning_enabled: boolean;

@@ -14,6 +14,7 @@ import {
 import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
 import { Button, FOCUS } from "./Button";
+import { ModelPicker } from "./ModelPicker";
 import { Tabs } from "./Tabs";
 
 // Backend names, not translated: "Local" and "OpenRouter" read the same in
@@ -44,6 +45,11 @@ export function SettingsPanel({
   const [caps, setCaps] = useState<CapabilityReport | null>(null);
   const [sttOr, setSttOr] = useState<OrModel[]>([]);
   const [llmOr, setLlmOr] = useState<OrModel[]>([]);
+  const [orFailed, setOrFailed] = useState(false);
+  // Bumped by save(). The list is fetched with the key the backend holds, so a
+  // re-save of the same key still has to re-fetch, and the Retry beside a
+  // failure has something to pull.
+  const [orNonce, setOrNonce] = useState(0);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [msgKey, setMsgKey] = useState<string | null>(null);
@@ -70,17 +76,28 @@ export function SettingsPanel({
     api.capabilities().then(setCaps).catch(() => null);
   }, []);
 
-  // Only when the Cloud tab is showing, and debounced: this used to run on every
-  // keystroke in the API key field, so pasting a 60-character key fired sixty
-  // pairs of calls at OpenRouter.
+  // Only when the Cloud tab is showing, and keyed on the SAVED key rather than
+  // the draft. The commands read the key out of the backend's own state and take
+  // no argument, so keying on the draft promised a refresh it could not deliver —
+  // and it fired a pair of calls per keystroke, which is why it needed a debounce
+  // it no longer needs.
   useEffect(() => {
     if (tab !== "cloud") return;
-    const timer = window.setTimeout(() => {
-      api.openrouterSttModels().then(setSttOr).catch(() => setSttOr([]));
-      api.openrouterLlmModels().then(setLlmOr).catch(() => setLlmOr([]));
-    }, 400);
-    return () => window.clearTimeout(timer);
-  }, [draft.openrouter_api_key, tab]);
+    let live = true;
+    setOrFailed(false);
+    api.openrouterSttModels().then(setSttOr).catch(() => setSttOr([]));
+    api
+      .openrouterLlmModels()
+      .then((m) => {
+        if (live) setLlmOr(m);
+      })
+      .catch(() => {
+        if (live) setOrFailed(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [settings.openrouter_api_key, tab, orNonce]);
 
   async function save() {
     setSaving(true);
@@ -91,6 +108,8 @@ export function SettingsPanel({
       // Keyed, not resolved: saving a language change means the catalog in t is
       // still the previous one at this point.
       showKey("settings.saved");
+      // Only now does the backend hold the key the model list is fetched with.
+      setOrNonce((n) => n + 1);
     } catch (e) {
       showText(String(e));
     } finally {
@@ -368,36 +387,27 @@ export function SettingsPanel({
                   ))}
                 </select>
               </label>
-              <label className="block text-sm">
-                <span className="mb-1 block text-xs text-fg-subtle">
-                  {t("settings.pick_llm_model")}
-                </span>
-                <select
-                  data-testid="or-llm-select"
-                  className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
-                  value={draft.openrouter_llm_model}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      openrouter_llm_model: e.target.value,
-                    }))
-                  }
-                >
-                  {(llmOr.length
-                    ? llmOr
-                    : [
-                        {
-                          id: draft.openrouter_llm_model,
-                          name: draft.openrouter_llm_model,
-                        },
-                      ]
-                  ).map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name || m.id}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {/* The STT list beside it stays a native select — 13 options do
+                  not need a search box. This one is ~340 long. */}
+              <ModelPicker
+                id="settings-or-llm"
+                testId="or-llm-select"
+                label={t("settings.pick_llm_model")}
+                value={draft.openrouter_llm_model}
+                onChange={(v) =>
+                  setDraft((d) => ({ ...d, openrouter_llm_model: v }))
+                }
+                models={llmOr}
+                recent={settings.recent_openrouter_llm_models}
+                status={
+                  orFailed
+                    ? "failed"
+                    : settings.openrouter_api_key
+                      ? undefined
+                      : "needs_key"
+                }
+                onRetry={() => setOrNonce((n) => n + 1)}
+              />
               <label className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"

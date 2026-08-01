@@ -9,6 +9,7 @@ import {
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { Button, FOCUS } from "./Button";
+import { ModelPicker } from "./ModelPicker";
 import logo from "../assets/logo.png";
 
 interface Props {
@@ -270,36 +271,21 @@ export function Onboarding({ settings, onDone }: Props) {
                     />
                   </label>
                 )}
-                <label className="block text-sm">
-                  <span className="mb-1 block text-xs text-fg-subtle">
-                    {t("settings.pick_llm_model")}
-                  </span>
-                  <select
-                    data-testid="or-llm-select"
-                    className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
-                    value={draft.openrouter_llm_model}
-                    onChange={(e) =>
-                      setDraft((d) => ({
-                        ...d,
-                        openrouter_llm_model: e.target.value,
-                      }))
-                    }
-                  >
-                    {(llmOr.length
-                      ? llmOr
-                      : [
-                          {
-                            id: "openai/gpt-4o-mini",
-                            name: "GPT-4o Mini",
-                          },
-                        ]
-                    ).map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name || m.id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                {/* Distinct DOM id from the drawer's: same component, same
+                    test id, two screens. */}
+                <ModelPicker
+                  id="onboarding-or-llm"
+                  testId="or-llm-select"
+                  label={t("settings.pick_llm_model")}
+                  value={draft.openrouter_llm_model}
+                  onChange={(v) =>
+                    setDraft((d) => ({ ...d, openrouter_llm_model: v }))
+                  }
+                  models={llmOr}
+                  status={
+                    draft.openrouter_api_key ? undefined : "needs_key"
+                  }
+                />
               </>
             )}
           </section>
