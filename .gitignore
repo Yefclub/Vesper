@@ -25,11 +25,12 @@ SPEC.md
 .grok/
 
 # Models / large binaries (downloaded at runtime)
-models/
+/models/
 *.gguf
 *.onnx
-# keep source placeholders if any
-!**/src/**/*.bin
+# keep Rust source modules named models/
+!src-tauri/src/models/
+!src-tauri/src/models/**
 
 # App data / recordings (local only)
 data/
