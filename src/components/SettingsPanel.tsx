@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { motion } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
 import { X } from "lucide-react";
 import {
@@ -10,6 +11,7 @@ import {
   OrModel,
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
+import { backdropFade, slideInRight } from "../lib/motion";
 
 interface Props {
   settings: AppSettings;
@@ -90,10 +92,18 @@ export function SettingsPanel({
   const systems = devices.filter((d) => d.kind === "system");
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm">
-      <div
+    <motion.div
+      {...backdropFade}
+      className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm"
+      // Clicking away closes, which is what every drawer does and what someone
+      // who opened this by accident will try first.
+      onClick={onClose}
+    >
+      <motion.div
+        {...slideInRight}
         data-testid="settings-panel"
-        className="flex h-full w-full max-w-md flex-col border-l border-border bg-surface shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+        className="flex h-full w-full max-w-md flex-col border-l border-border bg-surface"
       >
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <h2 className="text-base font-semibold">{t("settings.title")}</h2>
@@ -397,8 +407,8 @@ export function SettingsPanel({
             {t("settings.save")}
           </button>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 }
 

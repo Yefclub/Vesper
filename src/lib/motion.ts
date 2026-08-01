@@ -51,3 +51,26 @@ export const fadeRise = {
   animate: { opacity: 1, y: 0 },
   transition: transition.base,
 } as const;
+
+/**
+ * A panel anchored to the right edge, entering from it and leaving towards it.
+ *
+ * Spatial consistency: something that lives on the right should arrive from the
+ * right, so the animation says where it came from instead of just announcing
+ * that something appeared. Translation is a percentage of the panel, not a fixed
+ * distance, so it clears its own width at any size.
+ */
+export const slideInRight = {
+  initial: { opacity: 0, x: "8%" },
+  animate: { opacity: 1, x: 0 },
+  exit: { opacity: 0, x: "8%" },
+  transition: transition.panel,
+} as const;
+
+/** The dim behind a panel. Opacity only — nothing to move. */
+export const backdropFade = {
+  initial: { opacity: 0 },
+  animate: { opacity: 1 },
+  exit: { opacity: 0 },
+  transition: transition.base,
+} as const;

@@ -34,6 +34,14 @@ fn en_dict() -> HashMap<&'static str, &'static str> {
         ("nav.meetings", "Meetings"),
         ("nav.search", "Search meetings…"),
         ("nav.settings", "Settings"),
+        ("nav.import", "Import audio"),
+        ("nav.delete", "Delete meeting"),
+        ("sidebar.today", "Today"),
+        ("sidebar.this_week", "This week"),
+        ("sidebar.earlier", "Earlier"),
+        ("sidebar.no_matches", "No meetings match that."),
+        ("sidebar.empty", "Nothing recorded yet."),
+        ("sidebar.empty_cta", "Import audio"),
         ("record.start", "Record"),
         ("record.pause", "Pause"),
         ("record.resume", "Resume"),
@@ -94,6 +102,14 @@ fn pt_dict() -> HashMap<&'static str, &'static str> {
         ("nav.meetings", "Reuniões"),
         ("nav.search", "Buscar reuniões…"),
         ("nav.settings", "Configurações"),
+        ("nav.import", "Importar áudio"),
+        ("nav.delete", "Excluir reunião"),
+        ("sidebar.today", "Hoje"),
+        ("sidebar.this_week", "Esta semana"),
+        ("sidebar.earlier", "Antes"),
+        ("sidebar.no_matches", "Nenhuma reunião corresponde."),
+        ("sidebar.empty", "Nada gravado ainda."),
+        ("sidebar.empty_cta", "Importar áudio"),
         ("record.start", "Gravar"),
         ("record.pause", "Pausar"),
         ("record.resume", "Retomar"),
@@ -192,6 +208,27 @@ mod tests {
         assert!(en2.contains("Welcome"));
         assert!(pt2.contains("Bem-vindo"));
         assert_ne!(en2, pt2);
+    }
+
+    /// A key present in one locale and missing in the other reaches the user as
+    /// the raw key, because lookup falls back to the key itself — which is how a
+    /// heading ends up reading `sidebar.today`.
+    #[test]
+    fn both_locales_carry_the_same_keys() {
+        let en = catalog(Locale::En);
+        let pt = catalog(Locale::PtBr);
+        let mut missing: Vec<String> = en
+            .keys()
+            .filter(|k| !pt.contains_key(*k))
+            .map(|k| format!("only in en: {k}"))
+            .collect();
+        missing.extend(
+            pt.keys()
+                .filter(|k| !en.contains_key(*k))
+                .map(|k| format!("only in pt: {k}")),
+        );
+        missing.sort();
+        assert!(missing.is_empty(), "{missing:?}");
     }
 
     #[test]
