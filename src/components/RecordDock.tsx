@@ -51,6 +51,8 @@ export function RecordDock({
   const expanded = hovered || focused;
   const recording = status?.recording ?? false;
   const blocked = !gate.allowed && !recording;
+  // A gate can carry either a sentence from the backend or a key for one we own.
+  const gateReason = gate.reason ?? (gate.reason_key ? t(gate.reason_key) : null);
 
   const deviceName = (id: string | null | undefined, kind: AudioDevice["kind"]) =>
     devices.find((d) => d.id === id)?.name ??
@@ -117,7 +119,7 @@ export function RecordDock({
             control up there is disabled, so it cannot take focus, and a touch
             user never hovers. It stays visible whenever recording is blocked. */}
         <AnimatePresence initial={false}>
-          {(expanded || (blocked && gate.reason)) && (
+          {(expanded || (blocked && gateReason)) && (
             <motion.div
               // Height animates through the grid trick rather than `height:auto`,
               // which is not animatable; only transform and opacity actually move.
@@ -128,9 +130,9 @@ export function RecordDock({
               className="border-t border-border/60"
             >
               <div className="flex items-center gap-4 px-4 py-2.5 text-[11px] text-muted">
-                {blocked && gate.reason ? (
+                {blocked && gateReason ? (
                   <span data-testid="record-gate" className="max-w-xs text-danger">
-                    {gate.reason}
+                    {gateReason}
                   </span>
                 ) : (
                   <>

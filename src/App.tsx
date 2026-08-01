@@ -122,9 +122,12 @@ function AppShell({
     try {
       setGate(await api.canRecord());
     } catch {
-      setGate({ allowed: false, reason: t("gate.unavailable") });
+      // Store the key, not the sentence: depending on t here made refreshGate
+      // change identity on every catalog load, which re-ran the whole startup
+      // effect — meetings, models, status, gate and the update check — each time.
+      setGate({ allowed: false, reason_key: "gate.unavailable" });
     }
-  }, [t]);
+  }, []);
 
   const refreshMeetings = useCallback(async () => {
     try {

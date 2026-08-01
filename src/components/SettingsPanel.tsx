@@ -36,6 +36,7 @@ export function SettingsPanel({
   const [llmOr, setLlmOr] = useState<OrModel[]>([]);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [msgKey, setMsgKey] = useState<string | null>(null);
   const [tab, setTab] = useState<"local" | "cloud" | "devices" | "lang">("local");
 
   useEffect(() => {
@@ -61,7 +62,9 @@ export function SettingsPanel({
     try {
       await onSave(draft);
       setLocale(draft.ui_locale);
-      setMsg(t("settings.saved"));
+      // Keyed, not resolved: saving a language change means the catalog in t is
+      // still the previous one at this point.
+      setMsgKey("settings.saved");
     } catch (e) {
       setMsg(String(e));
     } finally {
@@ -205,7 +208,7 @@ export function SettingsPanel({
                         onClick={() => download(m.id)}
                         className="rounded-lg bg-surface-3 px-2 py-1 text-xs hover:bg-border"
                       >
-                        Download
+                        {t("model.download")}
                       </button>
                     )}
                   </div>
@@ -423,7 +426,9 @@ export function SettingsPanel({
         </div>
 
         <div className="border-t border-border p-4">
-          {msg && <p className="mb-2 text-xs text-muted">{msg}</p>}
+          {(msgKey || msg) && (
+            <p className="mb-2 text-xs text-muted">{msgKey ? t(msgKey) : msg}</p>
+          )}
           <button
             type="button"
             onClick={save}
