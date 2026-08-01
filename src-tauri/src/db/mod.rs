@@ -48,12 +48,16 @@ fn delete_recording(path: &Path) -> Result<(), String> {
 /// the rest only raised its rank. bm25 still sorts documents carrying more of the
 /// terms to the top, so the useful part of `AND` survives without the part that
 /// makes a two-word search find nothing.
+///
+/// Each phrase is a prefix query. The search runs as the user types, and the
+/// scorer this replaces matched substrings — without the `*`, typing `plan`
+/// returns nothing until `planning` is complete, which reads as a broken search.
 fn fts_match_expression(query: &str) -> Option<String> {
     let terms: Vec<String> = query
         .split_whitespace()
         .map(|t| t.replace('"', "\"\""))
         .filter(|t| !t.trim().is_empty())
-        .map(|t| format!("\"{t}\""))
+        .map(|t| format!("\"{t}\"*"))
         .collect();
     if terms.is_empty() {
         return None;
@@ -266,15 +270,21 @@ impl Database {
         if let Some(audio) = self.get_meeting(id)?.and_then(|m| m.audio_path) {
             delete_recording(Path::new(&audio))?;
         }
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM meetings_fts WHERE meeting_id=?1", params![id])
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // One transaction: the audio is already gone by this point, so a partial
+        // delete would leave a meeting the user cannot play and cannot finish
+        // removing. All four rows go together or none do, and the retry works
+        // because a missing file is not an error.
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM meetings_fts WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM transcript_segments WHERE meeting_id=?1", params![id])
+        tx.execute("DELETE FROM transcript_segments WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM chat_messages WHERE meeting_id=?1", params![id])
+        tx.execute("DELETE FROM chat_messages WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM meetings WHERE id=?1", params![id])
+        tx.execute("DELETE FROM meetings WHERE id=?1", params![id])
             .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -838,6 +848,20 @@ mod tests {
         db.delete_meeting("m1").unwrap();
 
         assert!(outsider.exists(), "delete escaped the recordings directory");
+    }
+
+    #[test]
+    fn search_matches_a_prefix_as_the_user_types() {
+        // Search runs on every keystroke, so a query has to match before the word
+        // is finished. A bare FTS5 phrase only matches whole tokens.
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let m = sample_meeting("m1", "Sprint planning");
+        db.upsert_meeting(&m).unwrap();
+
+        for typed in ["p", "pl", "plan", "planning"] {
+            assert_eq!(db.search(typed, 10).unwrap().len(), 1, "typed {typed:?}");
+        }
     }
 
     #[test]
