@@ -36,6 +36,19 @@ export function SettingsPanel({
   const [llmOr, setLlmOr] = useState<OrModel[]>([]);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [msgKey, setMsgKey] = useState<string | null>(null);
+
+  // One status line, two sources. Setting either has to clear the other, or a
+  // leftover "Saved" outlives its moment and hides the download progress and
+  // errors that come after it.
+  const showText = (text: string | null) => {
+    setMsgKey(null);
+    setMsg(text);
+  };
+  const showKey = (key: string | null) => {
+    setMsg(null);
+    setMsgKey(key);
+  };
   const [tab, setTab] = useState<"local" | "cloud" | "devices" | "lang">("local");
 
   useEffect(() => {
@@ -61,16 +74,18 @@ export function SettingsPanel({
     try {
       await onSave(draft);
       setLocale(draft.ui_locale);
-      setMsg("OK");
+      // Keyed, not resolved: saving a language change means the catalog in t is
+      // still the previous one at this point.
+      showKey("settings.saved");
     } catch (e) {
-      setMsg(String(e));
+      showText(String(e));
     } finally {
       setSaving(false);
     }
   }
 
   async function download(id: string) {
-    setMsg(`Downloading ${id}…`);
+    showText(`Downloading ${id}…`);
     try {
       const un = await listen<{
         model_id: string;
@@ -84,7 +99,7 @@ export function SettingsPanel({
           total > 0
             ? Math.min(100, Math.round((e.payload.downloaded_bytes / total) * 100))
             : 0;
-        setMsg(`${id}: ${e.payload.phase} ${pct}%`);
+        showText(`${id}: ${e.payload.phase} ${pct}%`);
       });
       try {
         await api.downloadModel(id);
@@ -94,9 +109,9 @@ export function SettingsPanel({
         un();
       }
       await onRefreshModels();
-      setMsg(`${id} ready`);
+      showText(`${id} ready`);
     } catch (e) {
-      setMsg(String(e));
+      showText(String(e));
     }
   }
 
@@ -196,7 +211,7 @@ export function SettingsPanel({
                     <div>
                       <div className="text-sm">{m.label}</div>
                       <div className="text-[11px] text-muted">
-                        {m.ready ? "Ready" : "Not downloaded"}
+                        {m.ready ? t("model.ready") : t("model.not_downloaded")}
                       </div>
                     </div>
                     {!m.ready && (
@@ -205,7 +220,7 @@ export function SettingsPanel({
                         onClick={() => download(m.id)}
                         className="rounded-lg bg-surface-3 px-2 py-1 text-xs hover:bg-border"
                       >
-                        Download
+                        {t("model.download")}
                       </button>
                     )}
                   </div>
@@ -423,7 +438,9 @@ export function SettingsPanel({
         </div>
 
         <div className="border-t border-border p-4">
-          {msg && <p className="mb-2 text-xs text-muted">{msg}</p>}
+          {(msgKey || msg) && (
+            <p className="mb-2 text-xs text-muted">{msgKey ? t(msgKey) : msg}</p>
+          )}
           <button
             type="button"
             onClick={save}
