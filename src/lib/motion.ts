@@ -39,12 +39,15 @@ export const transition = {
 } as const;
 
 /**
- * Content arriving in place: fade with a short rise. Exit only fades — reversing
- * the travel on the way out draws the eye to something that is leaving.
+ * Content arriving in place: fade with a short rise.
+ *
+ * Deliberately no `exit`. Inside `AnimatePresence mode="wait"` an exit blocks the
+ * next panel from mounting until it finishes, so handing one to every pane would
+ * put a fifth of a second of dead time on every tab click. Panes that should
+ * animate out say so themselves.
  */
 export const fadeRise = {
   initial: { opacity: 0, y: distance.sm },
   animate: { opacity: 1, y: 0 },
-  exit: { opacity: 0 },
   transition: transition.base,
 } as const;

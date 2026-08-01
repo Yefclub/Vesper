@@ -544,6 +544,7 @@ function AppShell({
                     <motion.div
                       key="transcript"
                       {...fadeRise}
+                      exit={{ opacity: 0 }}
                       className="mx-auto flex max-w-3xl flex-col gap-3"
                       data-testid="transcript-panel"
                     >
