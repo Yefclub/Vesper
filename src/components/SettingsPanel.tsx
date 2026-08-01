@@ -43,9 +43,16 @@ export function SettingsPanel({
     api.capabilities().then(setCaps).catch(() => null);
   }, []);
 
+  // Only when the Cloud tab is showing, and debounced: this used to run on every
+  // keystroke in the API key field, so pasting a 60-character key fired sixty
+  // pairs of calls at OpenRouter.
   useEffect(() => {
-    api.openrouterSttModels().then(setSttOr).catch(() => setSttOr([]));
-    api.openrouterLlmModels().then(setLlmOr).catch(() => setLlmOr([]));
+    if (tab !== "cloud") return;
+    const timer = window.setTimeout(() => {
+      api.openrouterSttModels().then(setSttOr).catch(() => setSttOr([]));
+      api.openrouterLlmModels().then(setLlmOr).catch(() => setLlmOr([]));
+    }, 400);
+    return () => window.clearTimeout(timer);
   }, [draft.openrouter_api_key, tab]);
 
   async function save() {
@@ -79,8 +86,13 @@ export function SettingsPanel({
             : 0;
         setMsg(`${id}: ${e.payload.phase} ${pct}%`);
       });
-      await api.downloadModel(id);
-      un();
+      try {
+        await api.downloadModel(id);
+      } finally {
+        // Unsubscribe on the failure path too: without this every failed
+        // download left a listener behind for the rest of the session.
+        un();
+      }
       await onRefreshModels();
       setMsg(`${id} ready`);
     } catch (e) {
@@ -156,15 +168,24 @@ export function SettingsPanel({
                   { value: "openrouter", label: "OpenRouter" },
                 ]}
               />
-              <Field
-                label="Local STT"
+              {/* Bound to the catalog rather than free text. Typing the id by
+                  hand meant downloading "Whisper Base" from the list below and
+                  then having to know it is called `whisper-base`. */}
+              <FieldSelect
+                label={t("settings.local_stt")}
                 value={draft.local_stt_model}
                 onChange={(v) => setDraft((d) => ({ ...d, local_stt_model: v }))}
+                options={models
+                  .filter((m) => m.kind === "stt")
+                  .map((m) => ({ value: m.id, label: m.label }))}
               />
-              <Field
-                label="Local LLM"
+              <FieldSelect
+                label={t("settings.local_llm")}
                 value={draft.local_llm_model}
                 onChange={(v) => setDraft((d) => ({ ...d, local_llm_model: v }))}
+                options={models
+                  .filter((m) => m.kind === "llm")
+                  .map((m) => ({ value: m.id, label: m.label }))}
               />
               <div className="space-y-2">
                 {models.map((m) => (
@@ -339,6 +360,10 @@ export function SettingsPanel({
                     }))
                   }
                 >
+                  {/* Explicit empty option. Without it a null setting rendered as
+                      the first device in the list, so the screen claimed a choice
+                      the backend had not been given. */}
+                  <option value="">{t("dock.system_default")}</option>
                   {mics.map((d) => (
                     <option key={d.id} value={d.id}>
                       {d.name}
@@ -361,6 +386,7 @@ export function SettingsPanel({
                     }))
                   }
                 >
+                  <option value="">{t("dock.system_default")}</option>
                   {systems.map((d) => (
                     <option key={d.id} value={d.id}>
                       {d.name}
