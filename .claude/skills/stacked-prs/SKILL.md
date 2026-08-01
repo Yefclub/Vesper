@@ -13,7 +13,7 @@ dependency (schema → service → API → UI). Genuinely independent work stays
 Needs `gh` >= 2.97.0 and the official extension:
 
 ```bash
-winget upgrade --id GitHub.cli --exact --silent
+winget upgrade --id GitHub.cli --exact --silent   # Windows; use brew/apt elsewhere
 gh extension install github/gh-stack
 ```
 
@@ -64,7 +64,8 @@ GitHub at merge time — bypassing merge requirements is not supported for stack
 1. `git fetch origin`, then cut the worktree from `origin/dev` (never from a stale local branch)
 2. Implement and commit the bottom layer
 3. Review the local commit **before pushing** — review comes before CI, not after
-4. `gh stack submit --auto --open` for that layer only
+4. `gh stack submit --auto --open` — publishes every branch that exists, which at this point is
+   only the layer you just committed
 5. `gh stack add <next>` for the layer above, and repeat from step 2
 6. When the stack is green and approved, `gh stack merge --yes --squash`
 
