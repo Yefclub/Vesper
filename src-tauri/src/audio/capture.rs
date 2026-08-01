@@ -393,6 +393,7 @@ pub fn write_dual_wav(
 pub fn read_wav_mono(path: &Path) -> Result<(Vec<i16>, u32), CaptureError> {
     let mut reader =
         hound::WavReader::open(path).map_err(|e| CaptureError::Device(e.to_string()))?;
+    reject_overlong_wav(&reader)?;
     let spec = reader.spec();
     let channels = spec.channels.max(1) as usize;
     let samples: Result<Vec<i16>, _> = match spec.sample_format {
@@ -409,6 +410,24 @@ pub fn read_wav_mono(path: &Path) -> Result<(Vec<i16>, u32), CaptureError> {
         mono.push((sum / channels as i32) as i16);
     }
     Ok((mono, spec.sample_rate))
+}
+
+/// Rejects a WAV whose declared length exceeds the decoder's ceiling.
+///
+/// Reading the header costs nothing and covers every encoding the reader accepts.
+/// Guessing from the file size does not: 8-bit mono is one byte per sample on
+/// disk and two in memory, so a byte-based bound lets four times the intended
+/// number of samples through.
+fn reject_overlong_wav(reader: &hound::WavReader<std::io::BufReader<std::fs::File>>) -> Result<(), CaptureError> {
+    let channels = reader.spec().channels.max(1) as usize;
+    let frames = reader.len() as usize / channels;
+    if frames > crate::audio::decode::MAX_DECODED_SAMPLES {
+        return Err(CaptureError::Device(format!(
+            "audio is longer than {} hours; split it into shorter recordings",
+            crate::audio::decode::MAX_DECODED_SAMPLES / (60 * 60 * 48_000)
+        )));
+    }
+    Ok(())
 }
 
 /// Split stereo dual-channel WAV (L=Me, R=Others) into separate mono buffers.
