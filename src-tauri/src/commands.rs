@@ -67,7 +67,7 @@ impl AppState {
 /// it one more session in the old place.
 fn load_or_migrate_api_key(db: &Database) -> Option<String> {
     match db.legacy_api_key() {
-        Ok(Some(legacy)) => match crate::secrets::set_openrouter_key(Some(&legacy)) {
+        Ok(Some(legacy)) => match crate::secrets::store_openrouter_key(&legacy) {
             Ok(()) => {
                 if let Err(e) = db.clear_legacy_api_key() {
                     tracing::warn!("key moved to the keychain but the old copy remains: {e}");
@@ -101,6 +101,15 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> AppSettings {
     state.settings.lock().public_view()
 }
 
+/// Blank and absent mean the same thing for a credential; comparing the raw
+/// `Option<String>` would treat `Some("")` and `None` as a change.
+fn normalised_key(key: &Option<String>) -> Option<String> {
+    key.as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+}
+
 /// The single write path for settings.
 ///
 /// Both callers need the same three steps in the same order — restore a redacted
@@ -112,14 +121,15 @@ fn persist_settings(
 ) -> Result<AppSettings, String> {
     // The front end only ever sees a redacted key, so a redacted value coming
     // back means "unchanged", not "set it to these characters".
-    {
+    let previous = {
         let current = state.settings.lock();
         if let Some(k) = &settings.openrouter_api_key {
             if k.contains('…') || k == "****" {
                 settings.openrouter_api_key = current.openrouter_api_key.clone();
             }
         }
-    }
+        normalised_key(&current.openrouter_api_key)
+    };
     settings.validate_models().map_err(|e| e.to_string())?;
     // Keychain first, and nothing else happens if it refuses.
     //
@@ -131,7 +141,18 @@ fn persist_settings(
     // The reverse risk is real but much smaller: if the database write fails after
     // the keychain accepted the key, the next launch pairs a stored credential with
     // older settings. The user saw an error and nothing was lost.
-    crate::secrets::set_openrouter_key(settings.openrouter_api_key.as_deref())?;
+    // Touch the keychain only when the key actually changed. Every settings write
+    // funnels through here — switching provider, toggling reasoning — and none of
+    // those should fail because the keychain happens to be locked, nor rewrite a
+    // credential that nobody edited. Whether a key exists is known from our own
+    // state, the one source that stays honest while the keychain cannot answer.
+    let next = normalised_key(&settings.openrouter_api_key);
+    if next != previous {
+        match &next {
+            Some(key) => crate::secrets::store_openrouter_key(key)?,
+            None => crate::secrets::clear_openrouter_key()?,
+        }
+    }
     state.db.save_settings(&settings)?;
     *state.settings.lock() = settings.clone();
     Ok(settings)
@@ -156,9 +177,7 @@ pub fn switch_stt_provider(
     };
     let mut s = state.settings.lock().clone();
     s.switch_stt(p).map_err(|e| e.to_string())?;
-    state.db.save_settings(&s)?;
-    *state.settings.lock() = s.clone();
-    Ok(s.public_view())
+    Ok(persist_settings(&state, s)?.public_view())
 }
 
 #[tauri::command]
@@ -172,18 +191,14 @@ pub fn switch_llm_provider(
     };
     let mut s = state.settings.lock().clone();
     s.switch_llm(p).map_err(|e| e.to_string())?;
-    state.db.save_settings(&s)?;
-    *state.settings.lock() = s.clone();
-    Ok(s.public_view())
+    Ok(persist_settings(&state, s)?.public_view())
 }
 
 #[tauri::command]
 pub fn set_reasoning(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<AppSettings, String> {
     let mut s = state.settings.lock().clone();
     s.set_reasoning(enabled);
-    state.db.save_settings(&s)?;
-    *state.settings.lock() = s.clone();
-    Ok(s.public_view())
+    Ok(persist_settings(&state, s)?.public_view())
 }
 
 #[tauri::command]

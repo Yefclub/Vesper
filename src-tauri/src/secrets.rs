@@ -32,46 +32,27 @@ pub fn openrouter_key() -> Option<String> {
     }
 }
 
-/// Stores the key, or clears it when `None` or blank.
-///
-/// Clearing never fails the caller. There is nothing to lose by failing to delete
-/// something, and every settings save passes through here — including a local-only
-/// setup that has no key at all. Returning an error there would stop someone on a
-/// machine without a keychain daemon from finishing onboarding, over a credential
-/// they never had.
-///
-/// Storing a real key does propagate the error, because the alternative is the
-/// user believing their key was saved and finding it gone next launch.
-pub fn set_openrouter_key(key: Option<&str>) -> Result<(), String> {
-    match key.map(str::trim).filter(|k| !k.is_empty()) {
-        Some(k) => entry()
-            .and_then(|e| e.set_password(k))
-            .map_err(|e| format!("could not store the API key in the system keychain: {e}")),
-        None => clear_openrouter_key(),
-    }
+/// Stores the key. Failure propagates: the alternative is the user believing their
+/// key was saved and finding it gone next launch.
+pub fn store_openrouter_key(key: &str) -> Result<(), String> {
+    entry()
+        .and_then(|e| e.set_password(key))
+        .map_err(|e| format!("could not store the API key in the system keychain: {e}"))
 }
 
-/// Removing a key is only best-effort when there was nothing to remove.
+/// Removes the stored key, and fails loudly if it cannot.
 ///
-/// If a key really is stored and the keychain refuses to delete it, saying "saved"
-/// would be a lie with teeth: the user believes they revoked their credential, the
-/// settings screen shows it gone, and the next launch loads it straight back out of
-/// the keychain and keeps sending it to OpenRouter.
-fn clear_openrouter_key() -> Result<(), String> {
-    let Ok(entry) = entry() else {
-        // No keychain backend at all — nothing of ours can be sitting in it.
-        return Ok(());
-    };
-    match entry.get_password() {
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => {
-            // Service unavailable or locked. We never managed to store anything
-            // through it either, so there is nothing to strand.
-            tracing::warn!("keychain unreadable while clearing the API key: {e}");
-            Ok(())
-        }
-        Ok(_) => entry
-            .delete_credential()
-            .map_err(|e| format!("could not remove the stored API key: {e}")),
+/// Call this only when a key is known to be set — the caller knows that from its
+/// own state, which is the one source that does not lie when the keychain is
+/// locked. Asking the keychain whether something is stored cannot distinguish
+/// "nothing here" from "cannot answer right now", and guessing either way is
+/// wrong: guess absent and a revoked credential quietly comes back to life when
+/// the service recovers; guess present and someone on a machine with no keychain
+/// at all cannot finish onboarding over a key they never had.
+pub fn clear_openrouter_key() -> Result<(), String> {
+    match entry().and_then(|e| e.delete_credential()) {
+        // Already gone, including the race where another process removed it first.
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("could not remove the stored API key: {e}")),
     }
 }
