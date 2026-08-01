@@ -197,3 +197,27 @@ body,
     animation: none;
   }
 }
+
+/* The download bar with no known total. `total_bytes` is nullable and a
+   percentage would be a lie about a multi-gigabyte transfer, so the fill
+   sweeps instead. Transform only — it stays on the compositor. The reduced
+   fallback fills the track rather than emptying it: an empty track next to
+   "Downloading" reads as stalled. */
+@keyframes progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+.progress-sweep {
+  width: 33%;
+  animation: progress-sweep 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-sweep {
+    width: 100%;
+    animation: none;
+  }
+}

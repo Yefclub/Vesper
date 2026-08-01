@@ -92,6 +92,25 @@ export interface ModelInfo {
   download_url?: string | null;
 }
 
+/** Payload of the `models://download-progress` event.
+ *
+ *  `bytes_per_sec`, `eta_secs`, `attempt` and `resumed_from_bytes` are optional
+ *  because the backend that emits them is a separate change that has not landed
+ *  yet. Every consumer must render without them; they light up on their own the
+ *  day the Rust side starts sending them, with no front-end change. */
+export interface DownloadProgress {
+  model_id: string;
+  downloaded_bytes: number;
+  total_bytes?: number | null;
+  done: boolean;
+  error?: string | null;
+  phase: string;
+  bytes_per_sec?: number | null;
+  eta_secs?: number | null;
+  attempt?: number | null;
+  resumed_from_bytes?: number | null;
+}
+
 export interface AudioDevice {
   id: string;
   name: string;

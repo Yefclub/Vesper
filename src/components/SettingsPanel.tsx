@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
 import { X } from "lucide-react";
@@ -7,6 +7,7 @@ import {
   AppSettings,
   AudioDevice,
   CapabilityReport,
+  DownloadProgress,
   ModelInfo,
   OrModel,
 } from "../lib/api";
@@ -46,6 +47,10 @@ export function SettingsPanel({
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [msgKey, setMsgKey] = useState<string | null>(null);
+  // One download at a time — the row that started it is the row that reports
+  // it. This used to be a string in the drawer footer, ~400px from the button
+  // that produced it, and that button stayed clickable while it ran.
+  const [progress, setProgress] = useState<DownloadProgress | null>(null);
 
   // One status line, two sources. Setting either has to clear the other, or a
   // leftover "Saved" outlives its moment and hides the download progress and
@@ -93,37 +98,49 @@ export function SettingsPanel({
     }
   }
 
-  async function download(id: string) {
-    showText(`Downloading ${id}…`);
-    try {
-      const un = await listen<{
-        model_id: string;
-        downloaded_bytes: number;
-        total_bytes?: number | null;
-        phase: string;
-      }>("models://download-progress", (e) => {
-        if (e.payload.model_id !== id) return;
-        const total = e.payload.total_bytes ?? 0;
-        const pct =
-          total > 0
-            ? Math.min(100, Math.round((e.payload.downloaded_bytes / total) * 100))
-            : 0;
-        showText(`${id}: ${e.payload.phase} ${pct}%`);
+  const download = useCallback(
+    async (id: string) => {
+      // Set before the first event arrives, so the row is busy from the click
+      // rather than from whenever the network answers. A null total renders the
+      // indeterminate branch, which is the truth at this point.
+      setProgress({
+        model_id: id,
+        downloaded_bytes: 0,
+        total_bytes: null,
+        done: false,
+        phase: "connecting",
       });
       try {
-        await api.downloadModel(id);
-      } finally {
-        // Unsubscribe on the failure path too: without this every failed
-        // download left a listener behind for the rest of the session.
-        un();
+        const un = await listen<DownloadProgress>(
+          "models://download-progress",
+          (e) => {
+            if (e.payload.model_id !== id) return;
+            setProgress(e.payload);
+          },
+        );
+        try {
+          await api.downloadModel(id);
+        } finally {
+          // Unsubscribe on the failure path too: without this every failed
+          // download left a listener behind for the rest of the session.
+          un();
+        }
+        await onRefreshModels();
+        setProgress(null);
+        adoptIfDraftUnusable(id);
+      } catch (e) {
+        // Keep the last position instead of clearing: Retry resumes from the
+        // `.part` file, so restarting the row at zero would be a lie about what
+        // happens next.
+        setProgress((p) =>
+          p && p.model_id === id ? { ...p, error: String(e) } : p,
+        );
       }
-      await onRefreshModels();
-      showText(`${id} ready`);
-      adoptIfDraftUnusable(id);
-    } catch (e) {
-      showText(String(e));
-    }
-  }
+    },
+    // `models` is here so a progress tick does not rebuild this callback and
+    // re-render every memoized row; `adoptIfDraftUnusable` reads the same list.
+    [models, onRefreshModels],
+  );
 
   /** The draft still holds whatever was saved before the download — on a fresh
    *  machine that is `whisper-tiny`, which is not installed. Without this,
@@ -284,26 +301,12 @@ export function SettingsPanel({
               )}
               <div className="space-y-2">
                 {models.map((m) => (
-                  <div
+                  <ModelRow
                     key={m.id}
-                    className="flex items-center justify-between rounded-md border border-border bg-surface-2 px-3 py-2"
-                  >
-                    <div>
-                      <div className="text-sm">{m.label}</div>
-                      <div className="text-2xs text-fg-muted">
-                        {m.ready ? t("model.ready") : m.present ? t("model.unverified") : t("model.not_downloaded")}
-                      </div>
-                    </div>
-                    {!m.ready && (
-                      <Button
-                        variant="secondary"
-                        size="xs"
-                        onClick={() => download(m.id)}
-                      >
-                        {m.present ? t("model.verify") : t("model.download")}
-                      </Button>
-                    )}
-                  </div>
+                    model={m}
+                    progress={progress?.model_id === m.id ? progress : null}
+                    onDownload={download}
+                  />
                 ))}
               </div>
               {caps && (
@@ -616,3 +619,158 @@ function FieldEmpty({ label, text }: { label: string; text: string }) {
     </div>
   );
 }
+
+/** Backend phase → catalog key. An unrecognised phase falls back to the raw
+ *  string, not to `t()`'s key fallback — that would print `download.whatever`
+ *  at the user. */
+const PHASE_KEY: Record<string, string> = {
+  connecting: "download.connecting",
+  downloading: "download.downloading",
+  verifying: "download.verifying",
+  extracting: "download.extracting",
+  done: "download.done",
+};
+
+/** Mirrors the retry ladder in the downloader — 1/2/4/8/16s, then give up. The
+ *  count is shown so "Retrying 2/5" says how much patience is left. */
+const MAX_ATTEMPTS = 5;
+
+/** `142 MB`, `1.4 GB`. One decimal below 100, none above, so the field keeps
+ *  its width while the number climbs. */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["kB", "MB", "GB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+function formatEta(s: number): string {
+  return s < 60 ? `~${s} s` : `~${Math.round(s / 60)} min`;
+}
+
+/** Where a retry picks the transfer up. A percentage while the total is known,
+ *  the raw count while it is not — never nothing, or "retrying" reads as
+ *  "starting over". */
+function resumePoint(p: DownloadProgress, total: number): string {
+  const from = p.resumed_from_bytes ?? 0;
+  return total > 0 ? `${Math.round((from / total) * 100)}%` : formatBytes(from);
+}
+
+/** One catalog row, memoized: a progress tick re-renders the row that is
+ *  downloading and not the three around it. The readout lives here rather than
+ *  in the drawer footer, which is where it used to be — one shared grey line
+ *  ~400px away from the button that produced it, with that button still
+ *  clickable, so a second writer could be started on the same `.part` file. */
+const ModelRow = memo(function ModelRow({
+  model,
+  progress,
+  onDownload,
+}: {
+  model: ModelInfo;
+  progress: DownloadProgress | null;
+  onDownload: (id: string) => void;
+}) {
+  const { t } = useI18n();
+  const failed = progress?.error != null;
+  const running = progress !== null && !failed;
+  const total = progress?.total_bytes ?? 0;
+  // `total_bytes` is nullable and rendering 0% for it would be a lie about a
+  // multi-gigabyte transfer.
+  const indeterminate = running && total <= 0;
+  const ratio =
+    progress && total > 0 ? Math.min(1, progress.downloaded_bytes / total) : 0;
+
+  let readout: string;
+  if (failed) {
+    readout = t("download.failed");
+  } else if (progress) {
+    const parts: string[] = [];
+    if (total > 0) {
+      parts.push(
+        `${formatBytes(progress.downloaded_bytes)} / ${formatBytes(total)}`,
+      );
+    }
+    if ((progress.attempt ?? 1) > 1) {
+      // The retry line takes the rate's place; the byte counter and the bar
+      // both stay where they were, because the transfer does too.
+      parts.push(
+        t("download.retrying")
+          .replace("{attempt}", String(progress.attempt))
+          .replace("{max}", String(MAX_ATTEMPTS))
+          .replace("{at}", resumePoint(progress, total)),
+      );
+    } else if (progress.bytes_per_sec) {
+      parts.push(`${formatBytes(progress.bytes_per_sec)}/s`);
+      if (progress.eta_secs != null) parts.push(formatEta(progress.eta_secs));
+    }
+    // The word "Downloading" beside a byte counter says nothing the counter
+    // does not; on the phases that carry no bytes it is the whole line.
+    if (progress.phase !== "downloading" || parts.length === 0) {
+      parts.unshift(
+        PHASE_KEY[progress.phase]
+          ? t(PHASE_KEY[progress.phase])
+          : progress.phase,
+      );
+    }
+    readout = parts.join(" · ");
+  } else {
+    readout = model.ready
+      ? t("model.ready")
+      : model.present
+        ? t("model.unverified")
+        : t("model.not_downloaded");
+  }
+
+  return (
+    <div className="rounded-md border border-border bg-surface-2 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm">{model.label}</div>
+          <div
+            className={`text-2xs tabular-nums ${failed ? "text-danger" : "text-fg-muted"}`}
+          >
+            {readout}
+          </div>
+        </div>
+        {!model.ready && (
+          <Button
+            variant="secondary"
+            size="xs"
+            disabled={running}
+            onClick={() => onDownload(model.id)}
+          >
+            {failed
+              ? t("action.retry")
+              : model.present
+                ? t("model.verify")
+                : t("model.download")}
+          </Button>
+        )}
+      </div>
+      {progress && (
+        <div
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={indeterminate ? undefined : Math.round(ratio * 100)}
+          aria-valuetext={readout}
+          className="mt-2 h-1 overflow-hidden rounded-full bg-surface-3"
+        >
+          {indeterminate ? (
+            <div className="progress-sweep h-full rounded-full bg-accent" />
+          ) : (
+            <div
+              className="h-full origin-left rounded-full bg-accent transition-transform duration-200 ease-out motion-reduce:transition-none"
+              style={{ transform: `scaleX(${ratio})` }}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
