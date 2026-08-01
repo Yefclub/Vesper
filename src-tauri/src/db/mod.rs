@@ -1,5 +1,5 @@
 use crate::domain::job::{MeetingRecord, MeetingStatus};
-use crate::domain::search::{search_meetings, SearchDocument, SearchHit};
+use crate::domain::search::SearchHit;
 use crate::domain::settings::AppSettings;
 use crate::domain::summary::MeetingInsights;
 use crate::domain::transcript::{LiveTranscript, TranscriptSegment};
@@ -11,6 +11,26 @@ use std::sync::Mutex;
 pub struct Database {
     conn: Mutex<Connection>,
     data_dir: PathBuf,
+}
+
+/// Turns a user's typed query into an FTS5 MATCH expression.
+///
+/// Raw input cannot go in: `AND`, `*`, `"` and `:` are operators there, so a
+/// perfectly ordinary search like `budget: Q3` is a syntax error rather than a
+/// search. Each word becomes a quoted phrase — quotes doubled to escape them —
+/// which FTS5 combines with an implicit AND. Returns `None` when nothing
+/// searchable is left.
+fn fts_match_expression(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|t| t.replace('"', "\"\""))
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| format!("\"{t}\""))
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+    Some(terms.join(" "))
 }
 
 /// Where the API key is safe to leave when settings are written.
@@ -89,9 +109,42 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_segments_meeting ON transcript_segments(meeting_id);
             CREATE INDEX IF NOT EXISTS idx_chat_meeting ON chat_messages(meeting_id);
+            -- Search index. Without it every keystroke pulled every transcript out
+            -- of the database and concatenated it in memory to scan by hand.
+            -- remove_diacritics keeps "reuniao" matching "reunião".
+            CREATE VIRTUAL TABLE IF NOT EXISTS meetings_fts USING fts5(
+                meeting_id UNINDEXED,
+                title,
+                body,
+                tokenize='unicode61 remove_diacritics 2'
+            );
             "#,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        drop(conn);
+        self.backfill_search_index()
+    }
+
+    /// Populates the index for meetings that predate it. Runs once: after the
+    /// first pass the table is non-empty and every later write maintains it.
+    fn backfill_search_index(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let indexed: i64 = conn
+            .query_row("SELECT count(*) FROM meetings_fts", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if indexed > 0 {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO meetings_fts (meeting_id, title, body)
+             SELECT id, title,
+                    transcript_text || char(10) || coalesce(summary,'') || char(10)
+                    || coalesce(action_items,'') || char(10) || coalesce(key_points,'')
+             FROM meetings",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn upsert_meeting(&self, m: &MeetingRecord) -> Result<(), String> {
@@ -122,6 +175,7 @@ impl Database {
             ],
         )
         .map_err(|e| e.to_string())?;
+        Self::index_meeting(&conn, m)?;
         Ok(())
     }
 
@@ -142,12 +196,16 @@ impl Database {
         }
     }
 
+    /// The sidebar list. `transcript_text` comes back empty on purpose: it is the
+    /// largest column by far, nothing in the UI reads it from this payload, and
+    /// shipping every transcript across the IPC boundary to render a list of
+    /// titles was the single most expensive thing the app did on startup.
     pub fn list_meetings(&self) -> Result<Vec<MeetingRecord>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
-                        transcript_text, summary, action_items, key_points, project
+                        '' AS transcript_text, summary, action_items, key_points, project
                  FROM meetings ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -165,13 +223,32 @@ impl Database {
     }
 
     pub fn delete_meeting(&self, id: &str) -> Result<(), String> {
+        // The recording itself, first. Deleting the rows and leaving the audio on
+        // disk means someone who deleted a private meeting still has it — the one
+        // promise this app cannot break. Read the path before the row goes.
+        let audio = self.get_meeting(id)?.and_then(|m| m.audio_path);
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM meetings_fts WHERE meeting_id=?1", params![id])
+            .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM transcript_segments WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM chat_messages WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM meetings WHERE id=?1", params![id])
             .map_err(|e| e.to_string())?;
+        drop(conn);
+        if let Some(path) = audio {
+            let path = Path::new(&path);
+            // Only ever inside our own recordings directory, so a stored path that
+            // points elsewhere is left alone rather than acted on.
+            if path.starts_with(crate::paths::recordings_dir()) && path.is_file() {
+                if let Err(e) = std::fs::remove_file(path) {
+                    return Err(format!(
+                        "meeting deleted but its recording could not be removed: {e}"
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -284,22 +361,62 @@ impl Database {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
-        let meetings = self.list_meetings()?;
-        let docs: Vec<SearchDocument> = meetings
-            .into_iter()
-            .map(|m| SearchDocument {
-                meeting_id: m.id,
-                title: m.title,
-                body: format!(
+        let Some(match_expr) = fts_match_expression(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT meeting_id, title,
+                        snippet(meetings_fts, 2, '', '', '…', 12),
+                        bm25(meetings_fts)
+                 FROM meetings_fts
+                 WHERE meetings_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![match_expr, limit as i64], |row| {
+                Ok(SearchHit {
+                    meeting_id: row.get(0)?,
+                    title: row.get(1)?,
+                    snippet: row.get::<_, String>(2)?.trim().to_string(),
+                    // bm25 is negative and better the lower it is; the UI wants
+                    // "higher is more relevant".
+                    score: -row.get::<_, f64>(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    fn index_meeting(conn: &Connection, m: &MeetingRecord) -> Result<(), String> {
+        conn.execute(
+            "DELETE FROM meetings_fts WHERE meeting_id=?1",
+            params![m.id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO meetings_fts (meeting_id, title, body) VALUES (?1,?2,?3)",
+            params![
+                m.id,
+                m.title,
+                format!(
                     "{}\n{}\n{}\n{}",
                     m.transcript_text,
-                    m.summary.unwrap_or_default(),
-                    m.action_items.unwrap_or_default(),
-                    m.key_points.unwrap_or_default()
-                ),
-            })
-            .collect();
-        Ok(search_meetings(&docs, query, limit))
+                    m.summary.clone().unwrap_or_default(),
+                    m.action_items.clone().unwrap_or_default(),
+                    m.key_points.clone().unwrap_or_default()
+                )
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Persists settings, dropping the API key when the keychain is holding it.
@@ -558,6 +675,90 @@ mod tests {
         // Idempotent: a second start finds nothing left to migrate.
         assert_eq!(db.legacy_api_key().unwrap(), None);
         db.clear_legacy_api_key().unwrap();
+    }
+
+    #[test]
+    fn search_finds_a_meeting_by_its_transcript() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut m = sample_meeting("m1", "Sprint planning");
+        m.transcript_text = "we agreed to cut the reporting module".into();
+        db.upsert_meeting(&m).unwrap();
+
+        let hits = db.search("reporting", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].meeting_id, "m1");
+        assert!(!hits[0].snippet.is_empty());
+
+        assert!(db.search("nothingmatchesthis", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_treats_fts_operators_as_plain_text() {
+        // These are FTS5 syntax. Passed through raw they raise a query error
+        // instead of searching, which is what a user typing normally would hit.
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut m = sample_meeting("m1", "Budget");
+        m.transcript_text = "the budget for Q3 was approved".into();
+        db.upsert_meeting(&m).unwrap();
+
+        for q in ["budget: Q3", "budget*", "budget AND", "budget \"quoted", "(budget)"] {
+            let hits = db.search(q, 10);
+            assert!(hits.is_ok(), "query {q:?} errored: {:?}", hits.err());
+        }
+        assert_eq!(db.search("budget: Q3", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_index_follows_edits_and_deletes() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut m = sample_meeting("m1", "Retro");
+        m.transcript_text = "original wording".into();
+        db.upsert_meeting(&m).unwrap();
+        assert_eq!(db.search("original", 10).unwrap().len(), 1);
+
+        m.transcript_text = "replaced wording".into();
+        db.upsert_meeting(&m).unwrap();
+        assert!(db.search("original", 10).unwrap().is_empty(), "stale index");
+        assert_eq!(db.search("replaced", 10).unwrap().len(), 1);
+
+        db.delete_meeting("m1").unwrap();
+        assert!(db.search("replaced", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_list_payload_leaves_out_transcripts() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut m = sample_meeting("m1", "Long one");
+        m.transcript_text = "a very long transcript".into();
+        db.upsert_meeting(&m).unwrap();
+
+        assert_eq!(db.list_meetings().unwrap()[0].transcript_text, "");
+        // Still there when the meeting is actually opened.
+        assert_eq!(
+            db.get_meeting("m1").unwrap().unwrap().transcript_text,
+            "a very long transcript"
+        );
+    }
+
+    fn sample_meeting(id: &str, title: &str) -> MeetingRecord {
+        MeetingRecord {
+            id: id.into(),
+            title: title.into(),
+            status: MeetingStatus::Ready,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            duration_ms: 1000,
+            audio_path: None,
+            transcript_text: String::new(),
+            summary: None,
+            action_items: None,
+            key_points: None,
+            project: None,
+        }
     }
 
     #[test]
