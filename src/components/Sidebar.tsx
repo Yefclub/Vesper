@@ -1,8 +1,7 @@
-import { motion } from "framer-motion";
-import { FileUp, Search, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { FileUp, Search, SquarePen, Trash2 } from "lucide-react";
 import { MeetingRecord, SearchHit, formatDuration } from "../lib/api";
 import { useI18n } from "../lib/i18n";
-import { transition } from "../lib/motion";
 import { Button, FOCUS } from "./Button";
 
 interface Props {
@@ -10,10 +9,18 @@ interface Props {
   selectedId: string | null;
   query: string;
   hits: SearchHit[];
+  /** True until the first `listMeetings()` resolves. `meetings.length === 0` is
+   *  also true then, so without this every cold start flashed "nothing
+   *  recorded yet, import one" at a user who has forty meetings. */
+  loading: boolean;
+  /** True from the keystroke until the debounced search answers. `hits` stays
+   *  empty through those 200ms, so "no matches" used to flash on every query. */
+  searching: boolean;
   onSearch: (q: string) => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onImport: () => void;
+  onNew: () => void;
 }
 
 /** Local midnight for a timestamp, so comparisons are by calendar day. */
@@ -50,13 +57,54 @@ export function Sidebar({
   selectedId,
   query,
   hits,
+  loading,
+  searching,
   onSearch,
   onSelect,
   onDelete,
   onImport,
+  onNew,
 }: Props) {
   const { t } = useI18n();
   const showingHits = query.trim().length > 0;
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Nothing at all for the first 300ms. A list that resolves in 80ms would
+  // otherwise flash five grey bars, and a placeholder that appears and leaves
+  // inside a blink reads slower than showing nothing at all.
+  const [showSkeleton, setShowSkeleton] = useState(false);
+  useEffect(() => {
+    if (!loading) {
+      setShowSkeleton(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShowSkeleton(true), 300);
+    return () => window.clearTimeout(timer);
+  }, [loading]);
+
+  /** Roving tabindex: the whole list is one tab stop, not one per row. With
+   *  nothing selected the first row takes it, or Tab would skip the list. */
+  const focusableId =
+    meetings.find((m) => m.id === selectedId)?.id ?? meetings[0]?.id ?? null;
+
+  function handleListKeys(e: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    const rows = Array.from(
+      listRef.current?.querySelectorAll<HTMLButtonElement>("[data-row]") ?? [],
+    );
+    if (rows.length === 0) return;
+    e.preventDefault();
+    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const next =
+      e.key === "Home"
+        ? 0
+        : e.key === "End"
+          ? rows.length - 1
+          : e.key === "ArrowDown"
+            ? Math.min(rows.length - 1, at + 1)
+            : Math.max(0, at - 1);
+    rows[next]?.focus();
+  }
 
   return (
     <aside
@@ -73,15 +121,28 @@ export function Sidebar({
               </span>
             )}
           </h2>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onImport}
-            title={t("nav.import")}
-            aria-label={t("nav.import")}
-          >
-            <FileUp size={16} />
-          </Button>
+          {/* SquarePen, not Plus: the action clears the workspace back to the
+              empty screen, it does not append a row to this list. */}
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onNew}
+              title={t("nav.new")}
+              aria-label={t("nav.new")}
+            >
+              <SquarePen size={16} />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onImport}
+              title={t("nav.import")}
+              aria-label={t("nav.import")}
+            >
+              <FileUp size={16} />
+            </Button>
+          </div>
         </div>
 
         <div className="relative">
@@ -103,12 +164,20 @@ export function Sidebar({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      <div
+        ref={listRef}
+        onKeyDown={handleListKeys}
+        className="min-h-0 flex-1 overflow-y-auto px-2 pb-3"
+      >
         {showingHits ? (
           hits.length === 0 ? (
-            <p className="px-3 py-6 text-center text-xs text-fg-muted">
-              {t("sidebar.no_matches")}
-            </p>
+            // Held back until the debounce answers, or every query would flash
+            // "no matches" on its first keystroke.
+            searching ? null : (
+              <p className="px-3 py-6 text-center text-xs text-fg-muted">
+                {t("sidebar.no_matches")}
+              </p>
+            )
           ) : (
             hits.map((h) => (
               <button
@@ -120,6 +189,18 @@ export function Sidebar({
                 <div className="truncate text-xs text-fg-muted">{h.snippet}</div>
               </button>
             ))
+          )
+        ) : loading ? (
+          // At the real row height and the real inset, so the list does not
+          // jump when it lands.
+          showSkeleton && (
+            <div aria-hidden className="pt-3">
+              {[0, 1, 2, 3, 4].map((i) => (
+                <div key={i} className="flex h-9 items-center px-3">
+                  <div className="h-3 w-full rounded-xs bg-surface-2" />
+                </div>
+              ))}
+            </div>
           )
         ) : meetings.length === 0 ? (
           <div className="px-3 py-8 text-center">
@@ -143,49 +224,55 @@ export function Sidebar({
                 const active = selectedId === m.id;
                 return (
                   <div key={m.id} className="group relative">
-                    {/* One shared layoutId, so the selection travels between rows
-                        instead of blinking out here and in there. */}
-                    {active && (
-                      <motion.div
-                        layoutId="sidebar-active"
-                        transition={transition.fast}
-                        className="absolute inset-0 rounded-sm bg-surface-3"
-                      />
-                    )}
-                    <div className="relative flex items-start">
-                      <button
-                        onClick={() => onSelect(m.id)}
-                        aria-current={active ? "true" : undefined}
-                        className={`min-w-0 flex-1 rounded-sm px-3 py-2 text-left transition-colors ${
-                          active ? "" : "hover:bg-surface-2/60"
-                        } ${FOCUS}`}
-                      >
-                        <div className="truncate text-sm font-medium">{m.title}</div>
-                        <div className="mt-0.5 flex items-center gap-2 text-2xs text-fg-muted">
-                          <span className="capitalize">{m.status}</span>
-                          {m.duration_ms > 0 && (
-                            <>
-                              <span aria-hidden className="text-fg-faint">
-                                ·
-                              </span>
-                              <span className="tabular-nums">
-                                {formatDuration(m.duration_ms)}
-                              </span>
-                            </>
-                          )}
-                        </div>
-                      </button>
-                      {/* Revealed on hover, but always reachable by keyboard —
-                          opacity-0 alone would hide it from tab users too. */}
-                      <button
-                        onClick={() => onDelete(m.id)}
-                        title={t("nav.delete")}
-                        aria-label={t("nav.delete")}
-                        className={`mr-2 mt-2 rounded-md p-1.5 text-fg-muted opacity-0 transition-colors hover:text-danger focus-visible:opacity-100 group-hover:opacity-100 ${FOCUS}`}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
+                    {/* Selection is painted on the row itself. It used to be a
+                        shared `layoutId` that slid between rows, which is the
+                        one thing that must not animate here: picking a meeting
+                        is the primary interaction, and with ↑↓ navigation the
+                        highlight would chase the arrow key. */}
+                    <button
+                      data-row
+                      tabIndex={m.id === focusableId ? 0 : -1}
+                      onClick={() => onSelect(m.id)}
+                      aria-current={active ? "true" : undefined}
+                      className={`flex h-9 w-full items-center gap-2 rounded-sm px-3 text-left transition-colors ${
+                        active
+                          ? "bg-surface-2 text-fg"
+                          : "text-fg-muted hover:bg-surface-1"
+                      } ${FOCUS}`}
+                    >
+                      {/* Only when it is not `ready`: the normal case used to
+                          print "Ready" on all forty rows, which is a word that
+                          means nothing repeated forty times. */}
+                      {m.status !== "ready" && (
+                        <span
+                          role="img"
+                          title={m.status}
+                          aria-label={m.status}
+                          className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                            m.status === "failed" ? "bg-danger" : "bg-warn"
+                          }`}
+                        />
+                      )}
+                      <span className="min-w-0 flex-1 truncate text-sm">{m.title}</span>
+                      {m.duration_ms > 0 && (
+                        <span className="shrink-0 tabular-nums text-2xs text-fg-subtle">
+                          {formatDuration(m.duration_ms)}
+                        </span>
+                      )}
+                    </button>
+                    {/* Out of the flow, so the title keeps the ~30px where the
+                        distinguishing part of a meeting name lives. Revealed on
+                        hover, but always reachable by keyboard — opacity-0 alone
+                        would hide it from tab users too, and `transition-colors`
+                        does not carry opacity, so the reveal used to snap. */}
+                    <button
+                      onClick={() => onDelete(m.id)}
+                      title={t("nav.delete")}
+                      aria-label={t("nav.delete")}
+                      className={`absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-fg-muted opacity-0 transition-[opacity,color] hover:text-danger focus-visible:opacity-100 group-hover:opacity-100 ${FOCUS}`}
+                    >
+                      <Trash2 size={16} />
+                    </button>
                   </div>
                 );
               })}

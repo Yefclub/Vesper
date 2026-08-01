@@ -95,6 +95,11 @@ function AppShell({
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
+  // Both exist so the sidebar can tell "nothing yet" from "nothing at all":
+  // `meetings` is empty before the first list resolves and `hits` is empty
+  // through the search debounce, and neither means the same as an empty result.
+  const [meetingsLoaded, setMeetingsLoaded] = useState(false);
+  const [searching, setSearching] = useState(false);
   const [tab, setTab] = useState<Tab>("transcript");
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [question, setQuestion] = useState("");
@@ -136,6 +141,8 @@ function AppShell({
       setMeetings(await api.listMeetings());
     } catch (e) {
       setError(String(e));
+    } finally {
+      setMeetingsLoaded(true);
     }
   }, []);
 
@@ -244,6 +251,8 @@ function AppShell({
         if (current) setHits(found);
       } catch (e) {
         if (current) setError(String(e));
+      } finally {
+        if (current) setSearching(false);
       }
     }, 200);
     return () => {
@@ -331,6 +340,10 @@ function AppShell({
 
   function handleSearch(q: string) {
     setQuery(q);
+    // Raised here rather than in the debounce effect so it lands in the same
+    // render as the new query. An effect runs after paint, which is one frame
+    // of "no matches" — the exact flash the flag exists to prevent.
+    setSearching(q.trim().length > 0);
   }
 
   async function handleChat() {
@@ -395,17 +408,35 @@ function AppShell({
     }
   }
 
+  /// Everything the workspace column is showing, and nothing else. The meeting
+  /// list, the search, the recorder, the gate, the settings and the model list
+  /// all survive: clearing the workspace is not resetting the app.
+  function clearWorkspace() {
+    setSelectedId(null);
+    setTranscript({ segments: [] });
+    setChat([]);
+  }
+
+  /// Back to the empty screen, on demand — there was no way to get there
+  /// without deleting the meeting you were reading.
+  ///
+  /// No confirmation, in either state. Not recording, nothing is lost.
+  /// Recording, the capture keeps running and the header transport keeps
+  /// showing it, so there is nothing to warn about either.
+  function startNewMeeting() {
+    clearWorkspace();
+    setQuestion("");
+    setTab("transcript");
+    setError(null);
+  }
+
   async function handleDelete(id: string) {
     // Dismiss first. Leaving the dialog up after the meeting is gone offers a
     // Delete button for something that no longer exists.
     setPendingDelete(null);
     try {
       await api.deleteMeeting(id);
-      if (selectedId === id) {
-        setSelectedId(null);
-        setTranscript({ segments: [] });
-        setChat([]);
-      }
+      if (selectedId === id) clearWorkspace();
       await refreshMeetings();
     } catch (e) {
       setError(String(e));
@@ -434,10 +465,13 @@ function AppShell({
         selectedId={selectedId}
         query={query}
         hits={hits}
+        loading={!meetingsLoaded}
+        searching={searching}
         onSearch={handleSearch}
         onSelect={loadMeeting}
         onDelete={(id) => setPendingDelete(meetings.find((m) => m.id === id) ?? null)}
         onImport={handleImport}
+        onNew={startNewMeeting}
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
