@@ -34,7 +34,7 @@ Falhou qualquer um deles: **parar e reportar a saída**. Não contornar, não de
 
 - **Branch de integração**: `dev` — toda branch de trabalho sai daí, atualizada (`git fetch origin` antes, nunca de branch local stale).
 - **Branch de produção**: `main` — recebe tag de versão e artefato de updater.
-- **Nome de branch**: `<feat|fix|chore|docs|ci|refactor>/<descrição-curta>`
+- **Nome de branch**: `tipo/descricao-curta`, com `tipo` em `feat`, `fix`, `chore`, `docs`, `ci` ou `refactor`
 - **Commit**: conventional commits, em **inglês**.
 - **Título e corpo de PR**: **inglês**. Corpo com contexto, o que foi feito e como verificar.
 - **Nunca commitar direto** em `dev` ou `main`.
@@ -99,4 +99,4 @@ O produto promete privacidade. Regressão aqui é quebra de promessa, não bug d
 
 ## Skills
 
-`.claude/skills/<nome>/SKILL.md`, cada uma com frontmatter `name` + `description`. A `description` é o único texto sempre em contexto e é ela que decide a invocação — se estiver boa, este arquivo **não** precisa de uma tabela "pediu X → use skill Y".
+Cada skill em `.claude/skills/NOME/SKILL.md`, com frontmatter `name` + `description`. A `description` é o único texto sempre em contexto e é ela que decide a invocação — se estiver boa, este arquivo **não** precisa de uma tabela "pediu X → use skill Y".
