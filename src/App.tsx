@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -100,6 +107,8 @@ function AppShell({
   const [confirmingRecord, setConfirmingRecord] = useState(false);
   const [skipRecordReminder, setSkipRecordReminder] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<MeetingRecord | null>(null);
+  const confirmBeforeRecordingRef = useRef(settings.confirm_before_recording);
+  confirmBeforeRecordingRef.current = settings.confirm_before_recording;
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -253,8 +262,12 @@ function AppShell({
 
   /// The dock and the hotkey both go through here, so the reminder cannot be
   /// skipped by starting a recording from the keyboard.
+  ///
+  /// Reads the preference from a ref rather than the closed-over value: the
+  /// hotkey listener is registered once on mount, so it would otherwise keep the
+  /// setting as it was at startup and go on asking after the user opted out.
   function requestStart() {
-    if (settings.confirm_before_recording) {
+    if (confirmBeforeRecordingRef.current) {
       setConfirmingRecord(true);
       return;
     }
@@ -378,6 +391,9 @@ function AppShell({
   }
 
   async function handleDelete(id: string) {
+    // Dismiss first. Leaving the dialog up after the meeting is gone offers a
+    // Delete button for something that no longer exists.
+    setPendingDelete(null);
     try {
       await api.deleteMeeting(id);
       if (selectedId === id) {
@@ -717,7 +733,12 @@ function AppShell({
                 {t("confirm.record_dont_ask")}
               </label>
             }
-            onCancel={() => setConfirmingRecord(false)}
+            onCancel={() => {
+              setConfirmingRecord(false);
+              // A ticked box that survives a cancel would silently opt the user
+              // out the next time they press Start.
+              setSkipRecordReminder(false);
+            }}
             onConfirm={async () => {
               setConfirmingRecord(false);
               if (skipRecordReminder) {
@@ -730,9 +751,15 @@ function AppShell({
                   setSettings(saved);
                   onSettingsChange(saved);
                 } catch (e) {
+                  // Do not record. `handleStart` clears the error banner, so
+                  // carrying on would swallow the failure and leave the user
+                  // believing a preference was saved that was not.
                   setError(String(e));
+                  setSkipRecordReminder(false);
+                  return;
                 }
               }
+              setSkipRecordReminder(false);
               await handleStart();
             }}
           />
