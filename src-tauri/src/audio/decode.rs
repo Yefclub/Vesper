@@ -28,8 +28,20 @@ pub fn decode_audio_file(path: &Path) -> Result<(Vec<i16>, u32), CaptureError> {
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    // Fast path for plain PCM WAV
+    // Fast path for plain PCM WAV.
+    //
+    // It reads every interleaved sample before mixing down, so it has to be
+    // bounded too. WAV is uncompressed, which makes the file size a faithful
+    // stand-in for the sample count: at worst 16-bit stereo, four bytes per mono
+    // sample that survives the mixdown.
     if ext == "wav" {
+        let bytes = std::fs::metadata(path).map_err(CaptureError::Io)?.len();
+        if bytes > (MAX_DECODED_SAMPLES as u64).saturating_mul(4) {
+            return Err(CaptureError::Device(format!(
+                "audio is longer than {} hours; split it into shorter recordings",
+                MAX_DECODED_SAMPLES / (60 * 60 * 48_000)
+            )));
+        }
         return crate::audio::capture::read_wav_mono(path);
     }
 
