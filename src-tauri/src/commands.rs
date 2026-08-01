@@ -39,6 +39,10 @@ pub struct AppState {
     /// Whether the API key is known to be in the OS keychain. False means a
     /// legacy row still holds it and the migration has yet to succeed.
     pub key_in_keychain: AtomicBool,
+    /// Held for the duration of a transcription pass. `try_lock` gives the live
+    /// poll its single-flight behaviour; `lock().await` lets stop wait for a pass
+    /// that is already running instead of racing it to the transcript.
+    pub stt_flight: tokio::sync::Mutex<()>,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -58,6 +62,7 @@ impl AppState {
             live: Mutex::new(HashMap::new()),
             active_meeting: Mutex::new(None),
             key_in_keychain: AtomicBool::new(in_keychain),
+            stt_flight: tokio::sync::Mutex::new(()),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -463,7 +468,13 @@ pub async fn stop_recording(
     state.db.upsert_meeting(&meeting)?;
     *state.active_meeting.lock() = None;
 
-    // Final dual-channel STT pass on saved stereo WAV (L=Me, R=Others)
+    // Wait for a live poll that is still transcribing before reading the
+    // transcript. Without this, stopping mid-chunk reads a transcript that is
+    // missing the tail, persists it, marks the meeting ready — and the poll then
+    // writes its result into the in-memory map only. Reopening the meeting shows
+    // the transcript with the last chunk gone.
+    let _flight = state.stt_flight.lock().await;
+
     let settings = state.settings.lock().clone();
     let mut live = state
         .live
@@ -471,7 +482,10 @@ pub async fn stop_recording(
         .get(&id)
         .cloned()
         .unwrap_or_default();
+
     if live.segments().is_empty() {
+        // Nothing was transcribed live — cloud STT down, or a recording short
+        // enough that no poll ever ran. Transcribe the whole saved WAV.
         if let Ok((mic, sys, sr)) = read_dual_wav(&path) {
             if let Ok(chunks) = state
                 .stt
@@ -479,10 +493,29 @@ pub async fn stop_recording(
                 .await
             {
                 apply_stt_chunks(&mut live, &chunks);
-                state.live.lock().insert(id.clone(), live.clone());
+            }
+        }
+    } else {
+        // Live transcription only ever consumed what the last poll drained, so
+        // everything spoken between that drain and the stop is still sitting in
+        // the buffer. Skipping it — which is what happened whenever any live
+        // segment existed — silently dropped the end of every meeting.
+        let (mic, sys, sr) = state.recorder.drain_chunks();
+        if !mic.is_empty() || !sys.is_empty() {
+            let tail_ms = duration.saturating_sub(
+                (mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64,
+            );
+            match state
+                .stt
+                .transcribe_dual(&settings, &mic, &sys, sr, tail_ms)
+                .await
+            {
+                Ok(chunks) => apply_stt_chunks(&mut live, &chunks),
+                Err(e) => tracing::warn!("final chunk could not be transcribed: {e}"),
             }
         }
     }
+    state.live.lock().insert(id.clone(), live.clone());
     state.db.save_transcript(&id, &live)?;
     meeting.transcript_text = live.plain_text();
     meeting.status = meeting
@@ -523,6 +556,15 @@ pub async fn poll_live_stt(
     if !state.recorder.is_recording() || state.recorder.is_paused() {
         return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
     }
+    // Single-flight. The UI polls every 1200ms and a chunk can take longer than
+    // that to transcribe, so without this the next poll drains a second slice of
+    // audio while the first is still running. Both then timestamp their slice from
+    // whatever `elapsed_ms` reads at drain time, and the transcript comes out in
+    // the wrong order. Overlapping polls now just return what is already there;
+    // the audio stays in the buffer for the next turn.
+    let Ok(_flight) = state.stt_flight.try_lock() else {
+        return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
+    };
     let (mic, sys, sr) = state.recorder.drain_chunks();
     if mic.is_empty() && sys.is_empty() {
         return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
@@ -619,7 +661,9 @@ pub async fn import_audio(
     title: Option<String>,
 ) -> Result<MeetingRecord, String> {
     let path = PathBuf::from(path);
-    // Multi-format: wav/mp3/m4a/ogg/flac/webm via decode layer
+    // Multi-format: wav/mp3/m4a/ogg/flac/webm via decode layer.
+    // The length ceiling lives in the decoder, where it can stop before the
+    // allocation happens — see MAX_DECODED_SAMPLES.
     let (pcm, sr) = decode_audio_file(&path).map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();

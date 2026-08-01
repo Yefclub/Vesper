@@ -13,6 +13,14 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 /// Decode any supported audio file to mono i16 + sample rate.
+/// Ceiling on decoded mono samples, roughly twelve hours at 48 kHz — about 4 GB
+/// once the file is expanded into `Vec<i16>`.
+///
+/// The bound has to be on decoded frames, not on the file: a compressed hour is
+/// a few tens of MB on disk and hundreds of MB in memory, so a size check on the
+/// input passes files that still exhaust the process while decoding.
+pub const MAX_DECODED_SAMPLES: usize = 12 * 60 * 60 * 48_000;
+
 pub fn decode_audio_file(path: &Path) -> Result<(Vec<i16>, u32), CaptureError> {
     let ext = path
         .extension()
@@ -20,7 +28,8 @@ pub fn decode_audio_file(path: &Path) -> Result<(Vec<i16>, u32), CaptureError> {
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    // Fast path for plain PCM WAV
+    // Fast path for plain PCM WAV. It enforces the same ceiling from the header,
+    // where the declared sample count is known exactly.
     if ext == "wav" {
         return crate::audio::capture::read_wav_mono(path);
     }
@@ -106,6 +115,14 @@ fn decode_with_symphonia(path: &Path) -> Result<(Vec<i16>, u32), CaptureError> {
                     let avg = sum / channels as f32;
                     mono.push((avg.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
                 }
+            }
+            // Checked per packet, while the allocation is still bounded. Deciding
+            // afterwards would mean the memory was already taken.
+            if mono.len() > MAX_DECODED_SAMPLES {
+                return Err(CaptureError::Device(format!(
+                    "audio is longer than {} hours; split it into shorter recordings",
+                    MAX_DECODED_SAMPLES / (60 * 60 * 48_000)
+                )));
             }
         }
     }

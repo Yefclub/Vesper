@@ -65,11 +65,15 @@ fn is_stt_model(m: &Value, id: &str) -> bool {
     {
         return true;
     }
-    // output_modalities: ["transcription"] from filtered API
+    // output_modalities: ["transcription"] from filtered API.
+    //
+    // Only "transcription" counts. A model whose *output* is audio is a
+    // text-to-speech model, and accepting it here put voices in the list of
+    // things offered to transcribe a meeting.
     if let Some(arr) = m.get("output_modalities").and_then(|x| x.as_array()) {
         if arr.iter().any(|v| {
             v.as_str()
-                .map(|s| s.eq_ignore_ascii_case("transcription") || s.eq_ignore_ascii_case("audio"))
+                .map(|s| s.eq_ignore_ascii_case("transcription"))
                 .unwrap_or(false)
         }) {
             return true;
@@ -344,5 +348,24 @@ mod tests {
         // also accept snake_case alias
         let s2: SttProvider = serde_json::from_str("\"open_router\"").unwrap();
         assert_eq!(s2, SttProvider::OpenRouter);
+    }
+}
+
+#[cfg(test)]
+mod audio_modality_tests {
+    use super::*;
+
+    #[test]
+    fn a_model_that_outputs_audio_is_not_a_transcriber() {
+        // Text-to-speech: it emits audio, it does not read it. Offering one as an
+        // STT choice means the user picks a voice to transcribe their meeting.
+        let body = r#"{"data":[
+            {"id":"vendor/some-tts","name":"Some TTS","output_modalities":["audio"]},
+            {"id":"vendor/real-stt","name":"Real STT","output_modalities":["transcription"]}
+        ]}"#;
+        let models = parse_openrouter_stt_models(body).unwrap();
+        let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"vendor/real-stt"), "{ids:?}");
+        assert!(!ids.contains(&"vendor/some-tts"), "{ids:?}");
     }
 }

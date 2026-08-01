@@ -32,6 +32,15 @@ pub fn run() {
     };
 
     tauri::Builder::default()
+        // A second copy would open the same SQLite file and fight over the audio
+        // device. Focus the window that is already running instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -45,15 +54,26 @@ pub fn run() {
             {
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
                 // global-hotkey syntax: modifiers first, then Code (e.g. KeyR)
-                let shortcut: Shortcut = "Ctrl+Shift+KeyR"
-                    .parse()
-                    .map_err(|e| format!("invalid shortcut: {e}"))?;
-                let handle = app.handle().clone();
-                app.global_shortcut().on_shortcut(shortcut, move |_app, _sc, event| {
-                    if event.state == ShortcutState::Pressed {
-                        let _ = handle.emit("hotkey://toggle-record", ());
+                // Registration fails when another application already owns the
+                // combination. That is a missing convenience, not a reason to
+                // refuse to start — propagating it here left the app unable to
+                // open at all because something else had grabbed Ctrl+Shift+R.
+                match "Ctrl+Shift+KeyR".parse::<Shortcut>() {
+                    Ok(shortcut) => {
+                        let handle = app.handle().clone();
+                        if let Err(e) =
+                            app.global_shortcut()
+                                .on_shortcut(shortcut, move |_app, _sc, event| {
+                                    if event.state == ShortcutState::Pressed {
+                                        let _ = handle.emit("hotkey://toggle-record", ());
+                                    }
+                                })
+                        {
+                            tracing::warn!("global shortcut unavailable: {e}");
+                        }
                     }
-                })?;
+                    Err(e) => tracing::warn!("invalid global shortcut: {e}"),
+                }
             }
 
             let show_i = MenuItem::with_id(app, "show", "Show Vesper", true, None::<&str>)?;
