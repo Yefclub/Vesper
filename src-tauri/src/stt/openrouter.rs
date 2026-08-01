@@ -3,21 +3,38 @@
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OpenRouterStt {
     base_url: String,
+    client: reqwest::Client,
 }
+
+impl Default for OpenRouterStt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Long enough for a slow transcription of a whole meeting, short enough that a
+/// silently dropped connection does not hang the recorder forever. Without any
+/// timeout at all a stalled request keeps the caller waiting until the process
+/// dies.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 impl OpenRouterStt {
     pub fn new() -> Self {
-        Self {
-            base_url: "https://openrouter.ai/api/v1".into(),
-        }
+        Self::with_base_url("https://openrouter.ai/api/v1")
     }
 
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            // Built once and cloned: a fresh Client per request throws away the
+            // connection pool, so every chunk paid for a new TLS handshake.
+            client: reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .unwrap_or_default(),
         }
     }
 
@@ -33,7 +50,6 @@ impl OpenRouterStt {
             return Err("OpenRouter API key required".into());
         }
         let wav = pcm_to_wav_bytes(pcm, sample_rate)?;
-        let client = reqwest::Client::new();
         let part = reqwest::multipart::Part::bytes(wav)
             .file_name("audio.wav")
             .mime_str("audio/wav")
@@ -45,7 +61,8 @@ impl OpenRouterStt {
             form = form.text("language", language.to_string());
         }
 
-        let res = client
+        let res = self
+            .client
             .post(format!("{}/audio/transcriptions", self.base_url))
             .header("Authorization", format!("Bearer {api_key}"))
             .header("HTTP-Referer", "https://github.com/Yefclub/Vesper")

@@ -54,6 +54,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 flate2 = "1"
 tar = "0.4"
 keyring = { version = "4.1.6", features = ["apple-native-keyring-store"] }
+tauri-plugin-single-instance = "2.4.3"
 
 [dev-dependencies]
 tempfile = "3"

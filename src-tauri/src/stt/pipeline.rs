@@ -64,9 +64,21 @@ impl SttService {
         }
         let duration_ms = (pcm.len() as u64 * 1000) / sample_rate.max(1) as u64;
         let text = match settings.stt_provider {
-            SttProvider::Local => self
-                .local
-                .transcribe(pcm, sample_rate, &settings.local_stt_model, &settings.language)?,
+            // whisper.cpp inference is CPU-bound and runs for seconds. Called
+            // directly it parks a tokio worker for that whole time, and since the
+            // UI polls every 1200ms the parked workers pile up until the runtime
+            // has none left — which is what made live transcription unreliable.
+            SttProvider::Local => {
+                let engine = self.local.clone();
+                let pcm = pcm.to_vec();
+                let model = settings.local_stt_model.clone();
+                let language = settings.language.clone();
+                tokio::task::spawn_blocking(move || {
+                    engine.transcribe(&pcm, sample_rate, &model, &language)
+                })
+                .await
+                .map_err(|e| format!("transcription task failed: {e}"))??
+            }
             SttProvider::OpenRouter => {
                 settings.require_openrouter_key().map_err(|e| e.to_string())?;
                 self.remote
@@ -98,12 +110,15 @@ impl SttService {
     ) -> Result<Vec<SttChunkResult>, String> {
         let (mic, system) = split_dual_for_stt(mic, system);
         let mut out = Vec::new();
-        let me = self
-            .transcribe_channel(settings, Speaker::Me, &mic, sample_rate, start_ms)
-            .await?;
-        let others = self
-            .transcribe_channel(settings, Speaker::Others, &system, sample_rate, start_ms)
-            .await?;
+        // The two channels are independent, so waiting for one before starting the
+        // other doubled the latency of every chunk for no reason. Local inference
+        // still serialises on the whisper context, but it does so on blocking
+        // threads instead of holding the caller.
+        let (me, others) = tokio::join!(
+            self.transcribe_channel(settings, Speaker::Me, &mic, sample_rate, start_ms),
+            self.transcribe_channel(settings, Speaker::Others, &system, sample_rate, start_ms),
+        );
+        let (me, others) = (me?, others?);
         if !me.text.is_empty() {
             out.push(me);
         }

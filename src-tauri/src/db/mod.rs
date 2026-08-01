@@ -152,11 +152,14 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([], |row| Ok(row_to_meeting(row).unwrap()))
+            // row_to_meeting returns our own error type, so it cannot be raised
+            // from inside the closure; collecting Results keeps a malformed row from
+            // panicking the command.
+            .query_map([], |row| Ok(row_to_meeting(row)))
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(|e| e.to_string())?);
+            out.push(r.map_err(|e| e.to_string())??);
         }
         Ok(out)
     }
