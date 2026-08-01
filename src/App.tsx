@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { check } from "@tauri-apps/plugin-updater";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import {
@@ -101,6 +101,7 @@ function AppShell({
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [updateNote, setUpdateNote] = useState<string | null>(null);
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [gate, setGate] = useState<StartGate>({ allowed: false });
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
@@ -159,13 +160,11 @@ function AppShell({
         setError(String(e));
       }
       try {
+        // Only ever offered, never applied on its own: installing and relaunching
+        // without asking can throw away a recording in progress, and silently
+        // swapping the binary of a privacy tool is not ours to decide.
         const update = await check();
-        if (update) {
-          setUpdateNote(`Update ${update.version} available — downloading…`);
-          await update.downloadAndInstall();
-          setUpdateNote("Update installed. Relaunching…");
-          await relaunch();
-        }
+        if (update) setPendingUpdate(update);
       } catch {
         /* no release endpoint yet */
       }
@@ -460,6 +459,39 @@ function AppShell({
             {error}
             <button className="ml-3 underline" onClick={() => setError(null)}>
               dismiss
+            </button>
+          </div>
+        )}
+        {pendingUpdate && (
+          <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
+            <span>{t("update.available").replace("{version}", pendingUpdate.version)}</span>
+            <button
+              data-testid="update-install"
+              onClick={async () => {
+                const update = pendingUpdate;
+                setPendingUpdate(null);
+                try {
+                  setUpdateNote(t("update.installing"));
+                  await update.downloadAndInstall();
+                  setUpdateNote(t("update.relaunching"));
+                  await relaunch();
+                } catch (e) {
+                  setUpdateNote(null);
+                  setError(String(e));
+                  // The check only runs once, on mount. Without putting the offer
+                  // back, a failed download means no retry until the app restarts.
+                  setPendingUpdate(update);
+                }
+              }}
+              className="rounded-lg bg-accent px-3 py-1 text-xs font-medium text-black hover:brightness-110"
+            >
+              {t("update.install")}
+            </button>
+            <button
+              onClick={() => setPendingUpdate(null)}
+              className="text-xs underline"
+            >
+              {t("update.later")}
             </button>
           </div>
         )}

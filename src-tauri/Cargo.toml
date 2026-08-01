@@ -53,6 +53,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 flate2 = "1"
 tar = "0.4"
+keyring = { version = "4.1.6", features = ["apple-native-keyring-store"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,7 +1,7 @@
 use crate::audio::capture::{read_dual_wav, DualChannelRecorder};
 use crate::audio::decode::decode_audio_file;
 use crate::audio::devices::{list_audio_devices, AudioDevice};
-use crate::db::Database;
+use crate::db::{Database, KeyHome};
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::chat::ChatMessage;
 use crate::domain::export::{export_meeting, ExportFormat};
@@ -25,6 +25,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
@@ -35,6 +36,9 @@ pub struct AppState {
     pub settings: Mutex<AppSettings>,
     pub live: Mutex<HashMap<String, LiveTranscript>>,
     pub active_meeting: Mutex<Option<String>>,
+    /// Whether the API key is known to be in the OS keychain. False means a
+    /// legacy row still holds it and the migration has yet to succeed.
+    pub key_in_keychain: AtomicBool,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -44,16 +48,52 @@ impl AppState {
         ensure_app_dirs()?;
         let data = crate::paths::app_data_dir();
         let db = Database::open(&data)?;
-        let settings = db.load_settings().unwrap_or_default();
+        let mut settings = db.load_settings().unwrap_or_default();
+        let (key, in_keychain) = load_or_migrate_api_key(&db);
+        settings.openrouter_api_key = key;
         Ok(Self {
             db,
             recorder: DualChannelRecorder::new(),
             settings: Mutex::new(settings),
             live: Mutex::new(HashMap::new()),
             active_meeting: Mutex::new(None),
+            key_in_keychain: AtomicBool::new(in_keychain),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
+    }
+}
+
+/// Resolves the API key at startup, moving it out of the database on the first
+/// run of a build that stores it in the keychain.
+///
+/// Returns the key and whether the keychain is the one holding it. The database
+/// row is only cleared once the keychain has taken the value; if the keychain is
+/// unavailable the key stays where it is and the app keeps working. Losing the
+/// user's credential to be tidy would be the worse outcome.
+fn load_or_migrate_api_key(db: &Database) -> (Option<String>, bool) {
+    match db.legacy_api_key() {
+        Ok(Some(legacy)) => match crate::secrets::store_openrouter_key(&legacy) {
+            Ok(()) => {
+                if let Err(e) = db.clear_legacy_api_key() {
+                    tracing::warn!("key moved to the keychain but the old copy remains: {e}");
+                }
+                (Some(legacy), true)
+            }
+            Err(e) => {
+                tracing::warn!("keychain unavailable, key stays in the database: {e}");
+                (Some(legacy), false)
+            }
+        },
+        Ok(None) => (crate::secrets::openrouter_key(), true),
+        // We could not find out whether a legacy key is sitting in the row, so we
+        // cannot claim the keychain is holding it. Saying "not migrated" costs one
+        // redundant keychain write later; saying the opposite would let the next
+        // save strip a row we never managed to read.
+        Err(e) => {
+            tracing::warn!("could not read stored settings: {e}");
+            (crate::secrets::openrouter_key(), false)
+        }
     }
 }
 
@@ -71,24 +111,79 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> AppSettings {
     state.settings.lock().public_view()
 }
 
-#[tauri::command]
-pub fn save_settings(
-    state: State<'_, Arc<AppState>>,
+/// Blank and absent mean the same thing for a credential; comparing the raw
+/// `Option<String>` would treat `Some("")` and `None` as a change.
+fn normalised_key(key: &Option<String>) -> Option<String> {
+    key.as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+}
+
+/// The single write path for settings.
+///
+/// Both callers need the same three steps in the same order — restore a redacted
+/// key, put the key in the keychain, then persist everything else — and the
+/// keychain step is easy to forget when it is copied by hand.
+fn persist_settings(
+    state: &AppState,
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    // Preserve full API key if client sent redacted value
-    {
+    // The front end only ever sees a redacted key, so a redacted value coming
+    // back means "unchanged", not "set it to these characters".
+    let previous = {
         let current = state.settings.lock();
         if let Some(k) = &settings.openrouter_api_key {
             if k.contains('…') || k == "****" {
                 settings.openrouter_api_key = current.openrouter_api_key.clone();
             }
         }
-    }
+        normalised_key(&current.openrouter_api_key)
+    };
     settings.validate_models().map_err(|e| e.to_string())?;
-    state.db.save_settings(&settings)?;
+    // The key must be somewhere durable before the row is allowed to drop it, and
+    // there are two candidate homes while a migration is outstanding. Decide which
+    // one is holding it first, then write the row accordingly — `KeyHome` exists so
+    // that decision cannot be skipped.
+    let next = normalised_key(&settings.openrouter_api_key);
+    let changed = next != previous;
+    let mut home = KeyHome::Keychain;
+
+    match &next {
+        None if changed => crate::secrets::clear_openrouter_key()?,
+        None => {}
+        Some(key) => {
+            // Write when the user changed it, and also when a previous run could
+            // not migrate it — otherwise an unrelated save would strip the row
+            // that is still the only durable copy.
+            let already_safe = !changed && state.key_in_keychain.load(Ordering::Relaxed);
+            if !already_safe {
+                match crate::secrets::store_openrouter_key(key) {
+                    Ok(()) => state.key_in_keychain.store(true, Ordering::Relaxed),
+                    // The user typed this key, so tell them it will not be kept.
+                    Err(e) if changed => return Err(e),
+                    // They were doing something else entirely; keep the key where
+                    // it already is rather than failing an unrelated action.
+                    Err(e) => {
+                        tracing::warn!("keychain still unavailable, key stays in the row: {e}");
+                        home = KeyHome::KeepInRow;
+                    }
+                }
+            }
+        }
+    }
+
+    state.db.save_settings_with(&settings, home)?;
     *state.settings.lock() = settings.clone();
-    Ok(settings.public_view())
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn save_settings(
+    state: State<'_, Arc<AppState>>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    Ok(persist_settings(&state, settings)?.public_view())
 }
 
 #[tauri::command]
@@ -102,9 +197,7 @@ pub fn switch_stt_provider(
     };
     let mut s = state.settings.lock().clone();
     s.switch_stt(p).map_err(|e| e.to_string())?;
-    state.db.save_settings(&s)?;
-    *state.settings.lock() = s.clone();
-    Ok(s.public_view())
+    Ok(persist_settings(&state, s)?.public_view())
 }
 
 #[tauri::command]
@@ -118,18 +211,14 @@ pub fn switch_llm_provider(
     };
     let mut s = state.settings.lock().clone();
     s.switch_llm(p).map_err(|e| e.to_string())?;
-    state.db.save_settings(&s)?;
-    *state.settings.lock() = s.clone();
-    Ok(s.public_view())
+    Ok(persist_settings(&state, s)?.public_view())
 }
 
 #[tauri::command]
 pub fn set_reasoning(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<AppSettings, String> {
     let mut s = state.settings.lock().clone();
     s.set_reasoning(enabled);
-    state.db.save_settings(&s)?;
-    *state.settings.lock() = s.clone();
-    Ok(s.public_view())
+    Ok(persist_settings(&state, s)?.public_view())
 }
 
 #[tauri::command]
@@ -241,24 +330,10 @@ pub fn complete_onboarding(
     state: State<'_, Arc<AppState>>,
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    {
-        let current = state.settings.lock();
-        if let Some(k) = &settings.openrouter_api_key {
-            if k.contains('…') || k == "****" {
-                settings.openrouter_api_key = current.openrouter_api_key.clone();
-            }
-        }
-    }
     settings.onboarding_complete = true;
-    settings.validate_models().map_err(|e| e.to_string())?;
-    // If local STT selected, require model ready
-    let gate = can_start_recording(&settings, local_stt_ready(&settings), true);
-    if !gate.allowed && settings.stt_provider == SttProvider::Local {
-        // Allow finishing onboarding but user must still download model before record
-    }
-    state.db.save_settings(&settings)?;
-    *state.settings.lock() = settings.clone();
-    Ok(settings.public_view())
+    // Finishing onboarding is allowed even when the local model is still missing;
+    // `can_record` is what actually blocks the recording later.
+    Ok(persist_settings(&state, settings)?.public_view())
 }
 
 #[tauri::command]
@@ -761,12 +836,13 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_placeholder_is_not_a_configured_key() {
+    fn the_shipped_key_is_a_real_signing_key() {
         let conf: serde_json::Value = serde_json::from_str(TAURI_CONF).unwrap();
         assert!(
-            !updater_pubkey_is_real(&conf),
-            "tauri.conf.json still carries a development placeholder; reporting it as \
-             configured would claim a signature guarantee the build does not have"
+            updater_pubkey_is_real(&conf),
+            "tauri.conf.json no longer carries a usable minisign public key; without one \
+             the updater cannot verify a release, and every install would accept whatever \
+             the endpoint serves"
         );
     }
 
