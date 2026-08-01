@@ -47,13 +47,31 @@ pub fn set_openrouter_key(key: Option<&str>) -> Result<(), String> {
         Some(k) => entry()
             .and_then(|e| e.set_password(k))
             .map_err(|e| format!("could not store the API key in the system keychain: {e}")),
-        None => {
-            if let Err(e) = entry().and_then(|e| e.delete_credential()) {
-                if !matches!(e, keyring::Error::NoEntry) {
-                    tracing::warn!("could not clear the stored API key: {e}");
-                }
-            }
+        None => clear_openrouter_key(),
+    }
+}
+
+/// Removing a key is only best-effort when there was nothing to remove.
+///
+/// If a key really is stored and the keychain refuses to delete it, saying "saved"
+/// would be a lie with teeth: the user believes they revoked their credential, the
+/// settings screen shows it gone, and the next launch loads it straight back out of
+/// the keychain and keeps sending it to OpenRouter.
+fn clear_openrouter_key() -> Result<(), String> {
+    let Ok(entry) = entry() else {
+        // No keychain backend at all — nothing of ours can be sitting in it.
+        return Ok(());
+    };
+    match entry.get_password() {
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => {
+            // Service unavailable or locked. We never managed to store anything
+            // through it either, so there is nothing to strand.
+            tracing::warn!("keychain unreadable while clearing the API key: {e}");
             Ok(())
         }
+        Ok(_) => entry
+            .delete_credential()
+            .map_err(|e| format!("could not remove the stored API key: {e}")),
     }
 }

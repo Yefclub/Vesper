@@ -121,15 +121,19 @@ fn persist_settings(
         }
     }
     settings.validate_models().map_err(|e| e.to_string())?;
-    // Database first. It is the write that can fail for boring reasons — disk full,
-    // file locked — and doing it after the keychain would leave the stored
-    // credential ahead of the settings that reference it.
+    // Keychain first, and nothing else happens if it refuses.
+    //
+    // The database write strips the key, which on an installation whose migration
+    // never completed is still the only durable copy. Saving the row first and
+    // failing the keychain afterwards would erase the user's key from both places
+    // at once, on an unrelated settings change.
+    //
+    // The reverse risk is real but much smaller: if the database write fails after
+    // the keychain accepted the key, the next launch pairs a stored credential with
+    // older settings. The user saw an error and nothing was lost.
+    crate::secrets::set_openrouter_key(settings.openrouter_api_key.as_deref())?;
     state.db.save_settings(&settings)?;
-    let stored = crate::secrets::set_openrouter_key(settings.openrouter_api_key.as_deref());
-    // The session keeps working with the key in memory either way; the caller is
-    // told only that it will not survive a restart.
     *state.settings.lock() = settings.clone();
-    stored?;
     Ok(settings)
 }
 
