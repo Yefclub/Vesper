@@ -76,7 +76,23 @@ GitHub at merge time — bypassing merge requirements is not supported for stack
 git worktree add -b <branch> .claude/worktrees/<name> origin/dev
 ```
 
-Remove merged worktrees and confirm with `git worktree list`.
+Two commands fight worktrees, because `dev` is already checked out in the main clone:
+
+- **`gh pr merge --delete-branch`** wants to check out the base branch locally and fails with
+  `fatal: 'dev' is already used by worktree at ...`. The merge itself still goes through — only the
+  cleanup dies. Delete the branch explicitly afterwards with `git push origin --delete <branch>`.
+- **`gh stack sync` fast-forwards the trunk branch**, which means touching the main clone's working
+  tree. Don't. Rebase onto the remote-tracking ref from inside your own worktree instead, then push:
+
+```bash
+git fetch origin
+git checkout <bottom> && git rebase origin/dev
+git checkout <top>    && git rebase <bottom>
+git push --force-with-lease --atomic origin <bottom> <top>
+```
+
+`git worktree remove` fails with `Permission denied` if your shell sits inside the worktree. `cd`
+out first, then `git worktree prune` and confirm with `git worktree list`.
 
 ## Useful
 
