@@ -144,10 +144,15 @@ impl Database {
             -- Search index. Without it every keystroke pulled every transcript out
             -- of the database and concatenated it in memory to scan by hand.
             -- remove_diacritics keeps "reuniao" matching "reunião".
+            -- prefix='2 3' because the search runs as the user types: without
+            -- these, the first couple of characters force a scan and merge of
+            -- every matching term in the index, which is the cost this table
+            -- exists to remove.
             CREATE VIRTUAL TABLE IF NOT EXISTS meetings_fts USING fts5(
                 meeting_id UNINDEXED,
                 title,
                 body,
+                prefix='2 3',
                 tokenize='unicode61 remove_diacritics 2'
             );
             "#,
