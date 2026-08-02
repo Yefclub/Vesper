@@ -133,21 +133,31 @@ pub fn probe_host() -> CapabilityProbe {
     // really asking.
     let mut vulkan_available = false;
     let mut cuda_available = false;
-    let mut gpu_name = None;
-    let mut vram_bytes = 0u64;
-    for device in crate::llm::local::gpu_devices() {
+    let devices = crate::llm::local::gpu_devices();
+    for device in &devices {
         match device.backend.as_str() {
             "CUDA" => cuda_available = true,
             "Vulkan" => vulkan_available = true,
             _ => {}
         }
-        // The largest card, not the first. A laptop reports its integrated chip
-        // alongside the discrete one, and the discrete one is what will run.
-        if device.total_bytes > vram_bytes {
-            vram_bytes = device.total_bytes;
-            gpu_name = Some(device.description);
-        }
     }
+    // A discrete card if there is one, and only then the largest.
+    //
+    // Size alone picks wrong on the exact machine this was written on: a laptop
+    // with an RTX 4070 reports 7.8 GB of real video memory beside an integrated
+    // Intel Arc reporting 18 GB — which is not memory the chip has, it is a
+    // slice of the machine's RAM it is allowed to borrow. Taking the bigger
+    // number named the weaker device and pushed the model recommendation two
+    // tiers past what the real card can hold.
+    let best = devices
+        .iter()
+        .filter(|d| d.discrete)
+        .max_by_key(|d| d.total_bytes)
+        .or_else(|| devices.iter().max_by_key(|d| d.total_bytes));
+    let mut gpu_name = best.map(|d| d.description.clone());
+    // Only a discrete card's memory sizes the models. An integrated chip shares
+    // system RAM, so its number says nothing about what will stay resident.
+    let vram_bytes = best.filter(|d| d.discrete).map_or(0, |d| d.total_bytes);
 
     // nvidia-smi best-effort (Windows/Linux). Still worth asking on a build
     // with no CUDA backend: it is what names the card in the report, and the
@@ -254,6 +264,24 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(r.recommended_backend, "auto");
+    }
+
+    /// The laptop this was written on reports an RTX 4070 with 7.8 GB beside an
+    /// integrated Intel Arc claiming 18 GB — which is not memory the chip has,
+    /// it is a slice of system RAM it may borrow. Sizing by the larger number
+    /// named the weaker device and pushed the recommendation two tiers past
+    /// what the real card can hold.
+    #[test]
+    fn an_integrated_chip_does_not_outrank_the_real_card() {
+        let r = recommend_from_probe(&CapabilityProbe {
+            cpu_cores: 22,
+            vulkan_available: true,
+            gpu_name: Some("NVIDIA GeForce RTX 4070 Laptop GPU".into()),
+            vram_bytes: 7948 * 1024 * 1024,
+            ..Default::default()
+        });
+        assert_eq!(r.recommended_stt_model, "whisper-small");
+        assert_eq!(r.recommended_llm_model, "qwen2.5-1.5b");
     }
 
     /// An integrated chip with a sliver of memory would run a large model

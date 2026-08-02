@@ -60,12 +60,18 @@ fn load_ggml_backends() {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    let mut installed = exe_dir.into_iter().flat_map(|dir| {
-        let resources = dir.join("..").join("lib").join("Vesper");
-        [dir, resources]
-    });
-    match installed
-        .find(|dir| holds_a_backend(dir))
+    // ggml scans the executable's own directory by itself. Loading that same
+    // directory again registers every backend twice, and a device listed twice
+    // is a card that gets asked to hold half a model each time.
+    if exe_dir.as_deref().is_some_and(holds_a_backend) {
+        return;
+    }
+    // Anywhere else has to be named. On Linux the bundle puts them beside the
+    // resources rather than beside the binary, and a `cargo run` has them only
+    // in the build tree.
+    let resources = exe_dir.map(|dir| dir.join("..").join("lib").join("Vesper"));
+    match resources
+        .filter(|dir| holds_a_backend(dir))
         .or_else(|| BACKENDS_DIR.map(PathBuf::from))
     {
         Some(dir) => load_backends_from_path(&dir),
@@ -135,6 +141,9 @@ pub(crate) struct GpuDevice {
     pub backend: String,
     pub description: String,
     pub total_bytes: u64,
+    /// False for an integrated chip, whose reported memory is a slice of system
+    /// RAM rather than memory of its own.
+    pub discrete: bool,
 }
 
 /// The GPUs this build can actually reach, with the memory each reports.
@@ -152,6 +161,7 @@ pub(crate) fn gpu_devices() -> Vec<GpuDevice> {
     if backend().is_err() {
         return Vec::new();
     }
+    let mut seen = std::collections::HashSet::new();
     llama_cpp_2::list_llama_ggml_backend_devices()
         .into_iter()
         .filter(|device| {
@@ -160,7 +170,16 @@ pub(crate) fn gpu_devices() -> Vec<GpuDevice> {
                 LlamaBackendDeviceType::Gpu | LlamaBackendDeviceType::IntegratedGpu
             )
         })
+        // ggml can end up with a backend registered more than once, and then
+        // every card it owns is listed once per registration. Observed on a
+        // laptop that reported its two GPUs four times.
+        //
+        // By ggml's own name for the device — `Vulkan0`, `Vulkan1` — because
+        // that is what separates two real cards from one card seen twice. The
+        // description does not: two identical cards share it.
+        .filter(|device| seen.insert((device.backend.clone(), device.name.clone())))
         .map(|device| GpuDevice {
+            discrete: matches!(device.device_type, LlamaBackendDeviceType::Gpu),
             backend: device.backend,
             description: device.description,
             total_bytes: device.memory_total as u64,
@@ -174,11 +193,34 @@ pub(crate) fn gpu_devices() -> Vec<GpuDevice> {
 /// CUDA and once as Vulkan — and llama.cpp's default of "use the GPU devices"
 /// would split a single model across two views of the same hardware.
 fn gpu_params(chosen: ComputeBackend) -> Result<LlamaModelParams, String> {
-    let devices: Vec<usize> = llama_cpp_2::list_llama_ggml_backend_devices()
+    use llama_cpp_2::LlamaBackendDeviceType;
+
+    let mut seen = std::collections::HashSet::new();
+    let all: Vec<_> = llama_cpp_2::list_llama_ggml_backend_devices()
         .into_iter()
-        .filter(|device| device.backend.eq_ignore_ascii_case(chosen.as_str()))
-        .map(|device| device.index)
+        // Same duplicate registrations as in `gpu_devices`, and here they would
+        // do real damage: llama.cpp would split one model across two views of a
+        // single card, each believing it has the whole of that card's memory.
+        .filter(|device| seen.insert((device.backend.clone(), device.name.clone())))
         .collect();
+    let matching = |device: &llama_cpp_2::LlamaBackendDevice| {
+        device.backend.eq_ignore_ascii_case(chosen.as_str())
+    };
+    // Discrete cards if there are any. Splitting a model between a real GPU and
+    // the integrated chip sharing the machine's RAM is slower than either alone.
+    let discrete: Vec<usize> = all
+        .iter()
+        .filter(|d| matching(d) && matches!(d.device_type, LlamaBackendDeviceType::Gpu))
+        .map(|d| d.index)
+        .collect();
+    let devices = if discrete.is_empty() {
+        all.iter()
+            .filter(|d| matching(d))
+            .map(|d| d.index)
+            .collect()
+    } else {
+        discrete
+    };
     // Clamped to the layer count inside llama.cpp; asking for every layer is
     // how "offload all of it" is spelled.
     let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);

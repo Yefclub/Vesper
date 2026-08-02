@@ -143,9 +143,14 @@ fn repair_profile_libraries() {
             if !is_shared_library(&from) {
                 continue;
             }
-            // Beside the binaries and beside the test binaries: cargo runs tests
-            // out of `deps`, and that is a different directory to the loader.
-            for dir in [profile.clone(), profile.join("deps")] {
+            // Every directory the sys crate hard-links into. `deps` is where
+            // cargo runs test binaries from, and `examples` gets the same
+            // treatment — missing it just moves the panic one branch along.
+            for dir in [
+                profile.clone(),
+                profile.join("deps"),
+                profile.join("examples"),
+            ] {
                 if !dir.is_dir() {
                     continue;
                 }
