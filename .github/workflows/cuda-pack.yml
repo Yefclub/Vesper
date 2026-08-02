@@ -1,0 +1,81 @@
+name: cuda-pack
+
+# The CUDA backend, built and packaged on its own.
+#
+# It is not in the installer and not in CI's normal path, because cuBLAS alone
+# is 385 MB compressed — twenty times the size of the whole application — and
+# almost nobody needs it: a machine with an NVIDIA card already runs every local
+# model on Vulkan. This produces the pack the app offers to download when it
+# finds an NVIDIA GPU, the same way it offers to download model weights.
+#
+# By hand only. Building it costs a CUDA toolkit install on the runner and
+# fifteen minutes, and it changes only when llama.cpp does.
+on:
+  workflow_dispatch:
+    inputs:
+      cuda:
+        description: "CUDA toolkit version to build against"
+        required: true
+        default: "12.6.0"
+
+jobs:
+  pack:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: LLVM binutils on PATH
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
+      # The same MAX_PATH failure the Vulkan job hits: MSBuild's tracker ignores
+      # `LongPathsEnabled`, and the runner's own workspace path is already long
+      # enough to break the nested shader project.
+      - name: Short target directory
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value 'CARGO_TARGET_DIR=C:\vt'
+      - name: CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: ${{ inputs.cuda }}
+          method: network
+          # nvcc and the headers are what the build needs; the rest of the
+          # toolkit is several more gigabytes of things it does not.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+      - name: Build the CUDA backend
+        working-directory: src-tauri
+        shell: bash
+        run: cargo build --release --features gpu-cuda
+
+      # `ggml-cuda.dll` is ours; the three beside it are NVIDIA's redistributables,
+      # which `ggml-cuda.dll` imports at load time and which no ordinary machine
+      # has installed. Without them the library loads and immediately fails, which
+      # looks exactly like the GPU not being there.
+      - name: Collect the pack
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP\vesper-cuda"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $backends = Get-ChildItem 'C:\vt\release\build' -Directory -Filter 'llama-cpp-sys-2-*' |
+            ForEach-Object { Join-Path $_.FullName 'out\backends' } |
+            Where-Object { Test-Path (Join-Path $_ 'ggml-cuda.dll') } |
+            Select-Object -First 1
+          if (-not $backends) { throw 'ggml-cuda.dll was not built' }
+          Copy-Item (Join-Path $backends 'ggml-cuda.dll') $out
+          foreach ($name in 'cudart64_*.dll','cublas64_*.dll','cublasLt64_*.dll') {
+            $found = Get-ChildItem "$env:CUDA_PATH\bin" -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $found) { throw "missing redistributable: $name" }
+            Copy-Item $found.FullName $out
+          }
+          Get-ChildItem $out | ForEach-Object { "{0,-24} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+          Compress-Archive -Path "$out\*" -DestinationPath "$env:RUNNER_TEMP\vesper-cuda.zip" -CompressionLevel Optimal
+          $zip = Get-Item "$env:RUNNER_TEMP\vesper-cuda.zip"
+          "zip: {0:N1} MB" -f ($zip.Length / 1MB)
+          # The catalog pins both, and the app refuses an artifact that does not
+          # match — the same rule the model downloads already follow.
+          "sha256: $((Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower())"
+          "bytes: $($zip.Length)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vesper-cuda
+          path: ${{ runner.temp }}\vesper-cuda.zip
+          compression-level: 0
