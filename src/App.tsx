@@ -8,6 +8,7 @@ import {
   type UIEvent,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -49,6 +50,20 @@ import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
 
 type Tab = "transcript" | "summary";
+
+/** Move the window, restoring it first if it is maximised.
+ *
+ *  Tauri's own drag region calls `startDragging` and stops there, which a
+ *  maximised window ignores — so the titlebar felt dead in the state the app
+ *  starts in. Windows restores the window and hands it to the cursor, and that
+ *  is the behaviour to match rather than invent around. */
+async function dragWindow() {
+  const win = getCurrentWindow();
+  if (await win.isMaximized()) {
+    await win.unmaximize();
+  }
+  await win.startDragging();
+}
 
 export default function App() {
   const [bootLocale, setBootLocale] = useState("en");
@@ -754,10 +769,20 @@ function AppShell({
           around the card below is the separation, and a hairline 8px from the
           card's own border is two hard divides in a row.
 
-          `data-tauri-drag-region` goes on this element and on no child: Tauri's
-          handler tests `event.target`, so a click on a button inside is not a
-          drag, and its built-in double-click-to-maximise is the Windows
-          behaviour to inherit rather than reimplement.
+          Dragging is handled here rather than by `data-tauri-drag-region`,
+          for two reasons the attribute cannot cover.
+
+          Its handler tests `event.target`, and the three grid columns below
+          are block elements that cover the whole bar — so every press landed
+          on a column, never on the header, and the only draggable pixels in
+          the window were the 16px gaps between them. The columns that hold
+          nothing to click are `pointer-events-none` now, which is what lets a
+          press reach this element at all.
+
+          And the window opens maximised. Tauri's drag region calls
+          `startDragging` and nothing else, which a maximised window ignores;
+          Windows restores the window and takes it with the cursor. That takes
+          an `unmaximize` first, which means owning the press.
 
           48px, not 56: the row has to fit an `h-8` control with 8px of
           clearance, and 48 plus the card's 8px gutter is the same chrome
@@ -773,13 +798,24 @@ function AppShell({
           lands in the centre column, and it must not be able to grow the
           header. */}
       <header
-        data-tauri-drag-region
+        onPointerDown={(e) => {
+          // Left button only, and only on the bar itself — a press that landed
+          // on a control is that control's.
+          if (e.button !== 0 || e.target !== e.currentTarget) return;
+          void dragWindow();
+        }}
+        onDoubleClick={(e) => {
+          if (e.target !== e.currentTarget) return;
+          void getCurrentWindow().toggleMaximize();
+        }}
         // `pr-0` now: the window controls run to the window's own edge, the way
         // every other application on the platform draws them. The 46px targets
         // supply their own inset.
         className="grid h-12 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 pl-4 pr-0"
       >
-        <div className="flex items-center gap-2">
+        {/* `pointer-events-none`: nothing here is clickable, and while it ate
+            presses the left half of the titlebar could not be dragged. */}
+        <div className="pointer-events-none flex items-center gap-2">
           {/* No radius: the asset is the mark alone now, not a rounded tile, so
               a corner clip would shave the artwork instead of a background. */}
           <img src={logo} alt="" className="h-8 w-8" />
@@ -798,10 +834,13 @@ function AppShell({
             Both in the same `AnimatePresence` with the same `fadeRise`, so Stop
             hands the slot from one to the other in a single beat rather than
             emptying the header for the several seconds the work takes. */}
-        <div className="flex items-center justify-center">
+        {/* Transparent to presses, and its contents are not: the column is
+            empty except while recording, and an empty column swallowing the
+            middle of the titlebar is the same bug as the identity block. */}
+        <div className="pointer-events-none flex items-center justify-center">
           <AnimatePresence>
             {status?.recording ? (
-              <motion.div key="transport" {...fadeRise}>
+              <motion.div key="transport" className="pointer-events-auto" {...fadeRise}>
                 <RecordTransport
                   status={status}
                   busy={busy}
@@ -810,7 +849,7 @@ function AppShell({
                 />
               </motion.div>
             ) : working ? (
-              <motion.div key="processing" {...fadeRise}>
+              <motion.div key="processing" className="pointer-events-auto" {...fadeRise}>
                 <ProcessingStatus phase={working} />
               </motion.div>
             ) : null}
