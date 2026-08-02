@@ -501,6 +501,26 @@ function AppShell({
     }
   }
 
+  /// Picking a capture device in the dock writes straight through — there is no
+  /// Save button within 400px of it, and the choice is one click away from the
+  /// recording it governs. Same path as every other save, so it fails the same
+  /// way, and the gate is re-read because "no microphone" is one of the reasons
+  /// it blocks.
+  async function handlePickDevice(kind: "mic" | "system", id: string | null) {
+    try {
+      const next = await api.saveSettings(
+        kind === "mic"
+          ? { ...settings, mic_device_id: id }
+          : { ...settings, system_device_id: id },
+      );
+      setSettings(next);
+      onSettingsChange(next);
+      await refreshGate();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
 
   return (
     <div className="flex h-full flex-col bg-background text-fg">
@@ -891,6 +911,7 @@ function AppShell({
                   systemDeviceId={settings.system_device_id}
                   onStart={requestStart}
                   onOpenSettings={() => setShowSettings(true)}
+                  onPickDevice={handlePickDevice}
                 />
               )}
             </AnimatePresence>
