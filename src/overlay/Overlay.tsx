@@ -22,13 +22,18 @@ import { I18nProvider, useI18n } from "../lib/i18n";
  * the settings drawer and the meeting list in a 340px card nobody can see.
  */
 export function Overlay() {
-  const [locale, setLocale] = useState("en");
+  // Nothing renders until the locale is known. `I18nProvider` reads
+  // `initialLocale` once, on its first mount, so mounting it with a placeholder
+  // and updating the state afterwards leaves the card in English for anyone
+  // whose app is in Portuguese.
+  const [locale, setLocale] = useState<string | null>(null);
   useEffect(() => {
     api
       .getSettings()
       .then((s) => setLocale(s.ui_locale || "en"))
       .catch(() => setLocale("en"));
   }, []);
+  if (locale === null) return null;
   return (
     <I18nProvider initialLocale={locale}>
       <Card />

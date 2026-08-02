@@ -129,10 +129,15 @@ impl SttService {
             self.transcribe_channel(settings, Speaker::Others, &system, sample_rate, start_ms),
         );
         let (me, others) = (me?, others?);
-        if !me.text.is_empty() {
+        // A chunk with no words can still have been billed — a cloud model
+        // charges for the seconds of audio it listened to whether or not anyone
+        // was speaking. Dropping it here lost the charge before any caller could
+        // record it. `apply_stt_chunks` already ignores empty text, so keeping
+        // it costs nothing downstream.
+        if !me.text.is_empty() || me.cost_nano_usd.is_some() {
             out.push(me);
         }
-        if !others.text.is_empty() {
+        if !others.text.is_empty() || others.cost_nano_usd.is_some() {
             out.push(others);
         }
         Ok(out)

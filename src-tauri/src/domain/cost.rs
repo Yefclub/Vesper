@@ -19,12 +19,21 @@ pub const NANO_PER_USD: f64 = 1_000_000_000.0;
 /// treated as "no charge reported" rather than propagated: a provider that
 /// answers `NaN` should not be able to poison a meeting's total.
 pub fn usd_to_nano(usd: f64) -> Option<i64> {
-    if !usd.is_finite() || usd < 0.0 {
+    if !usd.is_finite() || !(0.0..=MAX_CALL_USD).contains(&usd) {
         return None;
     }
-    let nano = (usd * NANO_PER_USD).round();
-    (nano <= i64::MAX as f64).then_some(nano as i64)
+    Some((usd * NANO_PER_USD).round() as i64)
 }
+
+/// The most one call can plausibly cost, above which the number is a bug rather
+/// than a charge.
+///
+/// A transcription chunk is a fraction of a cent and the most expensive
+/// completion in the catalogue does not reach a dollar for a meeting-sized
+/// prompt. Accepting anything up to `i64::MAX` meant a malformed `9000000000.0`
+/// became a nine-billion-dollar meeting, past what JSON carries exactly and
+/// impossible to correct without editing the database.
+pub const MAX_CALL_USD: f64 = 100.0;
 
 /// How a cost reads to someone deciding whether to keep using a cloud model.
 ///
@@ -104,6 +113,9 @@ mod tests {
         assert_eq!(usd_to_nano(f64::INFINITY), None);
         assert_eq!(usd_to_nano(-0.5), None);
         assert_eq!(usd_to_nano(1e30), None);
+        // Finite, positive and still not a price anyone was charged.
+        assert_eq!(usd_to_nano(9_000_000_000.0), None);
+        assert_eq!(usd_to_nano(MAX_CALL_USD), Some(100_000_000_000));
     }
 
     /// The reason for integers: forty chunks at a fraction of a cent have to add

@@ -26,7 +26,7 @@ use crate::stt::catalog::{
     fetch_openrouter_stt_models, OrModel,
 };
 use crate::stt::local::LocalSttEngine;
-use crate::stt::pipeline::{apply_stt_chunks, SttService};
+use crate::stt::pipeline::{apply_stt_chunks, SttChunkResult, SttService};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -58,6 +58,14 @@ pub struct AppState {
     /// draining audio. Two tickers would split each window between them and run
     /// concurrent transcriptions over halves of the same speech.
     pub live_stt_generation: AtomicU64,
+    /// Held across a refinement's whole read, model call and write.
+    ///
+    /// A version is the *whole* insight set, so two refinements that each read
+    /// the meeting before either wrote would each build a version from a stale
+    /// snapshot, and the second to land would carry the other's section from
+    /// before it was improved. The window already allows one at a time; this is
+    /// what makes it true.
+    pub refine_flight: tokio::sync::Mutex<()>,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -80,6 +88,7 @@ impl AppState {
             stt_flight: tokio::sync::Mutex::new(()),
             download_flight: tokio::sync::Mutex::new(()),
             live_stt_generation: AtomicU64::new(0),
+            refine_flight: tokio::sync::Mutex::new(()),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -621,6 +630,7 @@ pub async fn stop_recording(
                 .transcribe_dual(&settings, &mic, &sys, sr, 0)
                 .await
             {
+                bill_chunks(&state.db, &id, &chunks);
                 apply_stt_chunks(&mut live, &chunks);
             }
         }
@@ -639,14 +649,7 @@ pub async fn stop_recording(
                 .await
             {
                 Ok(chunks) => {
-                    let tail_cost: i64 = chunks.iter().filter_map(|c| c.cost_nano_usd).sum();
-                    if tail_cost > 0 {
-                        // A failure here would cost the user their tail
-                        // transcript over a bookkeeping row.
-                        if let Err(e) = state.db.add_meeting_cost(&id, Some(tail_cost)) {
-                            tracing::warn!("could not record the cost of the final chunk: {e}");
-                        }
-                    }
+                    bill_chunks(&state.db, &id, &chunks);
                     apply_stt_chunks(&mut live, &chunks)
                 }
                 // Same reason as the summary above: the error names the model.
@@ -764,13 +767,10 @@ async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), St
             return Err(e);
         }
     };
-    // Charged before the transcript is merged, and by summing the chunks rather
-    // than reading a total and writing it back: two channels transcribe
-    // concurrently and a read-modify-write here would drop one of them.
-    let chunk_cost: i64 = chunks.iter().filter_map(|c| c.cost_nano_usd).sum();
-    if chunk_cost > 0 {
-        state.db.add_meeting_cost(&id, Some(chunk_cost))?;
-    }
+    // Charged before the transcript is merged. The sum goes through SQL rather
+    // than a read-modify-write here: two channels transcribe concurrently and
+    // one would overwrite the other.
+    bill_chunks(&state.db, &id, &chunks);
     let mut guard = state.live.lock();
     let t = guard.entry(id.clone()).or_default();
     apply_stt_chunks(t, &chunks);
@@ -981,6 +981,9 @@ pub async fn import_audio(
         .transcribe_dual(&settings, &pcm, &[], sr, 0)
         .await?;
     let mut t = LiveTranscript::new();
+    // Billed like every other transcription path: this one calls the same
+    // provider and it was the meeting's only charge on an imported file.
+    bill_chunks(&state.db, &id, &chunks);
     apply_stt_chunks(&mut t, &chunks);
     state.db.save_transcript(&id, &t)?;
     meeting.transcript_text = t.plain_text();
@@ -1023,6 +1026,9 @@ pub async fn retranscribe(
         .transcribe_dual(&settings, &mic, &sys, sr, 0)
         .await?;
     let mut t = LiveTranscript::new();
+    // Billed like every other transcription path: this one calls the same
+    // provider and it was the meeting's only charge on an imported file.
+    bill_chunks(&state.db, &id, &chunks);
     apply_stt_chunks(&mut t, &chunks);
     state.db.save_transcript(&id, &t)?;
     meeting.transcript_text = t.plain_text();
@@ -1180,6 +1186,29 @@ pub fn shortcut_status(status: State<'_, ShortcutStatus>) -> ShortcutStatus {
 /// Rename a meeting.
 ///
 /// The typed name goes through the same `parse_title` as the model's answer —
+/// Charge a meeting for a batch of transcription chunks.
+///
+/// `Some(0)` and `None` are different answers and the difference is the whole
+/// point of the column: a free cloud model reported a real zero and the meeting
+/// should read `$0.00`, while a meeting transcribed on this machine reported
+/// nothing and should show no price at all. Summing to zero and skipping the
+/// write would have collapsed the first into the second.
+fn bill_chunks(db: &Database, id: &str, chunks: &[SttChunkResult]) -> Option<i64> {
+    let mut total: Option<i64> = None;
+    for c in chunks {
+        if let Some(n) = c.cost_nano_usd {
+            total = Some(total.unwrap_or(0) + n);
+        }
+    }
+    if let Some(total) = total {
+        if let Err(e) = db.add_meeting_cost(id, Some(total)) {
+            // A bookkeeping row is not worth losing a transcript over.
+            tracing::warn!("could not record a transcription charge: {e}");
+        }
+    }
+    total
+}
+
 /// Show, hide, move and size the minimized-recording card.
 ///
 /// Both inputs are re-read here rather than remembered: a recording can stop
@@ -1294,6 +1323,9 @@ pub async fn refine_summary_section(
     // From the WebView, so it is parsed rather than trusted: an unrecognised
     // value picks no prompt and merges into nothing, and failing here says so.
     let section = Section::parse(&section).ok_or_else(|| "unknown section".to_string())?;
+    // Taken before the read and held past the write, so every version is built
+    // on what the one before it produced.
+    let _flight = state.refine_flight.lock().await;
     let mut meeting = state
         .db
         .get_meeting(&id)?
