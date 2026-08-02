@@ -179,6 +179,15 @@ mod tests {
             ComputeBackend::Vulkan,
             "vulkan is possible on nvidia and must be honoured"
         );
+        // The same rule the other way round, which is the half a CUDA-only
+        // build would exercise.
+        let cuda_only = BackendSupport {
+            cuda_built: true,
+            vulkan_built: false,
+            cuda_present: true,
+            vulkan_present: false,
+        };
+        assert_eq!(resolve_backend("vulkan", cuda_only), ComputeBackend::Cuda);
     }
 
     /// The exact shape this shipped with: `cuda` stored by an older build, on a
