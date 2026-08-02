@@ -29,6 +29,7 @@ import {
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise, segmentArrive } from "./lib/motion";
+import { applyTheme } from "./lib/theme";
 import { Button, FOCUS } from "./components/Button";
 import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
@@ -57,6 +58,11 @@ export default function App() {
       .then((s) => {
         setSettings(s);
         setBootLocale(s.ui_locale || "en");
+        // The stored value overrules the boot cache the moment it resolves —
+        // localStorage only exists because this round-trip cannot beat first
+        // paint. Anything that is not "dark" is light, so a backend that does
+        // not carry the field yet lands on the product default.
+        applyTheme(s.theme === "dark" ? "dark" : "light");
       })
       .catch(() => {
         setSettings(null);

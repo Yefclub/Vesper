@@ -20,6 +20,7 @@ import {
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
+import { applyTheme, currentTheme } from "../lib/theme";
 import { Button, FOCUS } from "./Button";
 import { ModelPicker } from "./ModelPicker";
 import { LOCALES, PROVIDERS, Segmented } from "./Segmented";
@@ -218,6 +219,13 @@ export function SettingsPanel({
   // that refuses a missing one, so offering it is the same dead end.
   const readyStt = models.filter((m) => m.kind === "stt" && m.ready);
   const readyLlm = models.filter((m) => m.kind === "llm" && m.ready);
+  // What is actually on screen wins over a row that does not carry a theme:
+  // until the backend keeps the field, a saved row comes back without it and
+  // the control would read Light while the app is dark.
+  const theme =
+    draft.theme === "dark" || draft.theme === "light"
+      ? draft.theme
+      : currentTheme();
 
   return (
     <motion.div
@@ -538,12 +546,30 @@ export function SettingsPanel({
           )}
 
           {tab === "lang" && (
-            <Segmented
-              label={t("settings.language")}
-              value={draft.ui_locale}
-              onChange={(v) => setDraft((d) => ({ ...d, ui_locale: v }))}
-              options={LOCALES}
-            />
+            <div className="space-y-4">
+              {/* The one control whose effect you have to see while deciding, so
+                  it applies on click instead of waiting for Save — and it still
+                  folds into the draft, so the row in SQLite is written by the
+                  same Save path as everything else in this drawer. */}
+              <Segmented
+                label={t("settings.theme")}
+                value={theme}
+                onChange={(v) => {
+                  applyTheme(v === "dark" ? "dark" : "light");
+                  setDraft((d) => ({ ...d, theme: v }));
+                }}
+                options={[
+                  { value: "light", label: t("theme.light") },
+                  { value: "dark", label: t("theme.dark") },
+                ]}
+              />
+              <Segmented
+                label={t("settings.language")}
+                value={draft.ui_locale}
+                onChange={(v) => setDraft((d) => ({ ...d, ui_locale: v }))}
+                options={LOCALES}
+              />
+            </div>
           )}
         </div>
 

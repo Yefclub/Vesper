@@ -1,119 +1,258 @@
 @import "tailwindcss";
-/* Tailwind v4 compiles `hover:` to `@media (hover: hover) { &:hover }`, and
-   WebView2 on any touch-capable Windows machine answers `hover: none` — every
-   2-in-1, every touchscreen laptop, every Surface. On that hardware all of the
-   app's hover utilities were dead, and the sidebar's `group-hover:opacity-100`
-   delete button was permanently invisible. `group-hover` composes from the same
-   variant, so this one line fixes both. CSS requires `@import` to precede every
-   other at-rule, so it goes here and nowhere lower. */
+
+/* Tailwind v4 compiles `hover:` to `@media (hover: hover)`, and WebView2 on any
+   touch-capable Windows machine answers `hover: none`. Every hover utility in
+   the app dies there, including the sidebar's group-hover delete button.
+   CSS requires @import to precede every other at-rule, so both variants go
+   here and nowhere lower. */
 @custom-variant hover (&:hover);
+/* The built-in `dark` variant in 4.3.3 is a bare prefers-color-scheme media
+   query — it reads no class and no attribute. There are zero `dark:` utilities
+   in this app today and there should stay zero (everything goes through
+   tokens); this line exists so the first one written does not follow the OS
+   while every colour follows the attribute. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme {
-  /* ---- Surface ladder ------------------------------------------------
-     Six steps, each ≥4.2pp apart in oklch lightness. The old ladder spanned
-     #0a0a0a→#222222 (1.24:1 end to end) with a 1.18pp dead step between
-     surface and surface-2, so the app shipped four tokens and read as three
-     levels. This one spans 1.88:1.
+  /* ==================================================================
+     LIGHT is the default and therefore lives here. Every token name must
+     appear in @theme even when only dark uses it: @theme generates the
+     utility CLASSES; the override block only reassigns VALUES. A token
+     declared only in the override block generates no utility at all, and
+     Tailwind emits nothing and raises no error for an unknown utility.
 
-     Tinted to the accent's hue (oklch 305°) at chroma 0.006–0.011, a 3–6
-     point RGB spread — B > R > G, widening with lightness. Before this every
-     surface was R=G=B while --color-muted was hue-240 zinc: half achromatic
-     and half cool, which is the one thing the design rules forbid outright. */
-  --color-background: #0b090c;   /* canvas + all chrome; was #0a0a0a */
-  --color-surface-1:  #161418;   /* was --color-surface #111111 */
-  --color-surface-2:  #201e22;   /* was #141414 */
-  --color-surface-3:  #2a282d;   /* was #1a1a1a */
-  --color-hover:      #353338;   /* hover fill — never a border */
-  --color-active:     #403e44;   /* pressed / selected fill */
+     NEVER `@theme inline`. Compiled: `@theme` gives
+     `.bg-accent{background-color:var(--color-accent)}`, `@theme inline` gives
+     `.bg-accent{background-color:#7528ae}` — no var() left to override, the
+     whole theme system silently stops working, and the symptom looks like the
+     attribute not being set.
+     ================================================================== */
+
+  /* ---- Surface ladder -------------------------------------------------
+     The ladder DESCENDS in light. Dark's canvas sits at oklch L=14.4% with
+     85pp of room above it; light's sits at 98.4% with 1.6pp. Six ascending
+     steps do not fit in 1.6pp. Distance from the canvas still encodes
+     elevation — only the sign flips, and every component keeps its token.
+     Light steps are 2.1-2.7pp against dark's 4.2-5.1pp: near-white compresses
+     WCAG ratios, the house rule itself is asymmetric (~7% light / ~12% dark),
+     and GitHub/Linear/Notion all run 1.5-2.5pp light steps.
+     Same hue as dark (oklch 305 deg), chroma ramping .004 -> .010. */
+  --color-background: #fbf9fc;   /* 98.4%  canvas: window, header, sidebar */
+  --color-surface-1:  #f3f2f5;   /* 96.3%  THE CONTENT CARD, onboarding card */
+  --color-surface-2:  #eceaee;   /* 94.0%  drawer, dialog, dock, inputs, cards */
+  --color-surface-3:  #e5e3e8;   /* 91.9%  ghost/secondary rest, tracks, popovers */
+  --color-hover:      #dddae0;   /* 89.2%  hover for a control that HAS a fill */
+  --color-active:     #d4d1d8;   /* 86.5%  pressed / segmented selected */
+
+  /* ---- Row states -----------------------------------------------------
+     ALPHA, not rungs. SPEC §9 rejected these tokens; the card is why they are
+     back — with `surface-1` spent on the content pane, a sidebar hover painted
+     `surface-1` is the exact colour of the pane 8px to its right, and a
+     selected row painted `surface-2` is brighter than it. An alpha floats on
+     whatever is behind it and can never collide with a named surface.
+
+     Tuned to reproduce the old opaque values where they were reviewed:
+     0.05 over the canvas lands within 1 point of `surface-1`, and over
+     `surface-3` within 1 point of the old `--color-hover`. One pair, both jobs.
+     Use these wherever the REST state is transparent (list rows, ghost
+     buttons, chrome). Use `hover`/`active` above wherever the rest state is an
+     opaque fill — an alpha there replaces the fill instead of layering on it,
+     and a secondary button would get DARKER on hover. */
+  --color-row-hover:    rgb(10 8 12 / 0.03);
+  --color-row-selected: rgb(10 8 12 / 0.06);
 
   /* ---- Border ---------------------------------------------------------
-     A white alpha, not an opaque grey. A 1px border has to be lighter than
-     BOTH adjacent fills; one opaque #222222 was +1.24:1 over #0a0a0a and
-     +1.08:1 over #1a1a1a — crisp in one place, gone in another. A 10% alpha
-     composites to #222124 on background and #3e3c41 on surface-3: lighter
-     than its own surface and lighter than the next step up, at every level,
-     automatically. */
-  --color-border:        rgb(245 244 247 / 0.10);
-  --color-border-strong: rgb(245 244 247 / 0.16);  /* focused input, exposed panel edge */
+     A BLACK alpha, the mirror of dark's white one, keeping the property that
+     bought the alpha in the first place: darker than its own fill AND darker
+     than the next step, at all six levels, with no per-level tuning.
+     98.4->89.7, 96.3->87.8, 94.0->85.7, 91.9->83.9, 89.2->81.5, 86.5->79.0.
+     0.12 rather than a numeric mirror of 0.10: at 0.10 light's border stays
+     flat at 1.24:1 across the ladder while dark's grows 1.24 -> 1.34. */
+  --color-border:        rgb(10 8 12 / 0.12);   /* 1.30:1 on canvas */
+  --color-border-strong: rgb(10 8 12 / 0.20);   /* 1.57:1 — focused input only */
 
   /* ---- Ink ------------------------------------------------------------
-     Four named roles, not one token faded with opacity. text-muted/50
-     measured 2.71:1 and text-muted/40 measured 2.17:1 — both carried
-     structural labels the user was expected to read, both failed AA.
-     Contrast vs background / surface-2 / surface-3 given per token. */
-  --color-fg:        #f5f4f7;  /* was --color-foreground #fafafa   18.1 / 15.1 / 13.3 */
-  --color-fg-muted:  #bcb9bf;  /* secondary prose, row metadata    10.2 /  8.5 /  7.5 */
-  --color-fg-subtle: #939197;  /* eyebrows, group headers, placeholder  6.4 / 5.3 / 4.7 */
-  --color-fg-faint:  #6a686e;  /* separators only — never on surface-3  3.6 / 3.0 / 2.7 */
+     Solved to mirror dark's CONTRAST RATIOS, not its lightnesses. The ratio is
+     what the role means; the lightness is an accident of which end of the
+     range the canvas sits at. vs background / surface-2 / surface-3. */
+  --color-fg:        #111013;  /* 18.11 / 15.87 / 14.89   dark: 18.1 / 15.1 / 13.3 */
+  --color-fg-muted:  #3f3d42;  /* 10.25 /  8.98 /  8.42   dark: 10.2 /  8.5 /  7.5 */
+  --color-fg-subtle: #5e5b61;  /*  6.38 /  5.59 /  5.24   dark:  6.4 /  5.3 /  4.7 */
+  --color-fg-faint:  #858289;  /*  3.61 /  3.16 /  2.97   separators only,
+                                  still banned on surface-3, same as dark */
 
   /* ---- Accent and semantics -------------------------------------------
-     --color-me points at the accent: #a78bfa and #c084fc were both violet at
-     7.2:1 and 7.5:1, so speaker identity and brand read as the same colour
-     with a rounding error between them. The local speaker is the user, who is
-     the app's primary. One violet (you) against one cyan (them).
-     --color-accent-2 is gone with the wordmark gradient it existed to feed. */
-  --color-accent:  #c084fc;              /* 7.51:1 on background */
-  --color-me:      var(--color-accent);
-  --color-others:  #67e8f9;              /* 13.69:1 */
-  --color-danger:  #f87171;              /* 7.17:1 */
-  --color-success: #4ade80;              /* 11.38:1 */
-  --color-warn:    #fbbf24;              /* model present-but-unverified  11.88:1 */
+     accent and danger are solved to dark's EXACT ratio because both appear as
+     ink. The payoff: `text-background` on `bg-accent` measures 7.51:1 in light
+     and 7.51:1 in dark, so it needs no migration and no `--color-on-accent`.
+     That only holds because the accent was solved rather than eyeballed — at
+     L=58% the ink drops to 4.51:1 with no headroom.
+
+     success/warn/others are fills and dots, so they target 4.5:1 instead:
+     mirroring dark's 11-13:1 would drive them to near-black and destroy the
+     hue that carries the meaning. warn at H=74deg is a burnt amber, not the
+     amber `#fbf24` reads as on black — acceptable ONLY because all three
+     `bg-warn` sites are a dot beside a word. If `warn` ever becomes
+     colour-only, this token has to be revisited. */
+  --color-accent:       #7528ae;  /* 7.51:1 on canvas — dark's #c084fc is also 7.51 */
+  --color-accent-hover: #672399;  /* replaces hover:brightness-110 — see §2.3 */
+  --color-me:           var(--color-accent);   /* alias; follows the override */
+  --color-others:       #00808d;  /* 4.48 / 3.93 / 3.69 */
+  --color-danger:       #ad0024;  /* 7.16:1 — dark's #f87171 is 7.17 */
+  --color-danger-hover: #980020;
+  --color-success:      #008640;  /* 4.47 / 3.92 / 3.68 */
+  --color-warn:         #9f6800;  /* 4.50 / 3.94 / 3.70 */
+
+  /* ---- Scrim and shadow colours ---------------------------------------
+     `bg-background/70` as a modal backdrop is the one class in the app that
+     genuinely INVERTS: 70% of near-white over the page composites a surface-2
+     dialog UP from L=94.0 to L=97.1, so the backdrop brightens what it is
+     meant to suppress and the dialog ends up darker than its own scrim. It
+     cannot be fixed by flipping a value — the token being reused IS the canvas
+     and the canvas is what changes poles. Its own token, whose job is
+     "darken", stated once: light 98.4 -> 73.1 (2.00:1 against the dialog),
+     dark -> 14.0 (1.21:1). The 2x alpha gap is the finding: light has 84pp to
+     fall through, dark has 14pp before the floor.
+
+     The three shadow COLOURS are separate tokens because §2.0 fact 3 means a
+     `--shadow-*` override is ignored. `lift-*` going transparent in dark is
+     what turns the light-only card shadow off without a second selector. */
+  --color-scrim:         rgb(23 20 26 / 0.36);
+  --color-lift-contact:  rgb(36 31 41 / 0.06);
+  --color-lift-cast:     rgb(36 31 41 / 0.14);
+  --color-occlude:       rgb(36 31 41 / 0.28);
 
   /* ---- Radius ---------------------------------------------------------
-     Ceiling 12px. Radius scales with element size: 12px landed on a 288px
-     sidebar row (reads as a bubble) and 16px landed on the dock wrapping a
-     12px button (reads as a pill floating inside a box). rounded-2xl and
-     rounded-3xl are out of the vocabulary; rounded-full stays for dots,
-     meter bars and the recording pill only. */
-  --radius-xs:   0.25rem;   /* 4px   innermost square inside a p-1 shell, checkbox */
-  --radius-sm:   0.375rem;  /* 6px   list rows, tabs, badges, small buttons */
+     Ceiling 12px, unchanged. The content card is 12px and so is the drawer:
+     one radius for large suspended surfaces is what makes them read as one
+     family. rounded-2xl / rounded-3xl stay out of the vocabulary;
+     rounded-full stays for dots, meter bars and the recording pill only. */
+  --radius-xs:   0.25rem;   /* 4px   checkbox, innermost square inside a p-1 shell */
+  --radius-sm:   0.375rem;  /* 6px   list rows, badges, xs buttons, bubble tail corner */
   --radius-md:   0.5rem;    /* 8px   inputs, icon buttons, primary buttons, model rows */
-  --radius-lg:   0.75rem;   /* 12px  cards, dock shell, dialog, drawer, gate balloon */
+  --radius-lg:   0.75rem;   /* 12px  content card, drawer, dialog, dock, bubbles */
 
-  /* ---- Type -----------------------------------------------------------
-     All rem: px text freezes against browser zoom, which scales the root
-     font-size only. Sizes carry their own line-height and letter-spacing, so
-     tracking is structural instead of three hand-written tracking-[...]. */
+  /* ---- Type — unchanged ------------------------------------------------ */
   --text-2xs: 0.6875rem;  --text-2xs--line-height: 1rem;      --text-2xs--letter-spacing: 0em;
   --text-xs:  0.75rem;    --text-xs--line-height: 1.125rem;   --text-xs--letter-spacing: 0em;
   --text-sm:  0.875rem;   --text-sm--line-height: 1.25rem;    --text-sm--letter-spacing: -0.006em;
   --text-base:1rem;       --text-base--line-height: 1.6;      --text-base--letter-spacing: -0.011em;
   --text-lg:  1.125rem;   --text-lg--line-height: 1.4;        --text-lg--letter-spacing: -0.018em;
   --text-xl:  1.375rem;   --text-xl--line-height: 1.25;       --text-xl--letter-spacing: -0.024em;
-  --tracking-eyebrow: 0.02em;   /* uppercase micro-label; replaces tracking-wider (0.05em) */
+  --tracking-eyebrow: 0.02em;
 
   /* ---- Measure --------------------------------------------------------
-     36rem at 16px ≈ 72 characters. max-w-3xl (768px) at 14px ran ~115. */
-  --container-reading: 36rem;
+     Two columns, not one. `reading` is the text measure (~72 chars at 16px)
+     and caps a transcript bubble and the summary prose. `pane` is the card's
+     content column: the meeting header, the tab bar and both panes align on
+     the same two vertical edges instead of a 576px strip floating in a
+     1500px card. */
+  --container-reading: 36rem;   /* 576px */
+  --container-pane:    64rem;   /* 1024px */
 
   --font-sans: "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
 
-  /* ---- Motion, mirrored from lib/motion.ts ----------------------------
-     These two are the theme keys behind every transition-* utility. Without
-     them the CSS transitions in the app ran Tailwind's default 150ms
-     cubic-bezier(0.4,0,0.2,1) while every framer animation ran the tokens —
-     two motion systems in one product. Change a value here and change it
-     there too. */
+  /* ---- Motion, mirrored from lib/motion.ts — unchanged ----------------- */
   --default-transition-duration: 120ms;
   --default-transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-arrival: cubic-bezier(0.16, 1, 0.3, 1);
 
-  /* ---- Focus and occlusion --------------------------------------------
-     The inner ring is --color-background, fixed, never the parent's fill —
-     hand-picking it per call site means every one of them is wrong the moment
-     a surface changes. --shadow-occlude is occlusion, not elevation: it stops
-     scrolling text merging into an element that overlaps it, and it is the
-     only shadow in the app. */
+  /* ---- Shadows --------------------------------------------------------
+     Every colour here is a var(). A `--shadow-*` literal is inlined into the
+     utility at build time and a theme override of the shadow token does
+     nothing; only var() references survive. Verified by compiling.
+
+     `lift` is the content card resting on the chrome — the only elevation
+     shadow in the app, and it exists only in light because its two colours
+     are `transparent` in dark. Both layers blur = 2x offset, straight down,
+     max extent 6px, which is why the card's gutter is 8px.
+     `occlude` is not elevation: it stops scrolling text merging into an
+     element that overlaps it. Its first layer is the same contact colour, so
+     dark gets one layer and light gets two from one token. */
   --shadow-focus:        0 0 0 2px var(--color-background), 0 0 0 4px var(--color-accent);
   --shadow-focus-danger: 0 0 0 2px var(--color-background), 0 0 0 4px var(--color-danger);
-  --shadow-occlude:      0 20px 40px -24px rgb(4 2 8 / 0.85);
+  --shadow-lift:         0 1px 2px 0 var(--color-lift-contact),
+                         0 4px 8px -2px var(--color-lift-cast);
+  --shadow-occlude:      0 1px 2px 0 var(--color-lift-contact),
+                         0 16px 32px -20px var(--color-occlude);
 
   /* ---- Derived geometry, declared not recomputed ----------------------
-     The dock used to be centred with a hand-derived pl-[70px] explained in a
-     five-line comment. Change the gear's padding, its control size or the gap
-     and the dock silently drifts off the screen axis. */
-  --dock-gear-offset: 3.625rem;  /* 58px = 1px border ×2 + 4px pad ×2 + 36px control + 12px gap */
+     The dock's side cells. Both animate to the SAME width off the same
+     variant, which is what keeps Record's centre nailed to the screen axis
+     without a hand-derived offset. 76px = 8px lead gap + 32px control +
+     4px gap + 32px control (the left cell is the wider of the two; the right
+     cell holds the gear right-aligned in the same box).
+     `--dock-gear-offset` is deleted with the old floating gear pill. */
+  --dock-side: 4.75rem;
+}
+
+/* ======================================================================
+   DARK. Unlayered on purpose: an unlayered rule beats every layered one
+   regardless of specificity, so this needs no !important and cannot be
+   broken by a change to the @layer order. Verified by compiling.
+   Only VALUES are reassigned — every name already exists above, which is
+   what keeps the utilities generated. The block contains ONLY tokens whose
+   value is a colour. Radius, type, measure, font, motion and --dock-side are
+   theme-independent; anything non-colour appearing here is a mistake.
+   ====================================================================== */
+:root[data-theme="dark"] {
+  --color-background: #0b090c;
+  --color-surface-1:  #161418;
+  --color-surface-2:  #201e22;
+  --color-surface-3:  #2a282d;
+  --color-hover:      #353338;
+  --color-active:     #403e44;
+
+  --color-row-hover:    rgb(245 244 247 / 0.05);
+  --color-row-selected: rgb(245 244 247 / 0.10);
+
+  --color-border:        rgb(245 244 247 / 0.10);
+  --color-border-strong: rgb(245 244 247 / 0.16);
+
+  --color-fg:        #f5f4f7;
+  --color-fg-muted:  #bcb9bf;
+  --color-fg-subtle: #939197;
+  --color-fg-faint:  #6a686e;
+
+  --color-accent:       #c084fc;
+  --color-accent-hover: #d391ff;   /* what brightness(1.1) already produced */
+  --color-others:       #67e8f9;
+  --color-danger:       #f87171;
+  --color-danger-hover: #ff7c7c;
+  --color-success:      #4ade80;
+  --color-warn:         #fbbf24;
+
+  --color-scrim:        rgb(4 2 8 / 0.78);
+  /* Both transparent: the card's lift is a light-mode device. At a canvas of
+     oklch L=14.4% a darker tint of the same hue resolves to #010002 — there is
+     nowhere for a shadow to go, which is WHY shadows read as dirt on
+     near-black, not merely that they do. */
+  --color-lift-contact: transparent;
+  --color-lift-cast:    transparent;
+  --color-occlude:      rgb(4 2 8 / 0.85);
+}
+
+/* Native controls follow the app, not the OS. Without this, a light app on a
+   dark-mode Windows drops a black <select> popup out of a white drawer — and
+   the drawer has five of them. Safe alongside the ::-webkit-scrollbar rules
+   below; `scrollbar-color` is the property that would kill them, and it is
+   deliberately absent. */
+:root                    { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+/* The theme flip must not animate. The hazard is not a body-level rule —
+   nobody wrote one — it is `--default-transition-duration: 120ms` plus the 26
+   `transition-colors` utilities across the app: flipping the attribute changes
+   background-color, color and border-color on all of them at once and each
+   cross-fades on its own start frame, which reads as the app breaking rather
+   than as a theme changing. `!important` is justified here and only here: it
+   is defeating author transitions wholesale for two frames, which is what
+   `!important` is for. */
+:root[data-theme-switching] *,
+:root[data-theme-switching] *::before,
+:root[data-theme-switching] *::after {
+  transition: none !important;
 }
 
 @layer base {

@@ -45,6 +45,10 @@ export interface AppSettings {
   auto_summarize: boolean;
   language: string;
   ui_locale: string;
+  /** `light` | `dark`. Optional because the field lands with the backend change;
+   *  absent reads as light, which is the product default — so the front end
+   *  behaves correctly on its own until the backend starts keeping it. */
+  theme?: string;
   onboarding_complete: boolean;
   mic_device_id?: string | null;
   system_device_id?: string | null;
