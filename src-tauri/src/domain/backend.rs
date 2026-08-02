@@ -58,39 +58,42 @@ impl BackendSupport {
 /// markedly faster at prompt processing, and prompt processing is what
 /// summarising a long transcript is made of.
 ///
-/// An explicit choice that cannot be honoured falls back to CPU rather than
-/// silently picking the other GPU. Someone who typed `cuda` and got Vulkan would
-/// have no way to tell, and the whole point of the setting is to be able to
-/// pin the answer down — the caller logs what it resolved to.
+/// Only `cpu` pins the processor. A GPU that was asked for and cannot be
+/// reached falls through to the best one that can, because what the setting
+/// names is a way to the card rather than an end in itself: someone whose
+/// stored `cuda` outlived the build that carried it wants their GPU, and
+/// dropping them to the processor makes the app slow for a reason they cannot
+/// see. `resolve_stt_backend` below already worked this way for whisper, and
+/// the two disagreeing was an inconsistency rather than a design.
+///
+/// The substitution is not silent: the caller logs what it resolved to, and
+/// the settings panel shows a stored value this build cannot honour.
 pub fn resolve_backend(preference: &str, support: BackendSupport) -> ComputeBackend {
-    match preference {
-        "cpu" => ComputeBackend::Cpu,
-        "cuda" => {
-            if support.can(ComputeBackend::Cuda) {
-                ComputeBackend::Cuda
-            } else {
-                ComputeBackend::Cpu
-            }
+    // The one answer nothing overrides. It is how someone diagnosing a driver
+    // problem takes the GPU out of the picture.
+    if preference == "cpu" {
+        return ComputeBackend::Cpu;
+    }
+    // `auto`, and anything a future build or a hand-edited row might carry,
+    // name nothing in particular and land straight on the automatic order.
+    // Settings are the user's own file; a typo there should degrade rather than
+    // refuse to transcribe.
+    let wanted = match preference {
+        "cuda" => Some(ComputeBackend::Cuda),
+        "vulkan" => Some(ComputeBackend::Vulkan),
+        _ => None,
+    };
+    if let Some(backend) = wanted {
+        if support.can(backend) {
+            return backend;
         }
-        "vulkan" => {
-            if support.can(ComputeBackend::Vulkan) {
-                ComputeBackend::Vulkan
-            } else {
-                ComputeBackend::Cpu
-            }
-        }
-        // `auto`, and anything a future build or a hand-edited row might carry.
-        // An unknown value must not be a hard error: settings are the user's own
-        // file and a typo there should degrade, not refuse to transcribe.
-        _ => {
-            if support.can(ComputeBackend::Cuda) {
-                ComputeBackend::Cuda
-            } else if support.can(ComputeBackend::Vulkan) {
-                ComputeBackend::Vulkan
-            } else {
-                ComputeBackend::Cpu
-            }
-        }
+    }
+    if support.can(ComputeBackend::Cuda) {
+        ComputeBackend::Cuda
+    } else if support.can(ComputeBackend::Vulkan) {
+        ComputeBackend::Vulkan
+    } else {
+        ComputeBackend::Cpu
     }
 }
 
@@ -106,12 +109,11 @@ pub fn resolve_stt_backend(preference: &str, support: BackendSupport) -> Compute
         cuda_present: false,
         ..support
     };
-    match preference {
-        // An explicit `cuda` is honoured as far as this engine can: the GPU is
-        // there, just reached through the other API.
-        "cuda" => resolve_backend("auto", no_cuda),
-        other => resolve_backend(other, no_cuda),
-    }
+    // No special case for an explicit `cuda` any more. With CUDA struck from
+    // what this engine can do, `resolve_backend` falls through to Vulkan on its
+    // own, for the same reason: the GPU is there, just reached through the
+    // other API.
+    resolve_backend(preference, no_cuda)
 }
 
 /// What this build was compiled with.
@@ -166,15 +168,32 @@ mod tests {
         assert_eq!(resolve_backend("cpu", nvidia()), ComputeBackend::Cpu);
     }
 
-    /// Asking for CUDA on an AMD card falls to CPU, not quietly to Vulkan: a
-    /// silent substitution is indistinguishable from the setting working.
+    /// Asking for CUDA on an AMD card takes Vulkan. The setting names a way to
+    /// the card and the card is there, so dropping to the CPU would answer a
+    /// question nobody asked.
     #[test]
-    fn an_impossible_choice_falls_to_cpu_not_to_the_other_gpu() {
-        assert_eq!(resolve_backend("cuda", amd()), ComputeBackend::Cpu);
+    fn an_impossible_choice_takes_the_other_gpu_not_the_cpu() {
+        assert_eq!(resolve_backend("cuda", amd()), ComputeBackend::Vulkan);
         assert_eq!(
             resolve_backend("vulkan", nvidia()),
             ComputeBackend::Vulkan,
             "vulkan is possible on nvidia and must be honoured"
+        );
+    }
+
+    /// The exact shape this shipped with: `cuda` stored by an older build, on a
+    /// machine whose card is real and whose current binary carries Vulkan only.
+    #[test]
+    fn a_stored_cuda_on_a_vulkan_build_still_uses_the_gpu() {
+        let vulkan_build = BackendSupport {
+            cuda_built: false,
+            vulkan_built: true,
+            cuda_present: false,
+            vulkan_present: true,
+        };
+        assert_eq!(
+            resolve_backend("cuda", vulkan_build),
+            ComputeBackend::Vulkan
         );
     }
 
@@ -190,6 +209,7 @@ mod tests {
         };
         assert_eq!(resolve_backend("auto", driver_only), ComputeBackend::Cpu);
         assert_eq!(resolve_backend("cuda", driver_only), ComputeBackend::Cpu);
+        assert_eq!(resolve_backend("vulkan", driver_only), ComputeBackend::Cpu);
     }
 
     /// Whisper never gets CUDA, because a whisper built with it will not start
