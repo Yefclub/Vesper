@@ -58,6 +58,19 @@ SSE4.2 to AVX-512, picked at startup. The libraries are staged by `build.rs`
 into `src-tauri/gpu-backends/` and shipped as bundle resources, which on
 Windows puts them beside the executable — where ggml looks for them.
 
+Shared libraries are Windows-only. The symbol collision they solve is an MSVC
+link error; every other linker takes the first definition out of the archive.
+It matters for what ships: a `.so` beside a Linux binary is not on the loader
+path, since Tauri installs resources under `/usr/lib/Vesper` while the
+executable lives in `/usr/bin`. Linux and macOS therefore link statically, and
+`gpu-vulkan` compiles Vulkan straight into the binary there.
+
+**What the release actually carries today**: Vulkan on Windows and Linux, CPU
+on macOS. `gpu-cuda` builds and is wired end to end, but nothing publishes it
+— it needs the CUDA toolkit on the runner and the cuBLAS redistributables in
+the installer, which is a decision about installer size, not a missing piece
+of code.
+
 ## Data
 
 `%APPDATA%/Vesper` (or OS equivalent): `vesper.db`, `recordings/`, `models/`.

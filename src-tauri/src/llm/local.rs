@@ -12,6 +12,7 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::TokenToStringError;
 use parking_lot::Mutex;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -43,7 +44,7 @@ fn backend() -> Result<&'static LlamaBackend, String> {
 ///
 /// Loading nothing here does not fall back to a slow CPU path — there would be
 /// no CPU backend either, and every model load would fail.
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-vulkan"))]
+#[cfg(all(windows, any(feature = "gpu-cuda", feature = "gpu-vulkan")))]
 fn load_ggml_backends() {
     use llama_cpp_2::llama_backend::{load_backends_from_path, BACKENDS_DIR};
 
@@ -65,7 +66,7 @@ fn load_ggml_backends() {
 /// Probing for a CPU variant and not for `ggml-vulkan`: the CPU ones are always
 /// built when dynamic backends are on, so their absence means the directory is
 /// the wrong one rather than that the machine has no GPU.
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-vulkan"))]
+#[cfg(all(windows, any(feature = "gpu-cuda", feature = "gpu-vulkan")))]
 fn holds_a_backend(dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
@@ -79,7 +80,7 @@ fn holds_a_backend(dir: &Path) -> bool {
 }
 
 /// Backends are linked in, so there is nothing to find.
-#[cfg(not(any(feature = "gpu-cuda", feature = "gpu-vulkan")))]
+#[cfg(not(all(windows, any(feature = "gpu-cuda", feature = "gpu-vulkan"))))]
 fn load_ggml_backends() {}
 
 /// What this machine offers, asked of ggml rather than guessed at.
@@ -192,10 +193,11 @@ fn load_model(
     backend: &LlamaBackend,
     model_path: &Path,
     chosen: ComputeBackend,
-) -> Result<LlamaModel, String> {
+) -> Result<(LlamaModel, ComputeBackend), String> {
     let cpu = || {
         LlamaModel::load_from_file(backend, model_path, &LlamaModelParams::default())
             .map_err(|e| format!("llama load failed: {e}"))
+            .map(|model| (model, ComputeBackend::Cpu))
     };
     if !chosen.is_gpu() {
         return cpu();
@@ -203,7 +205,7 @@ fn load_model(
     match LlamaModel::load_from_file(backend, model_path, &gpu_params(chosen)?) {
         Ok(model) => {
             tracing::info!("local LLM offloaded to {}", chosen.as_str());
-            Ok(model)
+            Ok((model, chosen))
         }
         Err(e) => {
             tracing::warn!(
@@ -333,6 +335,24 @@ impl Default for LocalLlm {
     }
 }
 
+/// The bytes of one token, whatever its length.
+///
+/// `token_to_piece_bytes` writes into a buffer the caller sizes and returns an
+/// error rather than a truncation when the piece does not fit. 32 bytes covers
+/// ordinary text, but a single token can legitimately be longer — a long CJK
+/// run, an emoji sequence — and losing the rest of a summary to one of them is
+/// not a trade worth making. The failure carries the size that would have
+/// worked, so the second attempt is exact rather than a guess.
+fn piece(model: &LlamaModel, token: llama_cpp_2::token::LlamaToken) -> Result<Vec<u8>, String> {
+    match model.token_to_piece_bytes(token, 32, false, None) {
+        Ok(bytes) => Ok(bytes),
+        Err(TokenToStringError::InsufficientBufferSpace(needed)) => model
+            .token_to_piece_bytes(token, needed.unsigned_abs() as usize, false, None)
+            .map_err(|e| format!("llama detokenize: {e}")),
+        Err(e) => Err(format!("llama detokenize: {e}")),
+    }
+}
+
 /// Real llama.cpp generation — loads GGUF and samples tokens.
 ///
 /// `backend_preference` is the user's `compute_backend` setting verbatim; what
@@ -371,8 +391,14 @@ pub fn run_llama(
         // on a machine that just about fits one, holding both is the difference
         // between working and being killed.
         *cache = None;
-        let model = load_model(backend, model_path, chosen)?;
-        *cache = Some((key, model));
+        let (model, actual) = load_model(backend, model_path, chosen)?;
+        // Keyed by where the weights actually went. A GPU load that failed on a
+        // busy card and fell back would otherwise sit under the GPU key for the
+        // rest of the process, so the card freeing up would never be noticed.
+        *cache = Some((
+            format!("{}#{}", model_path.display(), actual.as_str()),
+            model,
+        ));
     }
     let model = &cache.as_ref().expect("just loaded").1;
 
@@ -394,6 +420,12 @@ pub fn run_llama(
             n_ctx
         ));
     }
+    // What is left of the window after the prompt. A long prompt that still fits
+    // gets a shorter answer; asking for the full `max_tokens` anyway would run
+    // off the end of the context and fail the decode mid-sentence, which reads
+    // as the model breaking rather than as the transcript being long.
+    let room = n_ctx as usize - tokens.len();
+    let max_tokens = max_tokens.min(room);
 
     let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx));
     let mut ctx = model
@@ -426,11 +458,7 @@ pub fn run_llama(
             break;
         }
         sampler.accept(token);
-        out.extend_from_slice(
-            &model
-                .token_to_piece_bytes(token, 32, false, None)
-                .map_err(|e| format!("llama detokenize: {e}"))?,
-        );
+        out.extend_from_slice(&piece(model, token)?);
         batch.clear();
         batch
             .add(token, tokens.len() as i32 + step as i32, &[0], true)

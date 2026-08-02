@@ -105,17 +105,48 @@ fn library_dirs() -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(&build_root) else {
         return Vec::new();
     };
-    let mut dirs = Vec::new();
+
+    // One profile directory holds a `llama-cpp-sys-2-<hash>` output per feature
+    // set ever built there, and they all look alike from here. Picking by
+    // timestamp does not work: a cached build leaves its directory untouched, so
+    // a CPU-only package built after a GPU one would inherit `ggml-vulkan` and
+    // ship a backend it was never linked for.
+    //
+    // The features this build was asked for are the discriminator, and cargo
+    // hands them over directly.
+    let want_vulkan = std::env::var_os("CARGO_FEATURE_GPU_VULKAN").is_some();
+    let want_cuda = std::env::var_os("CARGO_FEATURE_GPU_CUDA").is_some();
+
+    let mut chosen = None;
     for entry in entries.flatten() {
-        let out = entry.path().join("out");
-        for name in ["bin", "backends"] {
-            let candidate = out.join(name);
-            if holds_ggml(&candidate) {
-                dirs.push(candidate);
-            }
+        let path = entry.path();
+        let is_llama = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("llama-cpp-sys-2-"));
+        if !is_llama || !holds_ggml(&path.join("out").join("bin")) {
+            continue;
+        }
+        let backends = path.join("out").join("backends");
+        if holds_prefix(&backends, "ggml-vulkan") == want_vulkan
+            && holds_prefix(&backends, "ggml-cuda") == want_cuda
+        {
+            chosen = Some(path);
+            break;
         }
     }
-    dirs
+
+    let Some(chosen) = chosen else {
+        // Not fatal on its own: a build with no GPU feature and no shared
+        // libraries has nothing to stage, and `BACKENDS.txt` will say so.
+        return Vec::new();
+    };
+    let out = chosen.join("out");
+    ["bin", "backends"]
+        .into_iter()
+        .map(|name| out.join(name))
+        .filter(|dir| holds_ggml(dir))
+        .collect()
 }
 
 /// Whether a directory is one of ggml's own output directories.
@@ -124,6 +155,12 @@ fn library_dirs() -> Vec<PathBuf> {
 /// libraries exist depends on the features, and the point here is only to
 /// avoid picking up some unrelated crate's build output.
 fn holds_ggml(path: &Path) -> bool {
+    holds_prefix(path, "ggml")
+}
+
+/// By prefix and not by full name, because the extension is `.dll`, `.so` or
+/// `.dylib` depending on where this runs.
+fn holds_prefix(path: &Path, prefix: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(path) else {
         return false;
     };
@@ -131,6 +168,6 @@ fn holds_ggml(path: &Path) -> bool {
         entry
             .file_name()
             .to_str()
-            .is_some_and(|name| name.starts_with("ggml"))
+            .is_some_and(|name| name.starts_with(prefix))
     })
 }
