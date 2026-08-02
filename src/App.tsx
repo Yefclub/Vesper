@@ -864,17 +864,37 @@ function AppShell({
                       <motion.div
                         key="summary"
                         {...fadeRise}
-                        className="mx-auto max-w-reading space-y-6"
+                        className="mx-auto max-w-pane"
                         data-testid="summary-panel"
                       >
                         {selected.summary ||
                         selected.key_points ||
                         selected.action_items ? (
-                          <>
-                            <Section title={t("section.summary")} body={selected.summary || "—"} />
-                            <Section title={t("section.key_points")} body={selected.key_points || "—"} />
-                            <Section title={t("section.action_items")} body={selected.action_items || "—"} />
-                          </>
+                          // Three sections, two kinds of content: one is prose
+                          // that needs a measure, two are lists that do not.
+                          // `xl:` and not `lg:` because the grid measures the
+                          // viewport while the card is ~312px narrower — at
+                          // 1024px the right column would resolve to 130px.
+                          // Below the breakpoint it stacks, summary first.
+                          <div className="grid gap-6 xl:grid-cols-[minmax(0,36rem)_minmax(18rem,1fr)]">
+                            {/* Prose gets the reading measure and no box:
+                                boxing it is what makes the product's headline
+                                output read as a widget instead of as the
+                                answer. */}
+                            <section>
+                              <h2 className="mb-2 text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+                                {t("section.summary")}
+                              </h2>
+                              <Markdown text={selected.summary || "—"} />
+                            </section>
+                            {/* The two lists become a right-hand rail and keep
+                                the box — that is what makes short lines
+                                scannable blocks rather than more prose. */}
+                            <div className="space-y-6">
+                              <Section title={t("section.key_points")} body={selected.key_points || "—"} />
+                              <Section title={t("section.action_items")} body={selected.action_items || "—"} />
+                            </div>
+                          </div>
                         ) : (
                           // Three cards each holding one em-dash and nothing to
                           // act on is an empty state. This renders it as one.
