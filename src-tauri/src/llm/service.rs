@@ -24,10 +24,12 @@ impl LlmService {
         template: SummaryTemplate,
     ) -> Result<MeetingInsights, String> {
         match settings.llm_provider {
-            LlmProvider::Local => {
-                self.local
-                    .summarize(transcript, template, &settings.local_llm_model)
-            }
+            LlmProvider::Local => self.local.summarize(
+                transcript,
+                template,
+                settings.locale(),
+                &settings.local_llm_model,
+            ),
             LlmProvider::OpenRouter => {
                 settings
                     .require_openrouter_key()
@@ -38,6 +40,7 @@ impl LlmService {
                         &settings.openrouter_llm_model,
                         transcript,
                         template,
+                        settings.locale(),
                         settings.reasoning_enabled,
                     )
                     .await

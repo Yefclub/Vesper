@@ -1,3 +1,4 @@
+use crate::domain::i18n::Locale;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -132,11 +133,32 @@ enum Section {
     ActionItems,
 }
 
+/// The language the model is told to write in, named in English.
+///
+/// It lives here rather than on `Locale` because it is prompt text, not UI
+/// copy: an English system prompt asking the model to "responda em Inglês" is
+/// worse than one asking it to "answer in English", and a translated entry in
+/// the i18n dictionaries would be a key no screen ever renders.
+pub fn language_name(locale: Locale) -> &'static str {
+    match locale {
+        Locale::En => "English",
+        Locale::PtBr => "Brazilian Portuguese",
+    }
+}
+
 /// Build the user prompt for summarization from a transcript + template.
-pub fn build_summary_prompt(template: SummaryTemplate, transcript: &str) -> String {
+///
+/// The prose follows the app's locale; the three markdown headings do not.
+/// They are a wire protocol: `MeetingInsights::from_model_text` switches
+/// sections on `## summary` / `## key` / `## action`, so a model that answers
+/// with `## Resumo` / `## Pontos principais` / `## Ações` collapses the whole
+/// answer into `summary` and persists two empty vectors. The headings are never
+/// shown — the cards title themselves from the catalog.
+pub fn build_summary_prompt(template: SummaryTemplate, transcript: &str, locale: Locale) -> String {
     format!(
-        "{}\n\nRespond in markdown with sections:\n## Summary\n## Key points\n## Action items\n\nTranscript:\n{}",
+        "{}\n\nRespond in markdown with sections:\n## Summary\n## Key points\n## Action items\n\nWrite all prose in {}.\nKeep the three headings exactly as written, in English: ## Summary, ## Key points, ## Action items.\n\nTranscript:\n{}",
         template.system_prompt(),
+        language_name(locale),
         transcript.trim()
     )
 }
@@ -210,9 +232,48 @@ We discussed the roadmap.
 
     #[test]
     fn template_prompt_includes_transcript() {
-        let p = build_summary_prompt(SummaryTemplate::Standup, "Me: done with API");
+        let p = build_summary_prompt(SummaryTemplate::Standup, "Me: done with API", Locale::En);
         assert!(p.contains("standup") || p.contains("Standup") || p.contains("done with API"));
         assert!(p.contains("done with API"));
+    }
+
+    #[test]
+    fn a_portuguese_locale_asks_for_portuguese_prose() {
+        let p = build_summary_prompt(SummaryTemplate::General, "Me: bom dia", Locale::PtBr);
+        assert!(p.contains("Write all prose in Brazilian Portuguese."));
+    }
+
+    #[test]
+    fn the_markdown_headings_stay_english_in_every_locale() {
+        for locale in [Locale::En, Locale::PtBr] {
+            let p = build_summary_prompt(SummaryTemplate::General, "Me: hi", locale);
+            assert!(p.contains("## Summary"));
+            assert!(p.contains("## Key points"));
+            assert!(p.contains("## Action items"));
+            assert!(p.contains("Keep the three headings exactly as written, in English"));
+        }
+    }
+
+    #[test]
+    fn sections_still_parse_when_the_body_is_portuguese() {
+        // What the model answers once it is told to write in Portuguese and to
+        // keep the headings. Lose the second half of that instruction and every
+        // branch below misses, the whole answer lands in `summary`, and two
+        // empty vectors get persisted.
+        let raw = r#"
+## Summary
+Discutimos o roadmap do trimestre.
+## Key points
+- Enviar a v1
+- Contratações
+## Action items
+- Alice redige o RFC
+- Bob revisa as métricas
+"#;
+        let i = MeetingInsights::from_model_text(raw);
+        assert!(i.summary.contains("roadmap"));
+        assert_eq!(i.key_points.len(), 2);
+        assert_eq!(i.action_items.len(), 2);
     }
 
     #[test]
