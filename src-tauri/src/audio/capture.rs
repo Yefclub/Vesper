@@ -215,6 +215,15 @@ impl DualChannelRecorder {
                     inner_mic.lock().mic_samples.extend_from_slice(&pcm);
                 }
                 stream.stop();
+                // And once more after the join. The intake worker can have read
+                // `paused == false` and enqueued one last chunk between the sweep
+                // above and the pause taking effect; `stop()` joins it without
+                // discarding the queue, so that chunk is still there to take.
+                // Costs nothing when there is nothing: `poll_chunk` answers None.
+                while let Some(chunk) = stream.poll_chunk() {
+                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                }
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
 
@@ -303,6 +312,11 @@ impl DualChannelRecorder {
                     inner_sys.lock().sys_samples.extend_from_slice(&pcm);
                 }
                 stream.stop();
+                // And once more after the join — see the mic thread above.
+                while let Some(chunk) = stream.poll_chunk() {
+                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                }
                 inner_sys.lock().system_loopback_active = false;
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
