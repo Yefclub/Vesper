@@ -503,7 +503,7 @@ function AppShell({
 
 
   return (
-    <div className="flex h-full bg-background text-fg">
+    <div className="flex h-full flex-col bg-background text-fg">
       {showOnboarding && (
         <Onboarding
           settings={settings}
@@ -518,349 +518,385 @@ function AppShell({
         />
       )}
 
-      <Sidebar
-        meetings={meetings}
-        selectedId={selectedId}
-        query={query}
-        hits={hits}
-        loading={!meetingsLoaded}
-        searching={searching}
-        onSearch={handleSearch}
-        onSelect={loadMeeting}
-        onDelete={(id) => setPendingDelete(meetings.find((m) => m.id === id) ?? null)}
-        onImport={handleImport}
-        onNew={startNewMeeting}
-      />
+      {/* Window chrome. It spans the sidebar and the content, and it is the
+          canvas: no fill of its own, and no border either — the 8px gutter
+          around the card below is the separation, and a hairline 8px from the
+          card's own border is two hard divides in a row.
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        {/* Three columns, not flex with mx-auto. In a flex row `mx-auto` centres an
-            item between its siblings, so an identity block wider than the actions
-            block pushed the record control off-centre — and it moved again
-            whenever the recording state changed the width of either side. The
-            centre column is now anchored to the header, and its contents can grow
-            and shrink without dragging anything with them. The height is fixed
-            for the same reason: the transport is the widest thing that lands in
-            the centre column, and it must not be able to grow the header. */}
-        <header className="grid h-14 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 border-b border-border bg-background px-6">
-          <div className="flex items-center gap-2">
-            <img src={logo} alt="" className="h-8 w-8 rounded-md" />
-            {/* Flat, not a gradient: the gradient made the brightest, most
-                saturated thing on screen a piece of chrome the user cannot act
-                on, and it was the only reason --color-accent-2 existed. */}
-            <span className="text-lg font-semibold text-fg">{t("app.name")}</span>
-          </div>
+          `data-tauri-drag-region` goes on this element and on no child: Tauri's
+          handler tests `event.target`, so a click on a button inside is not a
+          drag, and its built-in double-click-to-maximise is the Windows
+          behaviour to inherit rather than reimplement.
 
-          {/* Centre column: the transport for a recording in progress. It used
-              to be a badge that only said "Recording" while Stop lived in the
-              dock — which is on the empty screen, and starting a recording
-              leaves that screen. The controls follow the state they control. */}
-          <div className="flex items-center justify-center">
-            <AnimatePresence>
-              {status?.recording && (
-                <motion.div key="transport" {...fadeRise}>
-                  <RecordTransport
-                    status={status}
-                    busy={busy}
-                    onStop={handleStop}
-                    onPauseResume={handlePauseResume}
-                  />
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
+          48px, not 56: the row has to fit an `h-8` control with 8px of
+          clearance, and 48 plus the card's 8px gutter is the same chrome
+          budget the `h-14` header was already spending.
 
-          <div className="flex items-center justify-end gap-3">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setShowSettings(true)}
-              title={t("nav.settings")}
-              aria-label={t("nav.settings")}
-            >
-              <Settings size={16} />
-            </Button>
-          </div>
-        </header>
+          Three columns, not flex with mx-auto. In a flex row `mx-auto` centres
+          an item between its siblings, so an identity block wider than the
+          actions block pushed the record control off-centre — and it moved
+          again whenever the recording state changed the width of either side.
+          The centre column is anchored to the header, and its contents can
+          grow and shrink without dragging anything with them. The height is
+          fixed for the same reason: the transport is the widest thing that
+          lands in the centre column, and it must not be able to grow the
+          header. */}
+      <header
+        data-tauri-drag-region
+        className="grid h-12 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 pl-4 pr-2"
+      >
+        <div className="flex items-center gap-2">
+          <img src={logo} alt="" className="h-8 w-8 rounded-md" />
+          {/* Flat, not a gradient: the gradient made the brightest, most
+              saturated thing on screen a piece of chrome the user cannot act
+              on, and it was the only reason --color-accent-2 existed. */}
+          <span className="text-lg font-semibold text-fg">{t("app.name")}</span>
+        </div>
 
-        {error && (
-          <div className="border-b border-danger/30 bg-danger/10 px-6 py-2 text-sm text-danger">
-            {error}
-            <Button variant="link" className="ml-3" onClick={() => setError(null)}>
-              {t("action.dismiss")}
-            </Button>
-          </div>
-        )}
-        {pendingUpdate && (
-          <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
-            <span>{t("update.available").replace("{version}", pendingUpdate.version)}</span>
-            <Button
-              size="xs"
-              data-testid="update-install"
-              onClick={async () => {
-                const update = pendingUpdate;
-                setPendingUpdate(null);
-                try {
-                  setUpdateNote(t("update.installing"));
-                  await update.downloadAndInstall();
-                  setUpdateNote(t("update.relaunching"));
-                  await relaunch();
-                } catch (e) {
-                  setUpdateNote(null);
-                  setError(String(e));
-                  // The check only runs once, on mount. Without putting the offer
-                  // back, a failed download means no retry until the app restarts.
-                  setPendingUpdate(update);
-                }
-              }}
-            >
-              {t("update.install")}
-            </Button>
-            <Button variant="link" onClick={() => setPendingUpdate(null)}>
-              {t("update.later")}
-            </Button>
-          </div>
-        )}
-        {updateNote && (
-          <div className="border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
-            {updateNote}
-          </div>
-        )}
-
-        <div className="relative flex min-h-0 flex-1 flex-col">
-          {selected ? (
-            <>
-              <div className="flex items-center justify-between border-b border-border px-6 py-3">
-                <div>
-                  <h1 className="text-base font-medium">{selected.title}</h1>
-                  <p className="text-xs text-fg-muted">
-                    {selected.status} · {formatDuration(selected.duration_ms)}
-                  </p>
-                </div>
-                {/* Five siblings used to read as five equal actions. Summarize
-                    is the one primary; MD/PDF/DOCX are one action with a format
-                    parameter, so they sit inside a single bordered group.
-                    The inset is horizontal only: a `p-1` shell would stand 34px
-                    tall between two 24px chips, and a group that is half again
-                    the height of its neighbours reads as a different tier of
-                    control rather than a bracket around three of them. */}
-                <div className="flex items-center gap-2">
-                  <Button size="xs" onClick={() => handleSummarize("general")}>
-                    <Sparkles size={16} /> {t("action.summarize")}
-                  </Button>
-                  <div className="flex items-center gap-1 rounded-md border border-border px-1">
-                    {(["md", "pdf", "docx"] as const).map((format) => (
-                      <Button
-                        key={format}
-                        size="xs"
-                        variant="ghost"
-                        onClick={() => handleExport(format)}
-                      >
-                        {format.toUpperCase()}
-                      </Button>
-                    ))}
-                  </div>
-                  <Button
-                    size="xs"
-                    variant="secondary"
-                    onClick={() =>
-                      selectedId &&
-                      api.retranscribe(selectedId).then((m) => loadMeeting(m.id))
-                    }
-                  >
-                    <FileAudio size={16} /> {t("action.retranscribe")}
-                  </Button>
-                </div>
-              </div>
-
-              <Tabs
-                idPrefix="content"
-                className="px-6"
-                value={tab}
-                onChange={setTab}
-                items={[
-                  { id: "transcript", label: t("tab.transcript") },
-                  { id: "summary", label: t("tab.summary") },
-                ]}
-              />
-
-              {/* The scroll container is the tab panel: the two panes swap
-                  inside it, so the id follows the selected tab rather than
-                  living on a pane that unmounts. */}
-              <div
-                ref={scrollRef}
-                onScroll={handleContentScroll}
-                data-scroll
-                id={`content-panel-${tab}`}
-                role="tabpanel"
-                aria-labelledby={`content-tab-${tab}`}
-                className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-4"
-              >
-                <AnimatePresence mode="wait">
-                  {tab === "transcript" && (
-                    <motion.div
-                      key="transcript"
-                      ref={pinOnPaneMount}
-                      {...fadeRise}
-                      className="mx-auto max-w-reading"
-                      data-testid="transcript-panel"
-                    >
-                      {transcript.segments?.length ? (
-                        // `initial={false}` so opening a past meeting does not
-                        // blur-and-fade three hundred rows at once: only the
-                        // segments that land after the pane is up animate, which
-                        // is the handful per minute `segmentArrive` is sized for.
-                        <AnimatePresence initial={false}>
-                          {transcript.segments.map((s, i) => {
-                            // A run of consecutive lines from one speaker is one
-                            // utterance: it carries a single timestamp and a
-                            // single name, and only the gap says where it ends.
-                            const opens =
-                              i === 0 ||
-                              transcript.segments[i - 1].speaker !== s.speaker;
-                            return (
-                              <motion.div
-                                key={s.id}
-                                {...segmentArrive}
-                                className={`flex gap-4 ${
-                                  i === 0 ? "" : opens ? "mt-4" : "mt-1"
-                                }`}
-                              >
-                                <span className="w-14 shrink-0 tabular-nums text-2xs text-fg-faint">
-                                  {opens ? formatDuration(s.start_ms) : ""}
-                                </span>
-                                <span
-                                  aria-hidden
-                                  className={`w-0.5 shrink-0 self-stretch rounded-full ${
-                                    s.speaker === "me" ? "bg-accent" : "bg-others"
-                                  }`}
-                                />
-                                <div className="min-w-0 flex-1">
-                                  {opens && (
-                                    <div className="text-2xs text-fg-subtle">
-                                      {s.speaker === "me"
-                                        ? t("speaker.me")
-                                        : t("speaker.others")}
-                                    </div>
-                                  )}
-                                  <p className="text-base leading-relaxed">{s.text}</p>
-                                </div>
-                              </motion.div>
-                            );
-                          })}
-                        </AnimatePresence>
-                      ) : (
-                        <Empty
-                          icon={<AudioLinesIcon size={22} />}
-                          title={t("empty.transcript")}
-                          body={t("empty.transcript_body")}
-                          action={
-                            <Button
-                              size="md"
-                              variant="secondary"
-                              onClick={handleImport}
-                              disabled={busy}
-                            >
-                              {t("nav.import")}
-                            </Button>
-                          }
-                        />
-                      )}
-                    </motion.div>
-                  )}
-
-                  {tab === "summary" && (
-                    <motion.div
-                      key="summary"
-                      {...fadeRise}
-                      className="mx-auto max-w-reading space-y-6"
-                      data-testid="summary-panel"
-                    >
-                      {selected.summary ||
-                      selected.key_points ||
-                      selected.action_items ? (
-                        <>
-                          <Section title={t("section.summary")} body={selected.summary || "—"} />
-                          <Section title={t("section.key_points")} body={selected.key_points || "—"} />
-                          <Section title={t("section.action_items")} body={selected.action_items || "—"} />
-                        </>
-                      ) : (
-                        // Three cards each holding one em-dash and nothing to
-                        // act on is an empty state. This renders it as one.
-                        <Empty
-                          icon={<Sparkles size={22} />}
-                          title={t("empty.summary")}
-                          body={t("empty.summary_body")}
-                          action={
-                            <Button
-                              size="md"
-                              onClick={() => handleSummarize("general")}
-                              disabled={busy}
-                            >
-                              <Sparkles size={16} /> {t("action.summarize")}
-                            </Button>
-                          }
-                        />
-                      )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            </>
-          ) : (
-            <div className="flex flex-1 items-center justify-center p-8">
-              <Empty
-                icon={<MicIcon size={22} />}
-                title={t("empty.ready")}
-                body={t("empty.ready_body")}
-                action={
-                  // No Record here. The dock at the foot of this same screen is
-                  // the record button — putting a second one in the middle gave
-                  // the empty screen two primary actions that do the same thing,
-                  // eight hundred pixels apart. The shortcut still belongs here,
-                  // where there is room to name it.
-                  <div className="flex items-center justify-center gap-3">
-                    <Button
-                      size="md"
-                      variant="secondary"
-                      onClick={handleImport}
-                      disabled={busy}
-                    >
-                      {t("nav.import")}
-                    </Button>
-                    {!status?.recording && (
-                      <span className="flex items-center gap-2 text-2xs text-fg-subtle">
-                        {t("record.start")}
-                        <kbd className="inline-flex h-6 items-center rounded-xs border border-border bg-surface-2 px-2 font-sans text-2xs">
-                          {RECORD_SHORTCUT}
-                        </kbd>
-                      </span>
-                    )}
-                  </div>
-                }
-              />
-            </div>
-          )}
-
-          {/* The empty screen only. With a meeting open the transcript and the
-              summary own this column, and a Record button hanging over them
-              offers to start a second recording on top of the one the header is
-              already showing. */}
+        {/* Centre column: the transport for a recording in progress. It used
+            to be a badge that only said "Recording" while Stop lived in the
+            dock — which is on the empty screen, and starting a recording
+            leaves that screen. The controls follow the state they control. */}
+        <div className="flex items-center justify-center">
           <AnimatePresence>
-            {!selected && !status?.recording && (
-              <RecordDock
-                key="dock"
-                gate={gate}
-                busy={busy}
-                devices={devices}
-                micDeviceId={settings.mic_device_id}
-                systemDeviceId={settings.system_device_id}
-                onStart={requestStart}
-                onOpenSettings={() => setShowSettings(true)}
-              />
+            {status?.recording && (
+              <motion.div key="transport" {...fadeRise}>
+                <RecordTransport
+                  status={status}
+                  busy={busy}
+                  onStop={handleStop}
+                  onPauseResume={handlePauseResume}
+                />
+              </motion.div>
             )}
           </AnimatePresence>
         </div>
-      </main>
+
+        <div className="flex items-center justify-end gap-3">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setShowSettings(true)}
+            title={t("nav.settings")}
+            aria-label={t("nav.settings")}
+          >
+            <Settings size={16} />
+          </Button>
+        </div>
+      </header>
+
+      <div className="flex min-h-0 flex-1">
+        <Sidebar
+          meetings={meetings}
+          selectedId={selectedId}
+          query={query}
+          hits={hits}
+          loading={!meetingsLoaded}
+          searching={searching}
+          onSearch={handleSearch}
+          onSelect={loadMeeting}
+          onDelete={(id) => setPendingDelete(meetings.find((m) => m.id === id) ?? null)}
+          onImport={handleImport}
+          onNew={startNewMeeting}
+        />
+
+        <main className="flex min-w-0 flex-1 flex-col">
+          {/* THE CARD. One JSX element and not a component, because it has
+              exactly one consumer. `overflow-hidden` clips its own descendants
+              into the 12px corners — the banners' full-bleed borders, the
+              scroller, the dock — while `<main>` above must NOT clip, or the
+              light-mode lift shadow has nowhere to go. The `m-2` gutter is
+              symmetric on four sides and sized to contain that shadow, whose
+              maximum extent is 6px. */}
+          <div className="relative m-2 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-surface-1 shadow-lift">
+            {/* The card's first children, not a strip on the canvas above it:
+                out there they would run the full window width and break the
+                card's top alignment. In here the radius clips them and they
+                read at content level. */}
+            {error && (
+              <div className="border-b border-danger/30 bg-danger/10 px-6 py-2 text-sm text-danger">
+                {error}
+                <Button variant="link" className="ml-3" onClick={() => setError(null)}>
+                  {t("action.dismiss")}
+                </Button>
+              </div>
+            )}
+            {pendingUpdate && (
+              <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
+                <span>{t("update.available").replace("{version}", pendingUpdate.version)}</span>
+                <Button
+                  size="xs"
+                  data-testid="update-install"
+                  onClick={async () => {
+                    const update = pendingUpdate;
+                    setPendingUpdate(null);
+                    try {
+                      setUpdateNote(t("update.installing"));
+                      await update.downloadAndInstall();
+                      setUpdateNote(t("update.relaunching"));
+                      await relaunch();
+                    } catch (e) {
+                      setUpdateNote(null);
+                      setError(String(e));
+                      // The check only runs once, on mount. Without putting the offer
+                      // back, a failed download means no retry until the app restarts.
+                      setPendingUpdate(update);
+                    }
+                  }}
+                >
+                  {t("update.install")}
+                </Button>
+                <Button variant="link" onClick={() => setPendingUpdate(null)}>
+                  {t("update.later")}
+                </Button>
+              </div>
+            )}
+            {updateNote && (
+              <div className="border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
+                {updateNote}
+              </div>
+            )}
+
+            {selected ? (
+              <>
+                {/* `max-w-pane` (1024px) is the card's content column. The
+                    meeting header and the tab bar bound to it so the rules they
+                    carry stop on the same two vertical edges, instead of running
+                    to the card's own border and putting a full-width divide
+                    inside a rounded corner. */}
+                <div className="mx-auto flex w-full max-w-pane items-center justify-between border-b border-border px-6 py-3">
+                  <div>
+                    <h1 className="text-base font-medium">{selected.title}</h1>
+                    <p className="text-xs text-fg-muted">
+                      {selected.status} · {formatDuration(selected.duration_ms)}
+                    </p>
+                  </div>
+                  {/* Five siblings used to read as five equal actions. Summarize
+                      is the one primary; MD/PDF/DOCX are one action with a format
+                      parameter, so they sit inside a single bordered group.
+                      The inset is horizontal only: a `p-1` shell would stand 34px
+                      tall between two 24px chips, and a group that is half again
+                      the height of its neighbours reads as a different tier of
+                      control rather than a bracket around three of them. */}
+                  <div className="flex items-center gap-2">
+                    <Button size="xs" onClick={() => handleSummarize("general")}>
+                      <Sparkles size={16} /> {t("action.summarize")}
+                    </Button>
+                    <div className="flex items-center gap-1 rounded-md border border-border px-1">
+                      {(["md", "pdf", "docx"] as const).map((format) => (
+                        <Button
+                          key={format}
+                          size="xs"
+                          variant="ghost"
+                          onClick={() => handleExport(format)}
+                        >
+                          {format.toUpperCase()}
+                        </Button>
+                      ))}
+                    </div>
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      onClick={() =>
+                        selectedId &&
+                        api.retranscribe(selectedId).then((m) => loadMeeting(m.id))
+                      }
+                    >
+                      <FileAudio size={16} /> {t("action.retranscribe")}
+                    </Button>
+                  </div>
+                </div>
+
+                <Tabs
+                  idPrefix="content"
+                  className="mx-auto w-full max-w-pane px-6"
+                  value={tab}
+                  onChange={setTab}
+                  items={[
+                    { id: "transcript", label: t("tab.transcript") },
+                    { id: "summary", label: t("tab.summary") },
+                  ]}
+                />
+
+                {/* The scroll container is the tab panel: the two panes swap
+                    inside it, so the id follows the selected tab rather than
+                    living on a pane that unmounts. */}
+                <div
+                  ref={scrollRef}
+                  onScroll={handleContentScroll}
+                  data-scroll
+                  id={`content-panel-${tab}`}
+                  role="tabpanel"
+                  aria-labelledby={`content-tab-${tab}`}
+                  className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-4"
+                >
+                  <AnimatePresence mode="wait">
+                    {tab === "transcript" && (
+                      <motion.div
+                        key="transcript"
+                        ref={pinOnPaneMount}
+                        {...fadeRise}
+                        className="mx-auto max-w-reading"
+                        data-testid="transcript-panel"
+                      >
+                        {transcript.segments?.length ? (
+                          // `initial={false}` so opening a past meeting does not
+                          // blur-and-fade three hundred rows at once: only the
+                          // segments that land after the pane is up animate, which
+                          // is the handful per minute `segmentArrive` is sized for.
+                          <AnimatePresence initial={false}>
+                            {transcript.segments.map((s, i) => {
+                              // A run of consecutive lines from one speaker is one
+                              // utterance: it carries a single timestamp and a
+                              // single name, and only the gap says where it ends.
+                              const opens =
+                                i === 0 ||
+                                transcript.segments[i - 1].speaker !== s.speaker;
+                              return (
+                                <motion.div
+                                  key={s.id}
+                                  {...segmentArrive}
+                                  className={`flex gap-4 ${
+                                    i === 0 ? "" : opens ? "mt-4" : "mt-1"
+                                  }`}
+                                >
+                                  <span className="w-14 shrink-0 tabular-nums text-2xs text-fg-faint">
+                                    {opens ? formatDuration(s.start_ms) : ""}
+                                  </span>
+                                  <span
+                                    aria-hidden
+                                    className={`w-0.5 shrink-0 self-stretch rounded-full ${
+                                      s.speaker === "me" ? "bg-accent" : "bg-others"
+                                    }`}
+                                  />
+                                  <div className="min-w-0 flex-1">
+                                    {opens && (
+                                      <div className="text-2xs text-fg-subtle">
+                                        {s.speaker === "me"
+                                          ? t("speaker.me")
+                                          : t("speaker.others")}
+                                      </div>
+                                    )}
+                                    <p className="text-base leading-relaxed">{s.text}</p>
+                                  </div>
+                                </motion.div>
+                              );
+                            })}
+                          </AnimatePresence>
+                        ) : (
+                          <Empty
+                            icon={<AudioLinesIcon size={22} />}
+                            title={t("empty.transcript")}
+                            body={t("empty.transcript_body")}
+                            action={
+                              <Button
+                                size="md"
+                                variant="secondary"
+                                onClick={handleImport}
+                                disabled={busy}
+                              >
+                                {t("nav.import")}
+                              </Button>
+                            }
+                          />
+                        )}
+                      </motion.div>
+                    )}
+
+                    {tab === "summary" && (
+                      <motion.div
+                        key="summary"
+                        {...fadeRise}
+                        className="mx-auto max-w-reading space-y-6"
+                        data-testid="summary-panel"
+                      >
+                        {selected.summary ||
+                        selected.key_points ||
+                        selected.action_items ? (
+                          <>
+                            <Section title={t("section.summary")} body={selected.summary || "—"} />
+                            <Section title={t("section.key_points")} body={selected.key_points || "—"} />
+                            <Section title={t("section.action_items")} body={selected.action_items || "—"} />
+                          </>
+                        ) : (
+                          // Three cards each holding one em-dash and nothing to
+                          // act on is an empty state. This renders it as one.
+                          <Empty
+                            icon={<Sparkles size={22} />}
+                            title={t("empty.summary")}
+                            body={t("empty.summary_body")}
+                            action={
+                              <Button
+                                size="md"
+                                onClick={() => handleSummarize("general")}
+                                disabled={busy}
+                              >
+                                <Sparkles size={16} /> {t("action.summarize")}
+                              </Button>
+                            }
+                          />
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              </>
+            ) : (
+              <div className="flex flex-1 items-center justify-center p-8">
+                <Empty
+                  icon={<MicIcon size={22} />}
+                  title={t("empty.ready")}
+                  body={t("empty.ready_body")}
+                  action={
+                    // No Record here. The dock at the foot of this same screen is
+                    // the record button — putting a second one in the middle gave
+                    // the empty screen two primary actions that do the same thing,
+                    // eight hundred pixels apart. The shortcut still belongs here,
+                    // where there is room to name it.
+                    <div className="flex items-center justify-center gap-3">
+                      <Button
+                        size="md"
+                        variant="secondary"
+                        onClick={handleImport}
+                        disabled={busy}
+                      >
+                        {t("nav.import")}
+                      </Button>
+                      {!status?.recording && (
+                        <span className="flex items-center gap-2 text-2xs text-fg-subtle">
+                          {t("record.start")}
+                          <kbd className="inline-flex h-6 items-center rounded-xs border border-border bg-surface-2 px-2 font-sans text-2xs">
+                            {RECORD_SHORTCUT}
+                          </kbd>
+                        </span>
+                      )}
+                    </div>
+                  }
+                />
+              </div>
+            )}
+
+            {/* The empty screen only. With a meeting open the transcript and the
+                summary own this column, and a Record button hanging over them
+                offers to start a second recording on top of the one the header is
+                already showing. */}
+            <AnimatePresence>
+              {!selected && !status?.recording && (
+                <RecordDock
+                  key="dock"
+                  gate={gate}
+                  busy={busy}
+                  devices={devices}
+                  micDeviceId={settings.mic_device_id}
+                  systemDeviceId={settings.system_device_id}
+                  onStart={requestStart}
+                  onOpenSettings={() => setShowSettings(true)}
+                />
+              )}
+            </AnimatePresence>
+          </div>
+        </main>
+      </div>
 
       <AnimatePresence>
         {confirmingRecord && (

@@ -106,10 +106,14 @@ export function Sidebar({
     rows[next]?.focus();
   }
 
+  // No `border-r`. The sidebar is the window: `bg-background` is now shared
+  // with the gutter around the content card, so there is deliberately no seam
+  // anywhere on the chrome. The 8px gutter is the boundary and the card's own
+  // border is 8px away — a hairline here would be two hard divides adjacent.
   return (
     <aside
       data-testid="sidebar"
-      className="flex w-72 shrink-0 flex-col border-r border-border bg-background"
+      className="flex w-72 shrink-0 flex-col bg-background"
     >
       <div className="flex flex-col gap-3 px-4 pb-3 pt-4">
         <div className="flex items-center justify-between">
