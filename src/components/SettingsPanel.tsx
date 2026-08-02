@@ -21,7 +21,7 @@ import {
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
-import { applyTheme, currentTheme, type Theme } from "../lib/theme";
+import { applyTheme, currentTheme } from "../lib/theme";
 import { Button, FOCUS } from "./Button";
 import { ModelPicker } from "./ModelPicker";
 import { LOCALES, PROVIDERS, Segmented } from "./Segmented";
@@ -78,12 +78,6 @@ export function SettingsPanel({
   // under whichever tab they had not chosen.
   const [tab, setTab] = useState<"models" | "devices" | "appearance">("models");
   const panelRef = useRef<HTMLDivElement>(null);
-  /// What was on screen when the drawer opened, and whether a Save has since
-  /// made a previewed theme real. Refs, not state: nothing renders from them and
-  /// the unmount cleanup has to read the latest value, not the one captured when
-  /// the effect ran.
-  const themeOnOpen = useRef<Theme>(currentTheme());
-  const themeSaved = useRef(false);
 
   /// Whether anything is waiting to be saved.
   ///
@@ -121,12 +115,6 @@ export function SettingsPanel({
     return () => {
       window.removeEventListener("keydown", onKey);
       restore?.focus();
-      // The theme control applies on click so the choice can be seen, which
-      // means leaving by Escape or by the backdrop walks away with a preview
-      // nothing persisted. It also wrote the boot cache, so the next launch
-      // would paint the abandoned theme and then be corrected by the row a
-      // frame later — the exact flash the boot cache exists to prevent.
-      if (!themeSaved.current) applyTheme(themeOnOpen.current);
     };
   }, [onClose]);
 
@@ -193,10 +181,6 @@ export function SettingsPanel({
       // language change means the catalog behind `t` is still the previous one
       // at this point.
       setResult({ ok: true });
-      // The preview is real now, and it is the new thing to fall back to if the
-      // user changes their mind again and leaves without saving.
-      themeSaved.current = true;
-      themeOnOpen.current = draft.theme === "dark" ? "dark" : "light";
       // Only now does the backend hold the key the model list is fetched with.
       setOrNonce((n) => n + 1);
     } catch (e) {
@@ -681,8 +665,19 @@ export function SettingsPanel({
                 label={t("settings.theme")}
                 value={theme}
                 onChange={(v) => {
-                  applyTheme(v === "dark" ? "dark" : "light");
-                  setDraft((d) => ({ ...d, theme: v }));
+                  const previous = draft.theme;
+                  const next = v === "dark" ? "dark" : "light";
+                  applyTheme(next);
+                  setDraft((d) => ({ ...d, theme: next }));
+                  // Persisted on click, like the header toggle, through the
+                  // command that writes the theme and nothing else. It is
+                  // deliberately outside `dirty`, so without this a theme picked
+                  // here would be a preview that Save never offered to keep and
+                  // the close handler then threw away.
+                  api.setTheme(next).catch(() => {
+                    applyTheme(previous === "dark" ? "dark" : "light");
+                    setDraft((d) => ({ ...d, theme: previous }));
+                  });
                 }}
                 options={[
                   { value: "light", label: t("theme.light") },

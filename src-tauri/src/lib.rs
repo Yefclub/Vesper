@@ -176,6 +176,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::save_settings,
+            commands::set_theme,
             commands::switch_stt_provider,
             commands::switch_llm_provider,
             commands::set_reasoning,

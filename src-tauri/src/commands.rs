@@ -218,6 +218,39 @@ pub fn save_settings(
     Ok(persist_settings(&state, settings)?.public_view())
 }
 
+/// Write the theme and nothing else.
+///
+/// The header toggle used to send a whole settings snapshot for one field, which
+/// made it a lost-update waiting to happen: open the drawer, save something, and
+/// a toggle still in flight lands afterwards carrying the pre-drawer value of
+/// every other field. Reading the current row here and changing one member of it
+/// under the lock means the two writers cannot disagree about anything they did
+/// not each touch.
+#[tauri::command]
+pub fn set_theme(state: State<'_, Arc<AppState>>, theme: String) -> Result<AppSettings, String> {
+    // The WebView is the trust boundary. `persist_settings` rejects anything
+    // outside the pair and this path must too, or it becomes the way around it.
+    if theme != "light" && theme != "dark" {
+        return Err("invalid theme: expected `light` or `dark`".into());
+    }
+    let updated = {
+        let mut current = state.settings.lock();
+        current.theme = theme;
+        current.clone()
+    };
+    // Whichever home is holding the key keeps holding it. Hardcoding `Keychain`
+    // here would strip the key from the row on a machine whose keychain refused
+    // to cooperate — the one place it is still stored — and a theme toggle would
+    // silently cost the user their credential.
+    let home = if state.key_in_keychain.load(Ordering::Relaxed) {
+        KeyHome::Keychain
+    } else {
+        KeyHome::KeepInRow
+    };
+    state.db.save_settings_with(&updated, home)?;
+    Ok(updated.public_view())
+}
+
 #[tauri::command]
 pub fn switch_stt_provider(
     state: State<'_, Arc<AppState>>,
@@ -529,7 +562,16 @@ pub async fn stop_recording(
     meeting.audio_path = Some(path.display().to_string());
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
-    *state.active_meeting.lock() = None;
+    // Compare before clearing. This command awaits `stt_flight` for the final
+    // pass, and a recording started in the meantime has already written its own
+    // id here — blanking it would leave that recorder running with pause, resume
+    // and stop all answering "no active meeting", and no way to finish it.
+    {
+        let mut active = state.active_meeting.lock();
+        if active.as_deref() == Some(id.as_str()) {
+            *active = None;
+        }
+    }
     // First point where the command can no longer fail early: the recording is
     // on disk and the row knows where. Announcing a phase before this would
     // leave the window on a phase for a command that then returned an error.

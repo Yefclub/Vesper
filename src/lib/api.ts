@@ -197,6 +197,10 @@ export const api = {
   search: (query: string) => invoke<SearchHit[]>("search_meetings_cmd", { query }),
   getSettings: () => invoke<AppSettings>("get_settings"),
   saveSettings: (settings: AppSettings) => invoke<AppSettings>("save_settings", { settings }),
+  /// The theme alone. A whole-settings write for one field is a lost update
+  /// waiting to happen: a toggle still in flight lands after a drawer Save and
+  /// carries the pre-drawer value of every other field.
+  setTheme: (theme: string) => invoke<AppSettings>("set_theme", { theme }),
   completeOnboarding: (settings: AppSettings) =>
     invoke<AppSettings>("complete_onboarding", { settings }),
   switchStt: (provider: string) => invoke<AppSettings>("switch_stt_provider", { provider }),

@@ -793,12 +793,25 @@ function AppShell({
             variant="ghost"
             size="icon"
             onClick={() => {
-              const next = settings.theme === "dark" ? "light" : "dark";
+              const previous = settings.theme;
+              const next = previous === "dark" ? "light" : "dark";
               applyTheme(next);
-              const updated = { ...settings, theme: next };
-              setSettings(updated);
-              onSettingsChange(updated);
-              api.saveSettings(updated).catch((e) => setError(String(e)));
+              setSettings((s) => ({ ...s, theme: next }));
+              // Only the theme goes over the wire. Sending a whole snapshot for
+              // one field made this a lost update: a toggle still in flight
+              // landed after a drawer Save carrying the pre-drawer value of
+              // every other setting.
+              api
+                .setTheme(next)
+                .then(onSettingsChange)
+                .catch((e) => {
+                  // Put it back. Leaving the header showing a theme the database
+                  // does not have means the next launch silently disagrees with
+                  // what is on screen.
+                  applyTheme(previous === "dark" ? "dark" : "light");
+                  setSettings((s) => ({ ...s, theme: previous }));
+                  setError(String(e));
+                });
             }}
             title={t(settings.theme === "dark" ? "theme.light" : "theme.dark")}
             aria-label={t(settings.theme === "dark" ? "theme.light" : "theme.dark")}
