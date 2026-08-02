@@ -117,7 +117,13 @@ export function Sidebar({
     >
       <div className="flex flex-col gap-3 px-4 pb-3 pt-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+          {/* `min-w-0 truncate` here and `shrink-0` on the buttons: the heading
+              gets 187px (288 − 32 padding − 68 buttons − 1) and
+              `REUNIÕES E TRANSCRIÇÕES` measures ~178.5px uppercase with a
+              two-digit count. Without the guards the flex algorithm resolves a
+              three-digit count by wrapping the heading or squeezing the 32px
+              buttons, and it does both silently. */}
+          <h2 className="min-w-0 truncate text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
             {t("nav.meetings")}
             {meetings.length > 0 && (
               <span className="ml-1.5 font-normal tabular-nums text-fg-subtle">
@@ -127,7 +133,7 @@ export function Sidebar({
           </h2>
           {/* SquarePen, not Plus: the action clears the workspace back to the
               empty screen, it does not append a row to this list. */}
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
             <Button
               variant="ghost"
               size="icon"
@@ -163,7 +169,7 @@ export function Sidebar({
             onChange={(e) => onSearch(e.target.value)}
             placeholder={t("nav.search")}
             aria-label={t("nav.search")}
-            className={`w-full rounded-md border border-border bg-surface-2 py-2 pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-fg-subtle focus:border-border-strong ${FOCUS}`}
+            className={`w-full rounded-md border border-border bg-row-selected py-2 pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-fg-subtle focus:border-border-strong ${FOCUS}`}
           />
         </div>
       </div>
@@ -202,7 +208,7 @@ export function Sidebar({
               <button
                 key={h.meeting_id}
                 onClick={() => onSelect(h.meeting_id)}
-                className={`mb-1 w-full rounded-sm px-3 py-2 text-left transition-colors hover:bg-surface-2 ${FOCUS}`}
+                className={`mb-1 w-full rounded-sm px-3 py-2 text-left transition-colors hover:bg-row-hover ${FOCUS}`}
               >
                 <div className="truncate text-sm font-medium">{h.title}</div>
                 <div className="truncate text-xs text-fg-muted">{h.snippet}</div>
@@ -236,7 +242,7 @@ export function Sidebar({
         ) : (
           groupByAge(meetings, t).map((group) => (
             <section key={group.key}>
-              <h3 className="px-3 pb-1 pt-3 text-2xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+              <h3 className="px-3 pb-1 pt-3 text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
                 {group.label}
               </h3>
               {group.items.map((m) => {
@@ -253,10 +259,10 @@ export function Sidebar({
                       tabIndex={m.id === focusableId ? 0 : -1}
                       onClick={() => onSelect(m.id)}
                       aria-current={active ? "true" : undefined}
-                      className={`flex h-9 w-full items-center gap-2 rounded-sm px-3 text-left transition-colors ${
+                      className={`flex h-9 w-full items-center gap-2 rounded-sm pl-3 pr-2 text-left transition-colors ${
                         active
-                          ? "bg-surface-2 text-fg"
-                          : "text-fg-muted hover:bg-surface-1"
+                          ? "bg-row-selected text-fg"
+                          : "text-fg-muted hover:bg-row-hover"
                       } ${FOCUS}`}
                     >
                       {/* Only when it is not `ready`: the normal case used to
@@ -273,22 +279,36 @@ export function Sidebar({
                         />
                       )}
                       <span className="min-w-0 flex-1 truncate text-sm">{m.title}</span>
-                      {m.duration_ms > 0 && (
-                        <span className="shrink-0 tabular-nums text-2xs text-fg-subtle">
-                          {formatDuration(m.duration_ms)}
-                        </span>
-                      )}
+                      {/* Always rendered and always 44px — the worst case
+                          `1:02:33` — whether or not there is a duration and
+                          whether or not the trash is showing, so the title's
+                          truncation point never moves. It fades instead of being
+                          covered: the trash carries no fill, so its strokes used
+                          to composite straight on top of the numerals, hiding
+                          100% of an `MM:SS` at the exact moment the pointer was
+                          there to read it. The digits stay in the accessibility
+                          tree, because they are data. */}
+                      <span className="w-11 shrink-0 text-right tabular-nums text-2xs text-fg-subtle transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                        {m.duration_ms > 0 ? formatDuration(m.duration_ms) : ""}
+                      </span>
                     </button>
                     {/* Out of the flow, so the title keeps the ~30px where the
-                        distinguishing part of a meeting name lives. Revealed on
-                        hover, but always reachable by keyboard — opacity-0 alone
-                        would hide it from tab users too, and `transition-colors`
-                        does not carry opacity, so the reveal used to snap. */}
+                        distinguishing part of a meeting name lives. `right-2`
+                        matches the row's `pr-2`, which is the duration slot's
+                        right edge: the two share a boundary instead of the trash
+                        overhanging the digits by 4px. Revealed on hover,
+                        but always reachable by keyboard — opacity-0 alone would
+                        hide it from tab users too, and `transition-colors` does
+                        not carry opacity, so the reveal used to snap.
+                        `pointer-events-none` while hidden is the fix for an
+                        invisible 32px target eating clicks meant for the row;
+                        keyboard focus is unaffected by it, so the tab route
+                        still works. */}
                     <button
                       onClick={() => onDelete(m.id)}
                       title={t("nav.delete")}
                       aria-label={t("nav.delete")}
-                      className={`absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-fg-muted opacity-0 transition-[opacity,color] hover:text-danger focus-visible:opacity-100 group-hover:opacity-100 ${FOCUS}`}
+                      className={`absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md pointer-events-none text-fg-muted opacity-0 transition-[opacity,color] hover:text-danger focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 ${FOCUS}`}
                     >
                       <Trash2 size={16} />
                     </button>

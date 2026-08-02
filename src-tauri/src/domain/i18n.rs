@@ -31,7 +31,7 @@ fn en_dict() -> HashMap<&'static str, &'static str> {
     HashMap::from([
         ("app.name", "Vesper"),
         ("app.tagline", "Private meeting notes"),
-        ("nav.meetings", "Meetings"),
+        ("nav.meetings", "Meetings & transcripts"),
         ("nav.search", "Search meetings…"),
         ("nav.settings", "Settings"),
         ("nav.import", "Import audio"),
@@ -157,7 +157,7 @@ fn pt_dict() -> HashMap<&'static str, &'static str> {
     HashMap::from([
         ("app.name", "Vesper"),
         ("app.tagline", "Notas de reunião privadas"),
-        ("nav.meetings", "Reuniões"),
+        ("nav.meetings", "Reuniões e transcrições"),
         ("nav.search", "Buscar reuniões…"),
         ("nav.settings", "Configurações"),
         ("nav.import", "Importar áudio"),
