@@ -121,6 +121,45 @@ pub(crate) fn probe_support() -> BackendSupport {
     })
 }
 
+/// One GPU as ggml sees it.
+#[derive(Debug, Clone)]
+pub(crate) struct GpuDevice {
+    pub backend: String,
+    pub description: String,
+    pub total_bytes: u64,
+}
+
+/// The GPUs this build can actually reach, with the memory each reports.
+///
+/// This is what capability reporting asks, and it is a different question from
+/// "is there a graphics card in this machine". A card the build has no backend
+/// for cannot hold a model, so it must not raise the recommended model size.
+///
+/// Filtered to GPU devices: ggml registers the CPU as a device too, and its
+/// reported memory is the machine's RAM — which would read as an enormous
+/// amount of VRAM.
+pub(crate) fn gpu_devices() -> Vec<GpuDevice> {
+    use llama_cpp_2::LlamaBackendDeviceType;
+
+    if backend().is_err() {
+        return Vec::new();
+    }
+    llama_cpp_2::list_llama_ggml_backend_devices()
+        .into_iter()
+        .filter(|device| {
+            matches!(
+                device.device_type,
+                LlamaBackendDeviceType::Gpu | LlamaBackendDeviceType::IntegratedGpu
+            )
+        })
+        .map(|device| GpuDevice {
+            backend: device.backend,
+            description: device.description,
+            total_bytes: device.memory_total as u64,
+        })
+        .collect()
+}
+
 /// Every layer on the GPU, and only on the GPU that was chosen.
 ///
 /// A build carrying both backends registers one physical card twice — once as

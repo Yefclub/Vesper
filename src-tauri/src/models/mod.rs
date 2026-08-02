@@ -126,6 +126,22 @@ pub fn list_models() -> Vec<ModelInfo> {
             "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
         ),
         (
+            "whisper-small",
+            "stt",
+            "Whisper Small (local STT, ggml)",
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+            487_601_967u64,
+            "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+        ),
+        (
+            "whisper-large-v3-turbo",
+            "stt",
+            "Whisper Large v3 Turbo (local STT, ggml)",
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+            1_624_555_275u64,
+            "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+        ),
+        (
             "qwen2.5-0.5b",
             "llm",
             "Qwen2.5 0.5B Instruct Q4_K_M (local LLM)",
@@ -140,6 +156,14 @@ pub fn list_models() -> Vec<ModelInfo> {
             "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
             1_117_320_736u64,
             "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+        ),
+        (
+            "qwen2.5-3b",
+            "llm",
+            "Qwen2.5 3B Instruct Q4_K_M (local LLM)",
+            "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+            2_104_932_768u64,
+            "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
         ),
     ];
     catalog

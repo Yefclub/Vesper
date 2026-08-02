@@ -595,7 +595,9 @@ export function SettingsPanel({
                   </div>
                   <div>
                     {t("cap.cpu")}: {caps.cpu_cores} · {t("cap.cuda")}:{" "}
-                    {caps.cuda_available ? caps.cuda_device_name : "—"}
+                    {caps.gpu_name ?? "—"}
+                    {caps.vram_mb > 0 &&
+                      ` · ${Math.round(caps.vram_mb / 1024)} GB`}
                   </div>
                   <div>
                     {t("cap.recommended")}: {caps.recommended_backend} /{" "}

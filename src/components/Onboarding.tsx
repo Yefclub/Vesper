@@ -384,7 +384,7 @@ export function Onboarding({ settings, onDone }: Props) {
                   <ul className="space-y-1 text-fg-muted">
                     <li>
                       CPU cores: {caps.cpu_cores} · {t("cap.cuda")}:{" "}
-                      {caps.cuda_available ? caps.cuda_device_name : "—"}
+                      {caps.gpu_name ?? "—"}
                     </li>
                     {caps.notes.map((n, i) => (
                       <li key={i}>• {n}</li>

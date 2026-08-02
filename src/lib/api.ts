@@ -201,6 +201,9 @@ export interface CapabilityReport {
   cpu_cores: number;
   cuda_available: boolean;
   cuda_device_name?: string | null;
+  vulkan_available: boolean;
+  gpu_name?: string | null;
+  vram_mb: number;
   recommended_stt_model: string;
   recommended_llm_model: string;
   recommended_backend: string;
