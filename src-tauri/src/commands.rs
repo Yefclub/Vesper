@@ -7,7 +7,9 @@ use crate::domain::chat::ChatMessage;
 use crate::domain::export::{export_meeting, ExportFormat};
 use crate::domain::gate::{can_start_recording_with, StartGate};
 use crate::domain::i18n::{catalog, t, Locale};
-use crate::domain::job::{MeetingEvent, MeetingRecord, MeetingStatus};
+use crate::domain::job::{
+    MeetingEvent, MeetingPhase, MeetingProgress, MeetingRecord, MeetingStatus,
+};
 use crate::domain::search::SearchHit;
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
 use crate::domain::shortcut::ShortcutStatus;
@@ -506,6 +508,13 @@ pub async fn stop_recording(
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
     *state.active_meeting.lock() = None;
+    // First point where the command can no longer fail early: the recording is
+    // on disk and the row knows where. Announcing a phase before this would
+    // leave the window on a phase for a command that then returned an error.
+    let _ = app.emit(
+        "meeting://progress",
+        &MeetingProgress::new(&id, MeetingPhase::Saving),
+    );
 
     // Wait for a live poll that is still transcribing before reading the
     // transcript. Without this, stopping mid-chunk reads a transcript that is
@@ -516,6 +525,10 @@ pub async fn stop_recording(
 
     let settings = state.settings.lock().clone();
     let mut live = state.live.lock().get(&id).cloned().unwrap_or_default();
+    let _ = app.emit(
+        "meeting://progress",
+        &MeetingProgress::new(&id, MeetingPhase::Transcribing),
+    );
 
     if live.segments().is_empty() {
         // Nothing was transcribed live — cloud STT down, or a recording short
@@ -557,25 +570,43 @@ pub async fn stop_recording(
         .map_err(|e| e.to_string())?;
     state.db.upsert_meeting(&meeting)?;
 
+    let mut done = MeetingProgress::new(&id, MeetingPhase::Ready);
     if settings.auto_summarize && !meeting.transcript_text.is_empty() {
-        let _ = app.emit("meeting://summarizing", &id);
-        let insights = state
+        let _ = app.emit(
+            "meeting://progress",
+            &MeetingProgress::new(&id, MeetingPhase::Summarizing),
+        );
+        match state
             .llm
             .summarize(
                 &settings,
                 &meeting.transcript_text,
                 SummaryTemplate::General,
             )
-            .await?;
-        state.db.save_insights(&id, &insights)?;
-        meeting.summary = Some(insights.summary.clone());
-        meeting.action_items = Some(insights.action_items_text());
-        meeting.key_points = Some(insights.key_points_text());
-        meeting.status = MeetingStatus::Ready;
-        meeting.updated_at = chrono::Utc::now().to_rfc3339();
-        state.db.upsert_meeting(&meeting)?;
+            .await
+        {
+            Ok(insights) => {
+                state.db.save_insights(&id, &insights)?;
+                meeting.summary = Some(insights.summary.clone());
+                meeting.action_items = Some(insights.action_items_text());
+                meeting.key_points = Some(insights.key_points_text());
+                meeting.status = MeetingStatus::Ready;
+                meeting.updated_at = chrono::Utc::now().to_rfc3339();
+                state.db.upsert_meeting(&meeting)?;
+            }
+            // The transcript is already saved and the meeting is already Ready,
+            // so propagating this told the user their recording was lost when
+            // only the summary was. Report the summary, keep the meeting.
+            Err(e) => {
+                tracing::warn!("auto-summary failed: {e}");
+                done = MeetingProgress::summary_failed(&id, &e);
+            }
+        }
     }
 
+    // One terminal phase, emitted once: a `ready` after a `summary_failed` would
+    // supersede it on the single channel and the failure would never be seen.
+    let _ = app.emit("meeting://progress", &done);
     let _ = app.emit("meeting://ready", &meeting);
     Ok(meeting)
 }
