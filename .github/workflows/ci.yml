@@ -125,6 +125,18 @@ jobs:
       # default workspace: `FileTracker : error FTK1011: could not create the
       # new file tracking log file`. A short target directory is the fix, and
       # it is the same one AGENTS.md documents for a local checkout.
+      # MSBuild builds the nested `vulkan-shaders-gen` ExternalProject with its
+      # steps on separate parallel nodes, so the install step can start before
+      # the configure step has finished: `CMake error : Not a file:
+      # .../cmake_install.cmake`. Ninja gets the dependency order right, and is
+      # faster besides. The cmake crate supports MSVC with Ninja explicitly — it
+      # passes the compiler's absolute path when that pair is in use.
+      - name: Ninja generator (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ninja -y --no-progress
+          Add-Content -Path $env:GITHUB_ENV -Value 'CMAKE_GENERATOR=Ninja'
       - name: Short target directory (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
