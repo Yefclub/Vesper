@@ -153,6 +153,12 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
         )
     };
     settings.validate_models().map_err(|e| e.to_string())?;
+    // The WebView is the trust boundary, so "it comes from our own front end" is
+    // not a validation: a value outside this pair would be written to the row and
+    // handed back to the window on every boot.
+    if settings.theme != "light" && settings.theme != "dark" {
+        return Err("invalid theme: expected `light` or `dark`".into());
+    }
     // Only an actual change counts as a pick: every save comes through here, and a
     // save that touched the microphone must not reshuffle the model list.
     if settings.openrouter_llm_model != previous_llm_model {

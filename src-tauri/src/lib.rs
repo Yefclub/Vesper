@@ -154,6 +154,15 @@ pub fn run() {
             // Always open maximized (tela cheia de trabalho)
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.maximize();
+                // `decorations` stays true, so without this a light app sits
+                // under a dark native title bar. Never `?`: a window that fails
+                // to theme must still appear.
+                let theme = app.state::<Arc<AppState>>().settings.lock().theme.clone();
+                let _ = w.set_theme(Some(if theme == "dark" {
+                    tauri::Theme::Dark
+                } else {
+                    tauri::Theme::Light
+                }));
             }
 
             Ok(())
