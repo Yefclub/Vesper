@@ -77,3 +77,59 @@ jobs:
             export LIBCLANG_PATH=$(dirname $(find /usr -name 'libclang.so*' 2>/dev/null | head -1) || echo /usr/lib)
           fi
           cargo test --lib
+
+  # The GPU features are off by default, so the job above never compiles them —
+  # and a feature nothing builds is a feature that silently stops building. This
+  # only compiles: the runners have no GPU, so there is nothing here to run.
+  #
+  # Vulkan and not CUDA. The CUDA toolkit is a multi-gigabyte install for a
+  # second compile of the same code path, and the part that is genuinely
+  # different — whisper never getting CUDA — is covered by unit tests in
+  # domain::backend that need no toolkit at all.
+  gpu:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev libpipewire-0.3-dev libclang-dev cmake pkg-config
+      - name: Vulkan SDK (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+      - name: Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -L -o "$env:RUNNER_TEMP\vulkan.exe" https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe
+          & "$env:RUNNER_TEMP\vulkan.exe" --accept-licenses --default-answer --confirm-command install | Out-Null
+          $sdk = (Get-ChildItem 'C:\VulkanSDK' | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
+          Add-Content -Path $env:GITHUB_PATH -Value "$sdk\Bin"
+      - name: LLVM binutils on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: gpu-${{ matrix.os }}
+      - name: Compile with Vulkan
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            export LIBCLANG_PATH=$(dirname $(find /usr -name 'libclang.so*' 2>/dev/null | head -1) || echo /usr/lib)
+          fi
+          cargo build --features gpu-vulkan

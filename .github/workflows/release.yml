@@ -20,12 +20,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Vulkan on the two platforms that have it. The SDK is a *build*
+          # requirement — `vulkan-1` ships with every GPU driver, so the
+          # installer never asks the user for anything.
           - platform: windows-latest
-            args: --target x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc --features gpu-vulkan
+          # macOS has no Vulkan, and Metal is a separate backend this release
+          # does not carry yet. Apple builds stay on the CPU.
           - platform: macos-latest
             args: --target aarch64-apple-darwin
           - platform: ubuntu-latest
-            args: --target x86_64-unknown-linux-gnu
+            args: --target x86_64-unknown-linux-gnu --features gpu-vulkan
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -49,6 +54,22 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
+      - name: Vulkan SDK (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+      - name: Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -L -o "$env:RUNNER_TEMP\vulkan.exe" https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe
+          & "$env:RUNNER_TEMP\vulkan.exe" --accept-licenses --default-answer --confirm-command install | Out-Null
+          $sdk = (Get-ChildItem 'C:\VulkanSDK' | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
+          Add-Content -Path $env:GITHUB_PATH -Value "$sdk\Bin"
       - run: npm ci
 
       # The signing key is what makes an update verifiable. Without these the

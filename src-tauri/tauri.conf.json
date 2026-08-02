@@ -52,6 +52,7 @@
   },
   "bundle": {
     "active": true,
+    "resources": { "gpu-backends/*": "" },
     "targets": [
       "nsis",
       "msi",

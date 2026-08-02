@@ -5,7 +5,7 @@ Instruções para agentes de código neste repositório. Lido por Codex, Cursor,
 ## Projeto
 
 - **O que é**: aplicativo desktop de notas de reunião com IA, privacy-first — grava, transcreve e resume reunião local, sem conta e sem telemetria.
-- **Stack**: Rust + Tauri 2 no backend; React 19 + TypeScript 5.8 + Tailwind 4 + Vite 7 no front. SQLite via `rusqlite` (bundled). STT local com `whisper-rs` (whisper.cpp), LLM local com `llama_cpp`. OpenRouter é opcional, nunca obrigatório.
+- **Stack**: Rust + Tauri 2 no backend; React 19 + TypeScript 5.8 + Tailwind 4 + Vite 7 no front. SQLite via `rusqlite` (bundled). STT local com `whisper-rs` (whisper.cpp), LLM local com `llama-cpp-2` (llama.cpp). OpenRouter é opcional, nunca obrigatório.
 - **Gerenciador de pacotes**: `npm` (o repo versiona `package-lock.json`) — usar **só** esse; misturar gera lockfile conflitante. Do lado Rust, `cargo` com `src-tauri/Cargo.lock`.
 - **Estrutura**:
   - `src/` — UI React, tema escuro "Grok Night"
@@ -37,6 +37,13 @@ export PATH="/c/Program Files/LLVM/bin:$PATH"   # antes de cargo build/test
 Pôr o diretório inteiro no PATH, e não `NM_PATH`/`OBJCOPY_PATH` uma a uma: ele pede a próxima ferramenta só depois de achar a anterior, então resolver individualmente vira uma falha por rodada de build.
 
 Só morde em checkout novo — worktree recém-cortada tem `target/` vazio e roda o build script do zero.
+
+**Build com GPU** (`--features gpu-vulkan`, `gpu-cuda` ou `gpu-all`): desligado por padrão, e cada um exige SDK **de build**, nunca de execução — o binário entregue não pede nada instalado.
+
+- `gpu-vulkan` precisa do Vulkan SDK; `gpu-cuda` precisa do CUDA Toolkit (`nvcc`).
+- **Caminho longo trava o build do Vulkan no Windows.** O `vulkan-shaders-gen` é um ExternalProject aninhado, e o `tracker.exe` do MSBuild ignora `LongPathsEnabled`: acima de ~260 caracteres ele aborta com `FileTracker : error FTK1011: could not create the new file tracking log file`. Dentro de `.claude/worktrees/<nome>/` o caminho já passa disso. Solução: `CARGO_TARGET_DIR=/c/vt cargo build --features gpu-vulkan`.
+- **O primeiro build do Vulkan falha sozinho às vezes.** O `vulkan-shaders-gen` corre em paralelo dentro do próprio cmake e às vezes perde a corrida: `cmake --build ... --target install` sai com 1 e o `cmake-0.1.58` entra em pânico sem mensagem útil. Repetir o mesmo comando resolve — não é problema de configuração, não mudar nada antes de tentar de novo.
+- O `build.rs` copia os backends do ggml para `src-tauri/gpu-backends/` (gitignored) porque `DEP_LLAMA_BACKENDS_DIR` só chega em dependente **direto** do crate com `links` — e este projeto alcança o `llama-cpp-sys-2` através do `llama-cpp-2`. O `tauri.conf.json` declara essa pasta como recurso; sem isso, o app instalado não acha backend nenhum, nem o de CPU, e nenhum modelo carrega.
 
 Falhou qualquer um deles: **parar e reportar a saída**. Não contornar, não desabilitar regra, não marcar teste como skip para seguir.
 

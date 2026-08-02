@@ -578,6 +578,21 @@ export function SettingsPanel({
                     />
                   </>
                 )}
+                {/* Local models only. A cloud provider runs on someone else's
+                    hardware, so the choice has nothing to act on there. */}
+                <FieldSelect
+                  label={t("settings.compute_backend")}
+                  value={draft.compute_backend}
+                  onChange={(v) =>
+                    setDraft((d) => ({ ...d, compute_backend: v }))
+                  }
+                  options={[
+                    { value: "auto", label: t("backend.auto") },
+                    { value: "cuda", label: t("backend.cuda") },
+                    { value: "vulkan", label: t("backend.vulkan") },
+                    { value: "cpu", label: t("backend.cpu") },
+                  ]}
+                />
                 {/* A text-side option whichever provider writes the summary. */}
                 <CheckBox
                   label={t("settings.auto_summarize")}
