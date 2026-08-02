@@ -42,6 +42,7 @@ import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { RecordTransport } from "./components/RecordTransport";
 import { Sidebar } from "./components/Sidebar";
+import { WindowControls } from "./components/WindowControls";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
@@ -749,7 +750,10 @@ function AppShell({
           header. */}
       <header
         data-tauri-drag-region
-        className="grid h-12 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 pl-4 pr-2"
+        // `pr-0` now: the window controls run to the window's own edge, the way
+        // every other application on the platform draws them. The 46px targets
+        // supply their own inset.
+        className="grid h-12 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 pl-4 pr-0"
       >
         <div className="flex items-center gap-2">
           {/* No radius: the asset is the mark alone now, not a rounded tile, so
@@ -820,6 +824,10 @@ function AppShell({
           >
             <Settings size={16} />
           </Button>
+          {/* Drawn by the app because `decorations` is off. The system frame put
+              a light grey Windows bar above a cream window with no way to theme
+              it, which is the seam the product owner is pointing at. */}
+          <WindowControls />
         </div>
       </header>
 
