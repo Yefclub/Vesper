@@ -29,7 +29,7 @@ use crate::stt::local::LocalSttEngine;
 use crate::stt::pipeline::{apply_stt_chunks, SttChunkResult, SttService};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -66,14 +66,18 @@ pub struct AppState {
     /// before it was improved. The window already allows one at a time; this is
     /// what makes it true.
     pub refine_flight: tokio::sync::Mutex<()>,
-    /// How many live transcription passes have completed for the current
-    /// recording.
+    /// Which meetings have had at least one live transcription pass complete.
     ///
     /// Not the same question as "does the transcript have segments": a paid pass
     /// can answer with no words and still have been billed, and treating that as
-    /// "no live transcription happened" sent the whole recording through the
+    /// "no live transcription happened" sends the whole recording through the
     /// provider a second time at stop — charging twice for the same audio.
-    pub live_stt_passes: AtomicU64,
+    ///
+    /// Keyed by meeting rather than counted globally: stopping one recording
+    /// while its pass is still in flight and immediately starting another let
+    /// the first one's completion answer for the second, and the second then
+    /// skipped a fallback it needed.
+    pub live_stt_passes: Mutex<HashSet<String>>,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -97,7 +101,7 @@ impl AppState {
             download_flight: tokio::sync::Mutex::new(()),
             live_stt_generation: AtomicU64::new(0),
             refine_flight: tokio::sync::Mutex::new(()),
-            live_stt_passes: AtomicU64::new(0),
+            live_stt_passes: Mutex::new(HashSet::new()),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -503,7 +507,6 @@ pub fn start_recording(
     *state.active_meeting.lock() = Some(id);
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
-    state.live_stt_passes.store(0, Ordering::SeqCst);
     spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
     // A recording can be started by the tray or the accelerator while the window
     // is already minimized, so the card has to be considered here and not only
@@ -635,7 +638,7 @@ pub async fn stop_recording(
     // with no text and still have been billed, and reading the empty transcript
     // as "live transcription never happened" sent the whole recording through
     // the provider again — charging twice for the same audio.
-    if state.live_stt_passes.load(Ordering::SeqCst) == 0 {
+    if !state.live_stt_passes.lock().remove(&id) {
         // Nothing was transcribed live — cloud STT down, or a recording short
         // enough that no poll ever ran. Transcribe the whole saved WAV.
         if let Ok((mic, sys, sr)) = read_dual_wav(&path) {
@@ -682,6 +685,11 @@ pub async fn stop_recording(
 
     let mut done = MeetingProgress::new(&id, MeetingPhase::Ready);
     if settings.auto_summarize && !meeting.transcript_text.is_empty() {
+        // The same flight every other whole-set replacement takes. A refinement
+        // started before Stop can be awaiting its model call right now, and
+        // without this its result would be overwritten by the snapshot this path
+        // has been holding since before the call was made.
+        let _flight = state.refine_flight.lock().await;
         let _ = app.emit(
             "meeting://progress",
             &MeetingProgress::new(&id, MeetingPhase::Summarizing),
@@ -789,7 +797,7 @@ async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), St
     // than a read-modify-write here: two channels transcribe concurrently and
     // one would overwrite the other.
     bill_chunks(&state.db, &id, &chunks);
-    state.live_stt_passes.fetch_add(1, Ordering::SeqCst);
+    state.live_stt_passes.lock().insert(id.clone());
     let mut guard = state.live.lock();
     let t = guard.entry(id.clone()).or_default();
     apply_stt_chunks(t, &chunks);
