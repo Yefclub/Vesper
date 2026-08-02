@@ -70,6 +70,21 @@ impl LocalLlm {
         ))
     }
 
+    /// One short completion for a meeting title.
+    ///
+    /// No `soft_fallback` branch, unlike the two below: the offline substitutes
+    /// are keyword-matched transcript lines, which are a usable stopgap for a
+    /// summary and garbage as a name. Without weights this is an error and the
+    /// caller keeps the date label.
+    pub fn title(&self, prompt: &str, model_id: &str) -> Result<String, String> {
+        if !self.is_ready(model_id) {
+            return Err(format!(
+                "local LLM model `{model_id}` is not installed — download GGUF weights from Settings"
+            ));
+        }
+        run_llama(&self.model_file(model_id), prompt, 32)
+    }
+
     pub fn chat(
         &self,
         messages: &[ChatMessage],

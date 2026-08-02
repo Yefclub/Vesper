@@ -10,4 +10,5 @@ pub mod settings;
 pub mod shortcut;
 pub mod speaker;
 pub mod summary;
+pub mod title;
 pub mod transcript;

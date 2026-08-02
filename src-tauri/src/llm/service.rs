@@ -1,6 +1,7 @@
 use crate::domain::chat::{build_chat_context, ChatMessage};
 use crate::domain::settings::{AppSettings, LlmProvider};
 use crate::domain::summary::{MeetingInsights, SummaryTemplate};
+use crate::domain::title::build_title_prompt;
 use crate::llm::local::LocalLlm;
 use crate::llm::openrouter::OpenRouterLlm;
 
@@ -42,6 +43,44 @@ impl LlmService {
                         template,
                         settings.locale(),
                         settings.reasoning_enabled,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// Name a meeting from its summary and its own words.
+    ///
+    /// Deliberately not routed through `chat`: with no GGUF on disk the local
+    /// path answers from `offline_answer`, and a keyword-matched transcript
+    /// line is worse than the date label it would replace. A missing model is
+    /// an `Err` here, which the caller treats as "keep the label".
+    pub async fn title(
+        &self,
+        settings: &AppSettings,
+        summary: &str,
+        transcript: &str,
+    ) -> Result<String, String> {
+        let prompt = build_title_prompt(summary, transcript);
+        match settings.llm_provider {
+            LlmProvider::Local => self.local.title(&prompt, &settings.local_llm_model),
+            LlmProvider::OpenRouter => {
+                settings
+                    .require_openrouter_key()
+                    .map_err(|e| e.to_string())?;
+                let messages = vec![ChatMessage {
+                    role: "user".into(),
+                    content: prompt,
+                }];
+                self.remote
+                    .complete(
+                        settings.openrouter_api_key.as_deref().unwrap_or(""),
+                        &settings.openrouter_llm_model,
+                        &messages,
+                        // Never reasoning, whatever the setting says: six words
+                        // do not need a thinking budget, and on OpenRouter that
+                        // budget is billed.
+                        false,
                     )
                     .await
             }

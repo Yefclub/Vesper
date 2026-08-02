@@ -4,7 +4,7 @@ use crate::audio::devices::{list_audio_devices, AudioDevice};
 use crate::db::{Database, KeyHome};
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::chat::ChatMessage;
-use crate::domain::export::{export_meeting, ExportFormat};
+use crate::domain::export::{export_meeting, safe_file_stem, ExportFormat};
 use crate::domain::gate::{can_start_recording_with, StartGate};
 use crate::domain::i18n::{catalog, t, Locale};
 use crate::domain::job::{
@@ -14,6 +14,7 @@ use crate::domain::search::SearchHit;
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
 use crate::domain::shortcut::ShortcutStatus;
 use crate::domain::summary::{MeetingInsights, SummaryTemplate};
+use crate::domain::title::{fallback_title, is_fallback_title, parse_title};
 use crate::domain::transcript::LiveTranscript;
 use crate::llm::service::LlmService;
 use crate::models::{download_model_with_progress, list_models, DownloadProgress, ModelInfo};
@@ -399,9 +400,13 @@ pub fn start_recording(
     }
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+    // Local time here while `created_at` above is UTC, on purpose: a title is a
+    // label frozen at creation, and the sortable timestamp is the one that must
+    // not move. `is_fallback_title` recognises what this writes, which is what
+    // lets a generated title replace it and nothing else.
     let title = title
         .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| format!("Meeting {}", chrono::Local::now().format("%Y-%m-%d %H:%M")));
+        .unwrap_or_else(|| fallback_title(chrono::Local::now()));
     let audio_path = recordings_dir().join(format!("{id}.wav"));
     state
         .recorder
@@ -591,6 +596,7 @@ pub async fn stop_recording(
                 meeting.action_items = Some(insights.action_items_text());
                 meeting.key_points = Some(insights.key_points_text());
                 meeting.status = MeetingStatus::Ready;
+                name_meeting(&state, &settings, &mut meeting, &insights.summary).await;
                 meeting.updated_at = chrono::Utc::now().to_rfc3339();
                 state.db.upsert_meeting(&meeting)?;
             }
@@ -655,6 +661,40 @@ pub async fn poll_live_stt(
     Ok(snapshot)
 }
 
+/// Replace the date label with a title read out of the meeting itself.
+///
+/// Every failure is silent by design. A generated title is a guess: if the model
+/// is missing, refuses or answers with nothing usable, the meeting keeps the
+/// label it was born with and the user is told nothing, because there is nothing
+/// they could do about it. Anything that is *not* the date label — a name the
+/// user typed, an import's file stem — is never touched.
+///
+/// Sends the summary and an excerpt of the transcript to whichever provider the
+/// user already chose for summarisation. Under OpenRouter that is a second
+/// billed call and the excerpt leaves the machine again; under the local model
+/// nothing leaves at all.
+async fn name_meeting(
+    state: &AppState,
+    settings: &AppSettings,
+    meeting: &mut MeetingRecord,
+    summary: &str,
+) {
+    if !is_fallback_title(&meeting.title) {
+        return;
+    }
+    match state
+        .llm
+        .title(settings, summary, &meeting.transcript_text)
+        .await
+    {
+        Ok(raw) => match parse_title(&raw) {
+            Some(title) => meeting.title = title,
+            None => tracing::warn!("the model answered with no usable title"),
+        },
+        Err(e) => tracing::warn!("title generation failed: {e}"),
+    }
+}
+
 #[tauri::command]
 pub async fn summarize_meeting(
     state: State<'_, Arc<AppState>>,
@@ -682,6 +722,9 @@ pub async fn summarize_meeting(
     m.summary = Some(insights.summary.clone());
     m.action_items = Some(insights.action_items_text());
     m.key_points = Some(insights.key_points_text());
+    // Re-summarising is also the way an old meeting still carrying its date
+    // label gets a real name.
+    name_meeting(&state, &settings, &mut m, &insights.summary).await;
     m.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&m)?;
     Ok(insights)
@@ -960,6 +1003,52 @@ fn is_minisign_key_line(line: &str) -> bool {
 #[tauri::command]
 pub fn shortcut_status(status: State<'_, ShortcutStatus>) -> ShortcutStatus {
     status.inner().clone()
+}
+
+/// Rename a meeting.
+///
+/// The typed name goes through the same `parse_title` as the model's answer —
+/// the WebView is the trust boundary, and a title reaches a filename, a PDF
+/// header and an FTS index. `upsert_meeting` re-indexes search in the same
+/// transaction, so the new name is findable immediately.
+#[tauri::command]
+pub fn rename_meeting(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    title: String,
+) -> Result<MeetingRecord, String> {
+    let title = parse_title(&title).ok_or_else(|| "a meeting needs a name".to_string())?;
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    meeting.title = title;
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    state.db.upsert_meeting(&meeting)?;
+    Ok(meeting)
+}
+
+/// The filename the export dialog should open with.
+///
+/// The stem is the meeting's own title, made safe for the filesystem here rather
+/// than in the front end: the rules are Windows' and a sanitiser written in
+/// TypeScript could not be covered by any test this repo runs.
+#[tauri::command]
+pub fn suggested_export_name(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    format: String,
+) -> Result<String, String> {
+    let fmt = ExportFormat::from_ext(&format).ok_or_else(|| "unsupported format".to_string())?;
+    let meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    Ok(format!(
+        "{}.{}",
+        safe_file_stem(&meeting.title),
+        fmt.extension()
+    ))
 }
 
 #[cfg(test)]
