@@ -37,8 +37,11 @@ hound = "3.5"
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "ogg", "flac", "pcm", "wav", "mkv"] }
 # Local STT (whisper.cpp)
 whisper-rs = "0.16"
-# Local LLM (llama.cpp) — compat-only to ease Windows MSVC builds
-llama_cpp = { version = "0.3", default-features = false, features = ["compat"] }
+# Local LLM (llama.cpp). `llama_cpp 0.3.2` pinned a 2024-era llama.cpp with no
+# path to a GPU backend; this line is the current one and is what makes CUDA and
+# Vulkan reachable at all. `openmp` is off because it drags a runtime DLL into
+# the bundle for a gain the GPU backends make irrelevant.
+llama-cpp-2 = { version = "0.1.150", default-features = false, features = ["dynamic-link"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "blocking", "stream"] }
 # `net` is for the loopback server in the resume test; reqwest already pulls it in
 # transitively, so it costs nothing in the bundle.

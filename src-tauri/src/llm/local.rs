@@ -1,15 +1,33 @@
-//! Local light LLM via llama.cpp (`llama_cpp` crate).
+//! Local light LLM via llama.cpp (`llama-cpp-2` bindings).
 //! When GGUF weights exist, runs real generation. Without weights, returns a clear error
 //! for summarize/chat cloud-less paths (callers may fall back intentionally).
 
 use crate::domain::chat::{offline_answer, ChatMessage};
 use crate::domain::i18n::Locale;
 use crate::domain::summary::{extractive_summary, MeetingInsights, SummaryTemplate};
-use llama_cpp::standard_sampler::StandardSampler;
-use llama_cpp::{LlamaModel, LlamaParams, SessionParams};
+use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::llama_backend::LlamaBackend;
+use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::sampling::LlamaSampler;
 use parking_lot::Mutex;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+/// llama.cpp's global init, done once per process.
+///
+/// It registers the ggml backends and installs a log handler; calling it twice is
+/// an error in the C library, so it lives here rather than beside each load.
+static BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
+
+fn backend() -> Result<&'static LlamaBackend, String> {
+    BACKEND
+        .get_or_init(|| LlamaBackend::init().map_err(|e| format!("llama backend init: {e}")))
+        .as_ref()
+        .map_err(|e| e.clone())
+}
 
 static LLM_CACHE: OnceLock<Mutex<Option<(String, LlamaModel)>>> = OnceLock::new();
 
@@ -134,38 +152,88 @@ pub fn run_llama(model_path: &Path, prompt: &str, max_tokens: usize) -> Result<S
         );
     }
 
+    let backend = backend()?;
     let key = model_path.display().to_string();
+    // The lock is held across generation, not just the load. `LlamaModel` is not
+    // `Clone` in these bindings and a context borrows it, which is the honest
+    // shape: two generations sharing one model would race inside llama.cpp
+    // anyway, and the old code's `.clone()` only hid that.
     let mut cache = llm_cache().lock();
     let need_load = cache.as_ref().map(|(k, _)| k != &key).unwrap_or(true);
     if need_load {
-        let model = LlamaModel::load_from_file(model_path, LlamaParams::default())
+        // Dropped before the new load so two models are never resident at once —
+        // on a machine that just about fits one, holding both is the difference
+        // between working and being killed.
+        *cache = None;
+        let model = LlamaModel::load_from_file(backend, model_path, &LlamaModelParams::default())
             .map_err(|e| format!("llama load failed: {e}"))?;
         *cache = Some((key, model));
     }
-    let model = cache.as_ref().unwrap().1.clone();
+    let model = &cache.as_ref().expect("just loaded").1;
 
-    let mut session = model
-        .create_session(SessionParams::default())
-        .map_err(|e| format!("llama session: {e}"))?;
-    session
-        .advance_context(prompt.as_bytes())
+    let tokens = model
+        .str_to_token(prompt, AddBos::Always)
+        .map_err(|e| format!("llama tokenize: {e}"))?;
+
+    // Sized to this call, and never past what the weights were trained for: a
+    // context larger than `n_ctx_train` is allocated, paid for in memory, and
+    // gives worse output than the model's real window.
+    let want = tokens.len() + max_tokens + 8;
+    let n_ctx = want.min(model.n_ctx_train() as usize).max(64) as u32;
+    if tokens.len() >= n_ctx as usize {
+        // Refusing beats silently truncating: a summary of the first half of a
+        // meeting reads exactly like a summary of the meeting.
+        return Err(format!(
+            "the prompt is {} tokens and this model holds {}",
+            tokens.len(),
+            n_ctx
+        ));
+    }
+
+    let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx));
+    let mut ctx = model
+        .new_context(backend, ctx_params)
         .map_err(|e| format!("llama context: {e}"))?;
 
-    let mut completions = session
-        .start_completing_with(StandardSampler::default(), max_tokens)
-        .map_err(|e| format!("llama complete: {e}"))?
-        .into_strings();
+    let mut batch = LlamaBatch::new(n_ctx as usize, 1);
+    let last = tokens.len() - 1;
+    for (i, token) in tokens.iter().enumerate() {
+        // Logits only for the final token: the ones before it are context, and
+        // asking for all of them allocates a vocabulary-sized row per token.
+        batch
+            .add(*token, i as i32, &[0], i == last)
+            .map_err(|e| format!("llama batch: {e}"))?;
+    }
+    ctx.decode(&mut batch)
+        .map_err(|e| format!("llama decode: {e}"))?;
 
-    let mut out = String::new();
-    let mut n = 0usize;
-    for piece in completions.by_ref() {
-        out.push_str(&piece);
-        n += 1;
-        if n >= max_tokens {
+    // Deterministic on purpose. A summary the user re-runs should not come back
+    // different, and greedy also keeps a seed out of the equation for tests.
+    let mut sampler = LlamaSampler::greedy();
+
+    // Bytes, decoded once at the end. A multi-byte character can span two tokens,
+    // so decoding each piece on its own turns every accented word in a Portuguese
+    // summary into replacement characters.
+    let mut out: Vec<u8> = Vec::new();
+    for step in 0..max_tokens {
+        let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+        if model.is_eog_token(token) {
             break;
         }
+        sampler.accept(token);
+        out.extend_from_slice(
+            &model
+                .token_to_piece_bytes(token, 32, false, None)
+                .map_err(|e| format!("llama detokenize: {e}"))?,
+        );
+        batch.clear();
+        batch
+            .add(token, tokens.len() as i32 + step as i32, &[0], true)
+            .map_err(|e| format!("llama batch: {e}"))?;
+        ctx.decode(&mut batch)
+            .map_err(|e| format!("llama decode: {e}"))?;
     }
-    Ok(out.trim().to_string())
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
 #[cfg(test)]
