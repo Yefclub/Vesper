@@ -60,10 +60,20 @@ pub struct AppSettings {
     /// does not carry would reset every existing user's settings in silence.
     #[serde(default)]
     pub recent_openrouter_llm_models: Vec<String>,
+    /// UI theme: `light` | `dark`. Light is the product default.
+    ///
+    /// `#[serde(default)]` is load-bearing for the reason the field above already
+    /// states: an older row does not carry this field, and `unwrap_or_default()`
+    /// would turn the failure into a factory-fresh configuration in silence.
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 fn default_ui_locale() -> String {
     "en".into()
+}
+fn default_theme() -> String {
+    "light".into()
 }
 fn default_true() -> bool {
     true
@@ -92,6 +102,7 @@ impl Default for AppSettings {
             compute_backend: "auto".into(),
             confirm_before_recording: true,
             recent_openrouter_llm_models: Vec::new(),
+            theme: "light".into(),
         }
     }
 }
@@ -276,6 +287,7 @@ mod tests {
         assert_eq!(s.compute_backend, "cuda");
         assert!(!s.confirm_before_recording);
         assert!(s.recent_openrouter_llm_models.is_empty());
+        assert_eq!(s.theme, "light");
     }
 
     #[test]

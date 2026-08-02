@@ -3,6 +3,7 @@
 //! for summarize/chat cloud-less paths (callers may fall back intentionally).
 
 use crate::domain::chat::{offline_answer, ChatMessage};
+use crate::domain::i18n::Locale;
 use crate::domain::summary::{extractive_summary, MeetingInsights, SummaryTemplate};
 use llama_cpp::standard_sampler::StandardSampler;
 use llama_cpp::{LlamaModel, LlamaParams, SessionParams};
@@ -53,10 +54,11 @@ impl LocalLlm {
         &self,
         transcript: &str,
         template: SummaryTemplate,
+        locale: Locale,
         model_id: &str,
     ) -> Result<MeetingInsights, String> {
         if self.is_ready(model_id) {
-            let prompt = crate::domain::summary::build_summary_prompt(template, transcript);
+            let prompt = crate::domain::summary::build_summary_prompt(template, transcript, locale);
             let raw = run_llama(&self.model_file(model_id), &prompt, 512)?;
             return Ok(MeetingInsights::from_model_text(&raw));
         }
@@ -66,6 +68,21 @@ impl LocalLlm {
         Err(format!(
             "local LLM model `{model_id}` is not installed — download GGUF weights from Settings"
         ))
+    }
+
+    /// One short completion for a meeting title.
+    ///
+    /// No `soft_fallback` branch, unlike the two below: the offline substitutes
+    /// are keyword-matched transcript lines, which are a usable stopgap for a
+    /// summary and garbage as a name. Without weights this is an error and the
+    /// caller keeps the date label.
+    pub fn title(&self, prompt: &str, model_id: &str) -> Result<String, String> {
+        if !self.is_ready(model_id) {
+            return Err(format!(
+                "local LLM model `{model_id}` is not installed — download GGUF weights from Settings"
+            ));
+        }
+        run_llama(&self.model_file(model_id), prompt, 32)
     }
 
     pub fn chat(
@@ -163,6 +180,7 @@ mod tests {
             .summarize(
                 "Me: we need to ship auth. Others: agreed. TODO write tests.",
                 SummaryTemplate::General,
+                Locale::En,
                 "qwen2.5-1.5b",
             )
             .unwrap();
@@ -174,7 +192,7 @@ mod tests {
         let mut llm = LocalLlm::with_models_dir(tempdir().unwrap().path().to_path_buf());
         llm.soft_fallback = false;
         let err = llm
-            .summarize("hi", SummaryTemplate::General, "qwen2.5-1.5b")
+            .summarize("hi", SummaryTemplate::General, Locale::En, "qwen2.5-1.5b")
             .unwrap_err();
         assert!(err.contains("not installed"));
     }
