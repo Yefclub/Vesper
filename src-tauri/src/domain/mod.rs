@@ -7,6 +7,7 @@ pub mod i18n;
 pub mod job;
 pub mod search;
 pub mod settings;
+pub mod shortcut;
 pub mod speaker;
 pub mod summary;
 pub mod transcript;

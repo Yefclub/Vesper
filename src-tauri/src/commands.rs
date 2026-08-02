@@ -10,6 +10,7 @@ use crate::domain::i18n::{catalog, t, Locale};
 use crate::domain::job::{MeetingEvent, MeetingRecord, MeetingStatus};
 use crate::domain::search::SearchHit;
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
+use crate::domain::shortcut::ShortcutStatus;
 use crate::domain::summary::{MeetingInsights, SummaryTemplate};
 use crate::domain::transcript::LiveTranscript;
 use crate::llm::service::LlmService;
@@ -912,6 +913,16 @@ fn is_minisign_key_line(line: &str) -> bool {
         .decode(line)
         .map(|raw| raw.len() == 42 && raw.starts_with(b"Ed"))
         .unwrap_or(false)
+}
+
+/// Whether the OS granted the global accelerator, and which one it is.
+///
+/// Registration happens once during setup; this only reads the result, so the
+/// window can render the key it will actually get instead of a hardcoded string
+/// derived from nothing the backend reports.
+#[tauri::command]
+pub fn shortcut_status(status: State<'_, ShortcutStatus>) -> ShortcutStatus {
+    status.inner().clone()
 }
 
 #[cfg(test)]
