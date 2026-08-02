@@ -21,7 +21,7 @@
         "resizable": true,
         "maximized": true,
         "fullscreen": false,
-        "backgroundColor": "#0a0a0a"
+        "backgroundColor": "#fbf9fc"
       }
     ],
     "security": {
@@ -30,7 +30,7 @@
     },
     "trayIcon": {
       "iconPath": "icons/icon.png",
-      "iconAsTemplate": true
+      "iconAsTemplate": false
     }
   },
   "bundle": {

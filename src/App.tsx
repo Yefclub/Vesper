@@ -12,27 +12,32 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
-import { FileAudio, MessageSquare, Settings, Sparkles } from "lucide-react";
+import { clsx } from "clsx";
+import { FileAudio, Settings, Sparkles } from "lucide-react";
 import {
   api,
   AppSettings,
   AudioDevice,
-  ChatMessage,
   formatDuration,
   LiveTranscript,
+  MeetingProgress,
   MeetingRecord,
   ModelInfo,
   RecorderStatus,
   SearchHit,
+  ShortcutStatus,
   StartGate,
 } from "./lib/api";
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
+import { formatMeetingDateTime } from "./lib/datetime";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise, segmentArrive } from "./lib/motion";
+import { applyTheme } from "./lib/theme";
 import { Button, FOCUS } from "./components/Button";
 import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { RecordTransport } from "./components/RecordTransport";
 import { Sidebar } from "./components/Sidebar";
@@ -40,11 +45,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
 
-type Tab = "transcript" | "summary" | "chat";
-
-/// Mirrors the accelerator registered in `src-tauri/src/lib.rs`. No command
-/// reports it, and a global shortcut nobody can see is a shortcut nobody uses.
-const RECORD_SHORTCUT = "Ctrl+Shift+R";
+type Tab = "transcript" | "summary";
 
 export default function App() {
   const [bootLocale, setBootLocale] = useState("en");
@@ -57,6 +58,11 @@ export default function App() {
       .then((s) => {
         setSettings(s);
         setBootLocale(s.ui_locale || "en");
+        // The stored value overrules the boot cache the moment it resolves —
+        // localStorage only exists because this round-trip cannot beat first
+        // paint. Anything that is not "dark" is light, so a backend that does
+        // not carry the field yet lands on the product default.
+        applyTheme(s.theme === "dark" ? "dark" : "light");
       })
       .catch(() => {
         setSettings(null);
@@ -108,8 +114,6 @@ function AppShell({
   const [meetingsLoaded, setMeetingsLoaded] = useState(false);
   const [searching, setSearching] = useState(false);
   const [tab, setTab] = useState<Tab>("transcript");
-  const [chat, setChat] = useState<ChatMessage[]>([]);
-  const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -117,19 +121,31 @@ function AppShell({
   const [updateNote, setUpdateNote] = useState<string | null>(null);
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [gate, setGate] = useState<StartGate>({ allowed: false });
+  /// What the backend says about the global accelerator. `null` until it
+  /// answers, and permanently `null` on a build whose backend does not report
+  /// it — in which case the app names the key it listens for and claims nothing
+  /// about the OS.
+  const [shortcut, setShortcut] = useState<ShortcutStatus | null>(null);
+  /// The last phase the backend reported for a meeting being finished. `null`
+  /// until the first event, and permanently `null` on a build whose backend
+  /// does not emit them — in which case none of the UI below renders and Stop
+  /// behaves as it did.
+  const [progress, setProgress] = useState<MeetingProgress | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [confirmingRecord, setConfirmingRecord] = useState(false);
   const [skipRecordReminder, setSkipRecordReminder] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<MeetingRecord | null>(null);
+  /// Whether the meeting header's title is being edited. A generated title is a
+  /// guess, and a guess the user cannot correct is worse than a date.
+  const [renaming, setRenaming] = useState(false);
   const confirmBeforeRecordingRef = useRef(settings.confirm_before_recording);
   confirmBeforeRecordingRef.current = settings.confirm_before_recording;
   const scrollRef = useRef<HTMLDivElement>(null);
   /// Whether the reading column is following the newest line. A ref, not state:
   /// it is written from a scroll handler at up to one frame per pixel, and this
-  /// component owns the meetings, the transcript, the chat and the recorder
-  /// status — a state write here would re-render the whole shell per frame.
+  /// component owns the meetings, the transcript and the recorder status — a
+  /// state write here would re-render the whole shell per frame.
   const pinnedRef = useRef(true);
-  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -138,6 +154,21 @@ function AppShell({
     () => meetings.find((m) => m.id === selectedId) ?? null,
     [meetings, selectedId],
   );
+
+  /// The phase the header narrates, or `null` when there is nothing to say.
+  /// `ready` is the end of the walk and clears the state; `summary_failed` is
+  /// an outcome, and it belongs beside the button that retries it rather than
+  /// under a spinner that has stopped spinning.
+  const working =
+    progress && progress.phase !== "ready" && progress.phase !== "summary_failed"
+      ? progress.phase
+      : null;
+
+  /// Matched on the meeting, not just the phase: `meeting://progress` reports
+  /// the recording that just stopped, which is not necessarily the one on
+  /// screen by the time the user reads this.
+  const summaryFailed =
+    progress?.phase === "summary_failed" && progress.meeting_id === selectedId;
 
   const refreshGate = useCallback(async () => {
     try {
@@ -163,9 +194,8 @@ function AppShell({
   const loadMeeting = useCallback(async (id: string) => {
     setSelectedId(id);
     try {
-      const [tr, c, m] = await Promise.all([
+      const [tr, m] = await Promise.all([
         api.getTranscript(id),
-        api.listChat(id),
         api.getMeeting(id),
       ]);
       setTranscript(tr);
@@ -175,7 +205,6 @@ function AppShell({
       // content and gives that effect something that changes when the
       // replacement is actually there.
       setTranscriptOwner(id);
-      setChat(c);
       if (m) {
         setMeetings((prev) => {
           const others = prev.filter((x) => x.id !== id);
@@ -199,9 +228,77 @@ function AppShell({
     }
   }, []);
 
+  /// These three sit above the effects that call them, and they are
+  /// `useCallback` rather than plain declarations for one reason: an effect
+  /// that lists them as dependencies re-registers when they change. A listener
+  /// registered once with `[]` kept the `t` of the first render, and
+  /// `i18n.tsx:41` builds `t` from a catalog that starts empty — so a gate
+  /// failure reached from the keyboard reported the literal `gate.local_stt`
+  /// instead of the sentence.
+  const handleStart = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const g = await api.canRecord();
+      setGate(g);
+      if (!g.allowed) {
+        setError(g.reason || t("gate.local_stt"));
+        return;
+      }
+      const m = await api.startRecording();
+      setStatus(await api.recorderStatus());
+      setSelectedId(m.id);
+      setTranscript({ segments: [] });
+      setTab("transcript");
+      await refreshMeetings();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [t, refreshMeetings]);
+
+  /// The dock and both keyboard paths go through here, so the reminder cannot
+  /// be skipped by starting a recording from the keyboard.
+  ///
+  /// Reads the preference from a ref rather than the closed-over value: the
+  /// global-hotkey listener outlives a settings change, so it would otherwise
+  /// keep the setting as it was at startup and go on asking after the user
+  /// opted out.
+  const requestStart = useCallback(() => {
+    if (confirmBeforeRecordingRef.current) {
+      setConfirmingRecord(true);
+      return;
+    }
+    void handleStart();
+  }, [handleStart]);
+
+  const handleStop = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const m = await api.stopRecording();
+      setStatus(await api.recorderStatus());
+      await refreshMeetings();
+      await loadMeeting(m.id);
+      // The tab switch moved onto the `summarizing` phase. This call only
+      // returns once every step has finished, so switching here landed the user
+      // on a finished answer rather than letting them watch it being written.
+      await refreshGate();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [refreshMeetings, loadMeeting, refreshGate]);
+
   useEffect(() => {
     (async () => {
       void refreshDevices();
+      // Whether the OS granted the accelerator is not a startup failure: the
+      // in-app listener works regardless, so a rejection here leaves the note
+      // off rather than putting an error banner on the first screen.
+      setShortcut(await api.shortcutStatus().catch(() => null));
       try {
         await refreshMeetings();
         setModels(await api.listModels());
@@ -223,14 +320,26 @@ function AppShell({
   }, [refreshMeetings, refreshGate, refreshDevices]);
 
   useEffect(() => {
-    let unsubs: Array<() => void> = [];
+    /// `listen()` is a promise, and the cleanup below runs synchronously — so
+    /// it used to run against an empty array while the subscriptions were still
+    /// resolving. Under `React.StrictMode` (main.tsx) the mount→unmount→mount
+    /// cycle therefore left the first set attached forever and every event
+    /// fired twice in dev, which would have double-toggled the recorder the
+    /// moment the shortcut started working. `track` closes that: a
+    /// subscription that lands after teardown unsubscribes itself.
+    let live = true;
+    const unsubs: Array<() => void> = [];
+    const track = (un: () => void) => {
+      if (live) unsubs.push(un);
+      else un();
+    };
     (async () => {
-      unsubs.push(
+      track(
         await listen<LiveTranscript>("transcript://append", (e) => {
           setTranscript(e.payload);
         }),
       );
-      unsubs.push(
+      track(
         await listen<MeetingRecord>("meeting://ready", (e) => {
           setMeetings((prev) => {
             const rest = prev.filter((m) => m.id !== e.payload.id);
@@ -239,7 +348,22 @@ function AppShell({
           setSelectedId(e.payload.id);
         }),
       );
-      unsubs.push(
+      track(
+        await listen<MeetingProgress>("meeting://progress", (e) => {
+          const p = e.payload;
+          // `ready` is the end of the walk, not a step in it: the meeting is
+          // on screen by then and a spinner beside it would be a lie.
+          setProgress(p.phase === "ready" ? null : p);
+          // The sidebar already paints a dot for any status other than
+          // `ready`, so re-reading the list here lights it for free.
+          if (p.phase === "transcribing") void refreshMeetings();
+          // Here rather than in `handleStop`: the point is to watch the pane
+          // the answer lands in while it is being written, instead of being
+          // teleported to it once it is already done.
+          if (p.phase === "summarizing") setTab("summary");
+        }),
+      );
+      track(
         await listen("hotkey://toggle-record", async () => {
           try {
             const st = await api.recorderStatus();
@@ -251,9 +375,61 @@ function AppShell({
         }),
       );
     })();
-    return () => unsubs.forEach((u) => u());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return () => {
+      live = false;
+      unsubs.forEach((u) => u());
+    };
+  }, [handleStop, requestStart, refreshMeetings]);
+
+  /// The in-app half of the record shortcut, and the half that actually works.
+  ///
+  /// A webview `keydown` needs no grant from the OS — the global registration
+  /// does, and on a machine where another app already owns the combination it
+  /// is refused. This covers the focused case, which is exactly the case the
+  /// empty state's `<kbd>` describes. It does not replace the global shortcut:
+  /// unfocused is the case that matters most for a meeting recorder, since you
+  /// are in the call, not in Vesper.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      // `e.code`, not `e.key`: layout-independent, and the same `KeyR` the
+      // backend registers.
+      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.code !== "KeyR") return;
+      // Bubble phase and a tag guard, so a field the user is typing in wins.
+      // The capture phase would be right for a shortcut that must fire
+      // unconditionally; this is not one.
+      const el = e.target as HTMLElement | null;
+      if (el?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el?.tagName ?? "")) {
+        return;
+      }
+      // A dialog or the drawer is a question waiting for an answer. Starting a
+      // recording underneath one is not an answer.
+      if (confirmingRecord || pendingDelete || showSettings || showOnboarding) return;
+      // Not optional: Ctrl+Shift+R is WebView2's hard reload. Without it the
+      // dev build reloads the page and loses the recording in flight — and
+      // release builds disable the accelerator, so it looks correct in
+      // `tauri build` and misbehaves in `tauri dev`.
+      e.preventDefault();
+      // Auto-repeat fires this dozens of times a second while the key is down,
+      // and `busy` covers the slower version of the same thing: a second press
+      // while the first start or stop is still in flight. Either one starts a
+      // recording and immediately stops it, with an error banner from whichever
+      // request lost.
+      if (e.repeat || busy) return;
+      if (status?.recording) void handleStop();
+      else requestStart();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    status?.recording,
+    busy,
+    confirmingRecord,
+    pendingDelete,
+    showSettings,
+    showOnboarding,
+    handleStop,
+    requestStart,
+  ]);
 
   // Debounced so typing does not fire one query per keystroke. Every run
   // supersedes the one before it, and a stale response that arrives after the
@@ -282,7 +458,9 @@ function AppShell({
   }, [query]);
 
   useEffect(() => {
-    if (!status?.recording) return;
+    // Paused means nothing is arriving — no samples, no lines, no clock. Asking
+    // twice a second anyway only re-sets the same values.
+    if (!status?.recording || status.paused) return;
     const id = window.setInterval(async () => {
       try {
         setStatus(await api.recorderStatus());
@@ -319,6 +497,14 @@ function AppShell({
     pinnedRef.current = true;
   }, [selectedId, tab]);
 
+  /// A rename belongs to the meeting it was opened on. Clicking away commits it
+  /// through the field's own blur, but nothing else does — the tray, a
+  /// `meeting://ready` landing, the sidebar's arrow keys — and an open field
+  /// carrying the previous meeting's name is how the wrong title gets saved.
+  useEffect(() => {
+    setRenaming(false);
+  }, [selectedId, tab]);
+
   // Keyed on what the transcript *contains*, not on the object: `poll_live_stt`
   // replaces it every 1200ms whether or not a word was added, so keying on
   // `transcript` would yank the column back down on every silent tick.
@@ -350,77 +536,6 @@ function AppShell({
     [pinToBottom],
   );
 
-  // The composer grows with what is typed into it, between `min-h-9` and
-  // `max-h-40`, both of which stay in CSS so the clamp survives this write.
-  // `tab` is a dependency because the element only exists on the chat tab, so
-  // mounting it is what needs the first measurement.
-  useEffect(() => {
-    const el = composerRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }, [question, tab]);
-
-  /// `handleChat` appends the question, awaits, then appends the answer — so
-  /// the thread shows nothing at all in between. Keyed on the last message
-  /// rather than on `busy`, which is also raised by summarizing and importing.
-  const pending = busy && chat[chat.length - 1]?.role === "user";
-
-  /// The dock and the hotkey both go through here, so the reminder cannot be
-  /// skipped by starting a recording from the keyboard.
-  ///
-  /// Reads the preference from a ref rather than the closed-over value: the
-  /// hotkey listener is registered once on mount, so it would otherwise keep the
-  /// setting as it was at startup and go on asking after the user opted out.
-  function requestStart() {
-    if (confirmBeforeRecordingRef.current) {
-      setConfirmingRecord(true);
-      return;
-    }
-    void handleStart();
-  }
-
-  async function handleStart() {
-    setBusy(true);
-    setError(null);
-    try {
-      const g = await api.canRecord();
-      setGate(g);
-      if (!g.allowed) {
-        setError(g.reason || t("gate.local_stt"));
-        return;
-      }
-      const m = await api.startRecording();
-      setStatus(await api.recorderStatus());
-      setSelectedId(m.id);
-      setTranscript({ segments: [] });
-      setChat([]);
-      setTab("transcript");
-      await refreshMeetings();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleStop() {
-    setBusy(true);
-    setError(null);
-    try {
-      const m = await api.stopRecording();
-      setStatus(await api.recorderStatus());
-      await refreshMeetings();
-      await loadMeeting(m.id);
-      setTab("summary");
-      await refreshGate();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function handlePauseResume() {
     try {
       if (status?.paused) setStatus(await api.resumeRecording());
@@ -436,22 +551,6 @@ function AppShell({
     // render as the new query. An effect runs after paint, which is one frame
     // of "no matches" — the exact flash the flag exists to prevent.
     setSearching(q.trim().length > 0);
-  }
-
-  async function handleChat() {
-    if (!selectedId || !question.trim()) return;
-    setBusy(true);
-    try {
-      const userMsg = { role: "user", content: question };
-      setChat((c) => [...c, userMsg]);
-      setQuestion("");
-      const ans = await api.chat(selectedId, userMsg.content);
-      setChat((c) => [...c, ans]);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
   }
 
   async function handleSummarize(template = "general") {
@@ -490,7 +589,13 @@ function AppShell({
     if (!selectedId) return;
     try {
       const path = await save({
-        defaultPath: `vesper-export.${format}`,
+        // The meeting's own name, sanitised by the backend, so a folder of
+        // exports is readable instead of `vesper-export (4).md`. One extra IPC
+        // hop on a click that is about to open a native dialog — free — and it
+        // keeps the Windows filename rules where `cargo test` can reach them.
+        defaultPath: await api
+          .suggestedExportName(selectedId, format)
+          .catch(() => `vesper-export.${format}`),
         filters: [{ name: format.toUpperCase(), extensions: [format] }],
       });
       if (!path) return;
@@ -507,7 +612,6 @@ function AppShell({
     setSelectedId(null);
     setTranscript({ segments: [] });
     setTranscriptOwner(null);
-    setChat([]);
   }
 
   /// Back to the empty screen, on demand — there was no way to get there
@@ -518,9 +622,27 @@ function AppShell({
   /// showing it, so there is nothing to warn about either.
   function startNewMeeting() {
     clearWorkspace();
-    setQuestion("");
     setTab("transcript");
     setError(null);
+  }
+
+  /// Nothing is written optimistically: the title on screen only changes once
+  /// the backend has kept it, so a rejected rename leaves the header showing
+  /// what the database actually holds and there is nothing to roll back.
+  ///
+  /// The id is a parameter rather than read from `selected`, so a rename that
+  /// commits on the way out of the field can never land on the meeting the user
+  /// just clicked.
+  async function commitRename(id: string, next: string) {
+    setRenaming(false);
+    const title = next.trim();
+    if (!title || title === meetings.find((m) => m.id === id)?.title) return;
+    try {
+      const m = await api.renameMeeting(id, title);
+      setMeetings((prev) => prev.map((x) => (x.id === m.id ? m : x)));
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   async function handleDelete(id: string) {
@@ -536,9 +658,29 @@ function AppShell({
     }
   }
 
+  /// Picking a capture device in the dock writes straight through — there is no
+  /// Save button within 400px of it, and the choice is one click away from the
+  /// recording it governs. Same path as every other save, so it fails the same
+  /// way, and the gate is re-read because "no microphone" is one of the reasons
+  /// it blocks.
+  async function handlePickDevice(kind: "mic" | "system", id: string | null) {
+    try {
+      const next = await api.saveSettings(
+        kind === "mic"
+          ? { ...settings, mic_device_id: id }
+          : { ...settings, system_device_id: id },
+      );
+      setSettings(next);
+      onSettingsChange(next);
+      await refreshGate();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
 
   return (
-    <div className="flex h-full bg-background text-fg">
+    <div className="flex h-full flex-col bg-background text-fg">
       {showOnboarding && (
         <Onboarding
           settings={settings}
@@ -553,447 +695,536 @@ function AppShell({
         />
       )}
 
-      <Sidebar
-        meetings={meetings}
-        selectedId={selectedId}
-        query={query}
-        hits={hits}
-        loading={!meetingsLoaded}
-        searching={searching}
-        onSearch={handleSearch}
-        onSelect={loadMeeting}
-        onDelete={(id) => setPendingDelete(meetings.find((m) => m.id === id) ?? null)}
-        onImport={handleImport}
-        onNew={startNewMeeting}
-      />
+      {/* Window chrome. It spans the sidebar and the content, and it is the
+          canvas: no fill of its own, and no border either — the 8px gutter
+          around the card below is the separation, and a hairline 8px from the
+          card's own border is two hard divides in a row.
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        {/* Three columns, not flex with mx-auto. In a flex row `mx-auto` centres an
-            item between its siblings, so an identity block wider than the actions
-            block pushed the record control off-centre — and it moved again
-            whenever the recording state changed the width of either side. The
-            centre column is now anchored to the header, and its contents can grow
-            and shrink without dragging anything with them. The height is fixed
-            for the same reason: the transport is the widest thing that lands in
-            the centre column, and it must not be able to grow the header. */}
-        <header className="grid h-14 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 border-b border-border bg-background px-6">
-          <div className="flex items-center gap-2">
-            <img src={logo} alt="" className="h-8 w-8 rounded-md" />
-            {/* Flat, not a gradient: the gradient made the brightest, most
-                saturated thing on screen a piece of chrome the user cannot act
-                on, and it was the only reason --color-accent-2 existed. */}
-            <span className="text-lg font-semibold text-fg">{t("app.name")}</span>
-          </div>
+          `data-tauri-drag-region` goes on this element and on no child: Tauri's
+          handler tests `event.target`, so a click on a button inside is not a
+          drag, and its built-in double-click-to-maximise is the Windows
+          behaviour to inherit rather than reimplement.
 
-          {/* Centre column: the transport for a recording in progress. It used
-              to be a badge that only said "Recording" while Stop lived in the
-              dock — which is on the empty screen, and starting a recording
-              leaves that screen. The controls follow the state they control. */}
-          <div className="flex items-center justify-center">
+          48px, not 56: the row has to fit an `h-8` control with 8px of
+          clearance, and 48 plus the card's 8px gutter is the same chrome
+          budget the `h-14` header was already spending.
+
+          Three columns, not flex with mx-auto. In a flex row `mx-auto` centres
+          an item between its siblings, so an identity block wider than the
+          actions block pushed the record control off-centre — and it moved
+          again whenever the recording state changed the width of either side.
+          The centre column is anchored to the header, and its contents can
+          grow and shrink without dragging anything with them. The height is
+          fixed for the same reason: the transport is the widest thing that
+          lands in the centre column, and it must not be able to grow the
+          header. */}
+      <header
+        data-tauri-drag-region
+        className="grid h-12 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 pl-4 pr-2"
+      >
+        <div className="flex items-center gap-2">
+          {/* No radius: the asset is the mark alone now, not a rounded tile, so
+              a corner clip would shave the artwork instead of a background. */}
+          <img src={logo} alt="" className="h-8 w-8" />
+          {/* Flat, not a gradient: the gradient made the brightest, most
+              saturated thing on screen a piece of chrome the user cannot act
+              on, and it was the only reason --color-accent-2 existed. */}
+          <span className="text-lg font-semibold text-fg">{t("app.name")}</span>
+        </div>
+
+        {/* Centre column: the transport for a recording in progress, and then
+            the phase of the work that follows it. It used to be a badge that
+            only said "Recording" while Stop lived in the dock — which is on the
+            empty screen, and starting a recording leaves that screen. The
+            controls follow the state they control.
+
+            Both in the same `AnimatePresence` with the same `fadeRise`, so Stop
+            hands the slot from one to the other in a single beat rather than
+            emptying the header for the several seconds the work takes. */}
+        <div className="flex items-center justify-center">
+          <AnimatePresence>
+            {status?.recording ? (
+              <motion.div key="transport" {...fadeRise}>
+                <RecordTransport
+                  status={status}
+                  busy={busy}
+                  onStop={handleStop}
+                  onPauseResume={handlePauseResume}
+                />
+              </motion.div>
+            ) : working ? (
+              <motion.div key="processing" {...fadeRise}>
+                <ProcessingStatus phase={working} />
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+        </div>
+
+        <div className="flex items-center justify-end gap-3">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setShowSettings(true)}
+            title={t("nav.settings")}
+            aria-label={t("nav.settings")}
+          >
+            <Settings size={16} />
+          </Button>
+        </div>
+      </header>
+
+      <div className="flex min-h-0 flex-1">
+        <Sidebar
+          meetings={meetings}
+          selectedId={selectedId}
+          query={query}
+          hits={hits}
+          loading={!meetingsLoaded}
+          searching={searching}
+          onSearch={handleSearch}
+          onSelect={loadMeeting}
+          onDelete={(id) => setPendingDelete(meetings.find((m) => m.id === id) ?? null)}
+          onImport={handleImport}
+          onNew={startNewMeeting}
+        />
+
+        <main className="flex min-w-0 flex-1 flex-col">
+          {/* THE CARD. One JSX element and not a component, because it has
+              exactly one consumer. `overflow-hidden` clips its own descendants
+              into the 12px corners — the banners' full-bleed borders, the
+              scroller, the dock — while `<main>` above must NOT clip, or the
+              light-mode lift shadow has nowhere to go. The `m-2` gutter is
+              symmetric on four sides and sized to contain that shadow, whose
+              maximum extent is 6px. */}
+          <div className="relative m-2 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-surface-1 shadow-lift">
+            {/* The card's first children, not a strip on the canvas above it:
+                out there they would run the full window width and break the
+                card's top alignment. In here the radius clips them and they
+                read at content level. */}
+            {error && (
+              <div className="border-b border-danger/30 bg-danger/10 px-6 py-2 text-sm text-danger">
+                {error}
+                <Button variant="link" className="ml-3" onClick={() => setError(null)}>
+                  {t("action.dismiss")}
+                </Button>
+              </div>
+            )}
+            {pendingUpdate && (
+              <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
+                <span>{t("update.available").replace("{version}", pendingUpdate.version)}</span>
+                <Button
+                  size="xs"
+                  data-testid="update-install"
+                  onClick={async () => {
+                    const update = pendingUpdate;
+                    setPendingUpdate(null);
+                    try {
+                      setUpdateNote(t("update.installing"));
+                      await update.downloadAndInstall();
+                      setUpdateNote(t("update.relaunching"));
+                      await relaunch();
+                    } catch (e) {
+                      setUpdateNote(null);
+                      setError(String(e));
+                      // The check only runs once, on mount. Without putting the offer
+                      // back, a failed download means no retry until the app restarts.
+                      setPendingUpdate(update);
+                    }
+                  }}
+                >
+                  {t("update.install")}
+                </Button>
+                <Button variant="link" onClick={() => setPendingUpdate(null)}>
+                  {t("update.later")}
+                </Button>
+              </div>
+            )}
+            {updateNote && (
+              <div className="border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
+                {updateNote}
+              </div>
+            )}
+
+            {selected ? (
+              <>
+                {/* `max-w-pane` (1024px) is the card's content column. The
+                    meeting header and the tab bar bound to it so the rules they
+                    carry stop on the same two vertical edges, instead of running
+                    to the card's own border and putting a full-width divide
+                    inside a rounded corner. */}
+                <div className="mx-auto flex w-full max-w-pane items-center justify-between border-b border-border px-6 py-3">
+                  <div className="min-w-0">
+                    {/* Click to edit, in place. `bg-transparent` and the same
+                        size and weight as the heading it replaces, so the title
+                        does not read as a form field at rest — the field is the
+                        heading, not a control beside it. */}
+                    {renaming ? (
+                      <input
+                        autoFocus
+                        data-testid="rename-input"
+                        aria-label={t("nav.rename")}
+                        defaultValue={selected.title}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void commitRename(selected.id, e.currentTarget.value);
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            // Put the original back before closing. A browser
+                            // that fires blur on the way out would otherwise
+                            // commit the abandoned edit; with the value
+                            // restored, that commit is a no-op.
+                            e.currentTarget.value = selected.title;
+                            setRenaming(false);
+                          }
+                        }}
+                        onBlur={(e) => void commitRename(selected.id, e.currentTarget.value)}
+                        className={`w-full rounded-sm bg-transparent text-base font-medium ${FOCUS}`}
+                      />
+                    ) : (
+                      // The control is inside the heading rather than being
+                      // the heading: an `<h1 onClick>` is a click target with
+                      // no keyboard route, and every other affordance in this
+                      // app has one. `title` also gives the full name back on
+                      // hover once the heading truncates.
+                      <h1 className="truncate text-base font-medium">
+                        <button
+                          type="button"
+                          onClick={() => setRenaming(true)}
+                          title={selected.title}
+                          aria-label={t("nav.rename")}
+                          className={`max-w-full cursor-text truncate rounded-sm text-left ${FOCUS}`}
+                        >
+                          {selected.title}
+                        </button>
+                      </h1>
+                    )}
+                    {/* When it happened, in the reader's own time, and how long
+                        it ran. The status word used to sit here and said
+                        nothing in the normal case; the sidebar's dot already
+                        covers the abnormal one. */}
+                    <p className="text-xs tabular-nums text-fg-muted">
+                      {formatMeetingDateTime(selected.created_at)} ·{" "}
+                      {formatDuration(selected.duration_ms)}
+                    </p>
+                  </div>
+                  {/* Five siblings used to read as five equal actions. Summarize
+                      is the one primary; MD/PDF/DOCX are one action with a format
+                      parameter, so they sit inside a single bordered group.
+                      The inset is horizontal only: a `p-1` shell would stand 34px
+                      tall between two 24px chips, and a group that is half again
+                      the height of its neighbours reads as a different tier of
+                      control rather than a bracket around three of them. */}
+                  {/* `shrink-0` beside the title's `min-w-0`: a generated or
+                      typed name can be arbitrarily long, and without the pair
+                      the flex algorithm resolves the overflow by squeezing the
+                      buttons instead of truncating the heading. */}
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button size="xs" onClick={() => handleSummarize("general")}>
+                      <Sparkles size={16} /> {t("action.summarize")}
+                    </Button>
+                    <div className="flex items-center gap-1 rounded-md border border-border px-1">
+                      {(["md", "pdf", "docx"] as const).map((format) => (
+                        <Button
+                          key={format}
+                          size="xs"
+                          variant="ghost"
+                          onClick={() => handleExport(format)}
+                        >
+                          {format.toUpperCase()}
+                        </Button>
+                      ))}
+                    </div>
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      onClick={() =>
+                        selectedId &&
+                        api.retranscribe(selectedId).then((m) => loadMeeting(m.id))
+                      }
+                    >
+                      <FileAudio size={16} /> {t("action.retranscribe")}
+                    </Button>
+                  </div>
+                </div>
+
+                <Tabs
+                  idPrefix="content"
+                  className="mx-auto w-full max-w-pane px-6"
+                  value={tab}
+                  onChange={setTab}
+                  items={[
+                    { id: "transcript", label: t("tab.transcript") },
+                    { id: "summary", label: t("tab.summary") },
+                  ]}
+                />
+
+                {/* The scroll container is the tab panel: the two panes swap
+                    inside it, so the id follows the selected tab rather than
+                    living on a pane that unmounts. */}
+                <div
+                  ref={scrollRef}
+                  onScroll={handleContentScroll}
+                  data-scroll
+                  id={`content-panel-${tab}`}
+                  role="tabpanel"
+                  aria-labelledby={`content-tab-${tab}`}
+                  className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-4"
+                >
+                  <AnimatePresence mode="wait">
+                    {tab === "transcript" && (
+                      <motion.div
+                        key="transcript"
+                        ref={pinOnPaneMount}
+                        {...fadeRise}
+                        // `max-w-pane` (1024px), not `max-w-reading`: the point
+                        // of two sides is the split, and a 576px column gives it
+                        // nowhere to happen. Each bubble caps at `max-w-reading`
+                        // instead, so the measure is protected while the sides
+                        // are genuinely separated.
+                        className="mx-auto max-w-pane"
+                        data-testid="transcript-panel"
+                      >
+                        {transcript.segments?.length ? (
+                          // `initial={false}` so opening a past meeting does not
+                          // blur-and-fade three hundred rows at once: only the
+                          // segments that land after the pane is up animate, which
+                          // is the handful per minute `segmentArrive` is sized for.
+                          <AnimatePresence initial={false}>
+                            {transcript.segments.map((s, i) => {
+                              // A run of consecutive lines from one speaker is one
+                              // utterance: it carries a single timestamp and a
+                              // single name, and only the gap says where it ends.
+                              const opens =
+                                i === 0 ||
+                                transcript.segments[i - 1].speaker !== s.speaker;
+                              // This machine's microphone is the user, so it
+                              // takes the right side; the computer's audio is
+                              // the other people in the meeting and takes the
+                              // left. Reversing these makes every transcript
+                              // wrong in a way no test can see.
+                              const me = s.speaker === "me";
+                              return (
+                                <motion.div
+                                  key={s.id}
+                                  {...segmentArrive}
+                                  className={clsx(
+                                    "flex w-full flex-col",
+                                    me ? "items-end" : "items-start",
+                                    // 24px at a turn change against 4px within
+                                    // one: 6:1 is enough for the grouping to
+                                    // read without drawing a rule.
+                                    i === 0 ? "" : opens ? "mt-6" : "mt-1",
+                                  )}
+                                >
+                                  {/* One meta line per TURN, not per line — the
+                                      one real win of the gutter list this
+                                      replaces. Both fields at `text-fg-subtle`:
+                                      the timestamp is a seek offset into the
+                                      recording, i.e. content, and content
+                                      clears 4.5:1. `flex-row-reverse` on the me
+                                      side so both read outward-in from their
+                                      own edge. */}
+                                  {opens && (
+                                    <div
+                                      className={clsx(
+                                        "flex items-baseline gap-2 px-1 pb-1 text-2xs text-fg-subtle",
+                                        me && "flex-row-reverse",
+                                      )}
+                                    >
+                                      <span className="font-medium">
+                                        {me ? t("speaker.me") : t("speaker.others")}
+                                      </span>
+                                      <span className="tabular-nums">
+                                        {formatDuration(s.start_ms)}
+                                      </span>
+                                    </div>
+                                  )}
+                                  {/* The corner nearest the speaker's own edge
+                                      is cut to 6px — a tail without drawing a
+                                      tail. `me` is a tint rather than a fill
+                                      because `--color-me` is the accent, and a
+                                      second accent fill would compete with the
+                                      one on screen. */}
+                                  <p
+                                    className={clsx(
+                                      "max-w-reading rounded-lg border px-4 py-3 text-base leading-relaxed",
+                                      me
+                                        ? "rounded-br-sm border-me/30 bg-me/10"
+                                        : "rounded-bl-sm border-border bg-surface-2",
+                                    )}
+                                  >
+                                    {s.text}
+                                  </p>
+                                </motion.div>
+                              );
+                            })}
+                          </AnimatePresence>
+                        ) : (
+                          <Empty
+                            icon={<AudioLinesIcon size={22} />}
+                            title={t("empty.transcript")}
+                            body={t("empty.transcript_body")}
+                            action={
+                              <Button
+                                size="md"
+                                variant="secondary"
+                                onClick={handleImport}
+                                disabled={busy}
+                              >
+                                {t("nav.import")}
+                              </Button>
+                            }
+                          />
+                        )}
+                      </motion.div>
+                    )}
+
+                    {tab === "summary" && (
+                      <motion.div
+                        key="summary"
+                        {...fadeRise}
+                        className="mx-auto max-w-pane"
+                        data-testid="summary-panel"
+                      >
+                        {selected.summary ||
+                        selected.key_points ||
+                        selected.action_items ? (
+                          // Three sections, two kinds of content: one is prose
+                          // that needs a measure, two are lists that do not.
+                          // `xl:` and not `lg:` because the grid measures the
+                          // viewport while the card is ~312px narrower — at
+                          // 1024px the right column would resolve to 130px.
+                          // Below the breakpoint it stacks, summary first.
+                          <div className="grid gap-6 xl:grid-cols-[minmax(0,36rem)_minmax(18rem,1fr)]">
+                            {/* Prose gets the reading measure and no box:
+                                boxing it is what makes the product's headline
+                                output read as a widget instead of as the
+                                answer. */}
+                            <section>
+                              <h2 className="mb-2 text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+                                {t("section.summary")}
+                              </h2>
+                              <Markdown text={selected.summary || "—"} />
+                            </section>
+                            {/* The two lists become a right-hand rail and keep
+                                the box — that is what makes short lines
+                                scannable blocks rather than more prose. */}
+                            <div className="space-y-6">
+                              <Section title={t("section.key_points")} body={selected.key_points || "—"} />
+                              <Section title={t("section.action_items")} body={selected.action_items || "—"} />
+                            </div>
+                          </div>
+                        ) : (
+                          // Three cards each holding one em-dash and nothing to
+                          // act on is an empty state. This renders it as one.
+                          <Empty
+                            icon={<Sparkles size={22} />}
+                            title={t("empty.summary")}
+                            body={t("empty.summary_body")}
+                            action={
+                              <div>
+                                <Button
+                                  size="md"
+                                  onClick={() => handleSummarize("general")}
+                                  disabled={busy}
+                                >
+                                  <Sparkles size={16} /> {t("action.summarize")}
+                                </Button>
+                                {/* Beside the button that fixes it, not in the
+                                    global banner: the recording, the audio and
+                                    the transcript are all saved and correct,
+                                    and only this one step failed. A banner
+                                    across the top would report a lost
+                                    meeting. */}
+                                {summaryFailed && (
+                                  <p className="mt-3 text-xs text-danger">
+                                    {t("processing.summary_failed")}
+                                  </p>
+                                )}
+                              </div>
+                            }
+                          />
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              </>
+            ) : (
+              <div className="flex flex-1 items-center justify-center p-8">
+                <Empty
+                  icon={<MicIcon size={22} />}
+                  title={t("empty.ready")}
+                  body={t("empty.ready_body")}
+                  action={
+                    // No Record here. The dock at the foot of this same screen is
+                    // the record button — putting a second one in the middle gave
+                    // the empty screen two primary actions that do the same thing,
+                    // eight hundred pixels apart. The shortcut still belongs here,
+                    // where there is room to name it.
+                    <div>
+                      <div className="flex items-center justify-center gap-3">
+                        <Button
+                          size="md"
+                          variant="secondary"
+                          onClick={handleImport}
+                          disabled={busy}
+                        >
+                          {t("nav.import")}
+                        </Button>
+                        {!status?.recording && (
+                          <span className="flex items-center gap-2 text-2xs text-fg-subtle">
+                            {t("record.start")}
+                            {/* Named, always — the in-app listener above makes
+                                the key true whether or not the OS granted the
+                                global one. The literal is the fallback for a
+                                backend that does not report the accelerator
+                                yet, not a second claim about what is
+                                registered. */}
+                            <kbd className="inline-flex h-6 items-center rounded-xs border border-border bg-surface-2 px-2 font-sans text-2xs">
+                              {shortcut?.accelerator ?? "Ctrl+Shift+R"}
+                            </kbd>
+                          </span>
+                        )}
+                      </div>
+                      {/* Only when the backend says the OS refused it. The app
+                          may not advertise a global shortcut it does not have,
+                          and it may not stay silent about a key that works in
+                          only half the cases the user will try. */}
+                      {!status?.recording && shortcut?.registered === false && (
+                        <p className="mt-2 text-2xs text-fg-subtle">
+                          {t(shortcut.reason_key ?? "shortcut.unavailable")}
+                        </p>
+                      )}
+                    </div>
+                  }
+                />
+              </div>
+            )}
+
+            {/* The empty screen only. With a meeting open the transcript and the
+                summary own this column, and a Record button hanging over them
+                offers to start a second recording on top of the one the header is
+                already showing. */}
             <AnimatePresence>
-              {status?.recording && (
-                <motion.div key="transport" {...fadeRise}>
-                  <RecordTransport
-                    status={status}
-                    busy={busy}
-                    onStop={handleStop}
-                    onPauseResume={handlePauseResume}
-                  />
-                </motion.div>
+              {!selected && !status?.recording && (
+                <RecordDock
+                  key="dock"
+                  gate={gate}
+                  busy={busy}
+                  devices={devices}
+                  micDeviceId={settings.mic_device_id}
+                  systemDeviceId={settings.system_device_id}
+                  onStart={requestStart}
+                  onOpenSettings={() => setShowSettings(true)}
+                  onPickDevice={handlePickDevice}
+                />
               )}
             </AnimatePresence>
           </div>
-
-          <div className="flex items-center justify-end gap-3">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setShowSettings(true)}
-              title={t("nav.settings")}
-              aria-label={t("nav.settings")}
-            >
-              <Settings size={16} />
-            </Button>
-          </div>
-        </header>
-
-        {error && (
-          <div className="border-b border-danger/30 bg-danger/10 px-6 py-2 text-sm text-danger">
-            {error}
-            <Button variant="link" className="ml-3" onClick={() => setError(null)}>
-              {t("action.dismiss")}
-            </Button>
-          </div>
-        )}
-        {pendingUpdate && (
-          <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
-            <span>{t("update.available").replace("{version}", pendingUpdate.version)}</span>
-            <Button
-              size="xs"
-              data-testid="update-install"
-              onClick={async () => {
-                const update = pendingUpdate;
-                setPendingUpdate(null);
-                try {
-                  setUpdateNote(t("update.installing"));
-                  await update.downloadAndInstall();
-                  setUpdateNote(t("update.relaunching"));
-                  await relaunch();
-                } catch (e) {
-                  setUpdateNote(null);
-                  setError(String(e));
-                  // The check only runs once, on mount. Without putting the offer
-                  // back, a failed download means no retry until the app restarts.
-                  setPendingUpdate(update);
-                }
-              }}
-            >
-              {t("update.install")}
-            </Button>
-            <Button variant="link" onClick={() => setPendingUpdate(null)}>
-              {t("update.later")}
-            </Button>
-          </div>
-        )}
-        {updateNote && (
-          <div className="border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
-            {updateNote}
-          </div>
-        )}
-
-        <div className="relative flex min-h-0 flex-1 flex-col">
-          {selected ? (
-            <>
-              <div className="flex items-center justify-between border-b border-border px-6 py-3">
-                <div>
-                  <h1 className="text-base font-medium">{selected.title}</h1>
-                  <p className="text-xs text-fg-muted">
-                    {selected.status} · {formatDuration(selected.duration_ms)}
-                  </p>
-                </div>
-                {/* Five siblings used to read as five equal actions. Summarize
-                    is the one primary; MD/PDF/DOCX are one action with a format
-                    parameter, so they sit inside a single bordered group.
-                    The inset is horizontal only: a `p-1` shell would stand 34px
-                    tall between two 24px chips, and a group that is half again
-                    the height of its neighbours reads as a different tier of
-                    control rather than a bracket around three of them. */}
-                <div className="flex items-center gap-2">
-                  <Button size="xs" onClick={() => handleSummarize("general")}>
-                    <Sparkles size={16} /> {t("action.summarize")}
-                  </Button>
-                  <div className="flex items-center gap-1 rounded-md border border-border px-1">
-                    {(["md", "pdf", "docx"] as const).map((format) => (
-                      <Button
-                        key={format}
-                        size="xs"
-                        variant="ghost"
-                        onClick={() => handleExport(format)}
-                      >
-                        {format.toUpperCase()}
-                      </Button>
-                    ))}
-                  </div>
-                  <Button
-                    size="xs"
-                    variant="secondary"
-                    onClick={() =>
-                      selectedId &&
-                      api.retranscribe(selectedId).then((m) => loadMeeting(m.id))
-                    }
-                  >
-                    <FileAudio size={16} /> {t("action.retranscribe")}
-                  </Button>
-                </div>
-              </div>
-
-              <Tabs
-                idPrefix="content"
-                className="px-6"
-                value={tab}
-                onChange={setTab}
-                items={[
-                  { id: "transcript", label: t("tab.transcript") },
-                  { id: "summary", label: t("tab.summary") },
-                  { id: "chat", label: t("tab.chat") },
-                ]}
-              />
-
-              {/* The scroll container is the tab panel: the three panes swap
-                  inside it, so the id follows the selected tab rather than
-                  living on a pane that unmounts. */}
-              <div
-                ref={scrollRef}
-                onScroll={handleContentScroll}
-                data-scroll
-                id={`content-panel-${tab}`}
-                role="tabpanel"
-                aria-labelledby={`content-tab-${tab}`}
-                className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-4"
-              >
-                <AnimatePresence mode="wait">
-                  {tab === "transcript" && (
-                    <motion.div
-                      key="transcript"
-                      ref={pinOnPaneMount}
-                      {...fadeRise}
-                      className="mx-auto max-w-reading"
-                      data-testid="transcript-panel"
-                    >
-                      {transcript.segments?.length ? (
-                        // `initial={false}` so opening a past meeting does not
-                        // blur-and-fade three hundred rows at once: only the
-                        // segments that land after the pane is up animate, which
-                        // is the handful per minute `segmentArrive` is sized for.
-                        <AnimatePresence initial={false}>
-                          {transcript.segments.map((s, i) => {
-                            // A run of consecutive lines from one speaker is one
-                            // utterance: it carries a single timestamp and a
-                            // single name, and only the gap says where it ends.
-                            const opens =
-                              i === 0 ||
-                              transcript.segments[i - 1].speaker !== s.speaker;
-                            return (
-                              <motion.div
-                                key={s.id}
-                                {...segmentArrive}
-                                className={`flex gap-4 ${
-                                  i === 0 ? "" : opens ? "mt-4" : "mt-1"
-                                }`}
-                              >
-                                <span className="w-14 shrink-0 tabular-nums text-2xs text-fg-faint">
-                                  {opens ? formatDuration(s.start_ms) : ""}
-                                </span>
-                                <span
-                                  aria-hidden
-                                  className={`w-0.5 shrink-0 self-stretch rounded-full ${
-                                    s.speaker === "me" ? "bg-accent" : "bg-others"
-                                  }`}
-                                />
-                                <div className="min-w-0 flex-1">
-                                  {opens && (
-                                    <div className="text-2xs text-fg-subtle">
-                                      {s.speaker === "me"
-                                        ? t("speaker.me")
-                                        : t("speaker.others")}
-                                    </div>
-                                  )}
-                                  <p className="text-base leading-relaxed">{s.text}</p>
-                                </div>
-                              </motion.div>
-                            );
-                          })}
-                        </AnimatePresence>
-                      ) : (
-                        <Empty
-                          icon={<AudioLinesIcon size={22} />}
-                          title={t("empty.transcript")}
-                          body={t("empty.transcript_body")}
-                          action={
-                            <Button
-                              size="md"
-                              variant="secondary"
-                              onClick={handleImport}
-                              disabled={busy}
-                            >
-                              {t("nav.import")}
-                            </Button>
-                          }
-                        />
-                      )}
-                    </motion.div>
-                  )}
-
-                  {tab === "summary" && (
-                    <motion.div
-                      key="summary"
-                      {...fadeRise}
-                      className="mx-auto max-w-reading space-y-6"
-                      data-testid="summary-panel"
-                    >
-                      {selected.summary ||
-                      selected.key_points ||
-                      selected.action_items ? (
-                        <>
-                          <Section title={t("section.summary")} body={selected.summary || "—"} />
-                          <Section title={t("section.key_points")} body={selected.key_points || "—"} />
-                          <Section title={t("section.action_items")} body={selected.action_items || "—"} />
-                        </>
-                      ) : (
-                        // Three cards each holding one em-dash and nothing to
-                        // act on is an empty state. This renders it as one.
-                        <Empty
-                          icon={<Sparkles size={22} />}
-                          title={t("empty.summary")}
-                          body={t("empty.summary_body")}
-                          action={
-                            <Button
-                              size="md"
-                              onClick={() => handleSummarize("general")}
-                              disabled={busy}
-                            >
-                              <Sparkles size={16} /> {t("action.summarize")}
-                            </Button>
-                          }
-                        />
-                      )}
-                    </motion.div>
-                  )}
-
-                  {tab === "chat" && (
-                    <motion.div
-                      key="chat"
-                      {...fadeRise}
-                      className="mx-auto max-w-reading space-y-4"
-                      data-testid="chat-panel"
-                    >
-                      {chat.map((m, i) => (
-                        // Alignment lives on the row, not on the bubble: an
-                        // `ml-auto` on the bubble left the assistant with no
-                        // alignment class at all and the row with nothing to
-                        // hang a hover affordance off.
-                        <div
-                          key={i}
-                          className={`flex w-full ${
-                            m.role === "user" ? "justify-end" : "justify-start"
-                          }`}
-                        >
-                          {/* The bubble is what says "a person typed this". The
-                              model's answer is the document, so it gets no fill,
-                              no border and the full width. */}
-                          <div
-                            className={
-                              m.role === "user"
-                                ? "max-w-[85%] rounded-lg bg-surface-2 px-4 py-2 text-base"
-                                : "w-full p-0 text-base"
-                            }
-                          >
-                            {m.content}
-                          </div>
-                        </div>
-                      ))}
-                      {pending && (
-                        // Flat, full-width and already in the assistant's shape,
-                        // so nothing reflows when the real answer replaces it.
-                        <div className="flex w-full justify-start">
-                          <p className="shimmer-text w-full text-base">
-                            {t("chat.thinking")}
-                          </p>
-                        </div>
-                      )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-
-              {/* Pinned to the pane, outside the scroll container. It used to
-                  live inside it, which put a second scrollbar inside the first
-                  one. No `border-t` above it either — it carries its own border,
-                  and a divider 1px away from that is two hard divides in a row. */}
-              {tab === "chat" && (
-                <form
-                  className="px-6 pb-6"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    void handleChat();
-                  }}
-                >
-                  <div className="mx-auto flex max-w-reading items-end gap-1 rounded-lg border border-border bg-surface-2 p-1 focus-within:border-border-strong">
-                    <textarea
-                      ref={composerRef}
-                      value={question}
-                      rows={1}
-                      onChange={(e) => setQuestion(e.target.value)}
-                      onKeyDown={(e) => {
-                        // `isComposing` guards the IME: confirming a candidate
-                        // with Enter used to send the half-typed question.
-                        // Shift+Enter is the newline, which is why this is a
-                        // textarea and not the input it replaced — a pasted
-                        // multi-line question was invisible past line one.
-                        if (
-                          e.key === "Enter" &&
-                          !e.shiftKey &&
-                          !e.nativeEvent.isComposing
-                        ) {
-                          e.preventDefault();
-                          void handleChat();
-                        }
-                      }}
-                      placeholder={t("chat.placeholder")}
-                      aria-label={t("chat.placeholder")}
-                      className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-3 py-1 text-base outline-none placeholder:text-fg-subtle"
-                    />
-                    {/* Inside the field, and not `bg-accent`: one accent fill
-                        per screen, and the record dock owns it. */}
-                    <Button
-                      type="submit"
-                      variant="secondary"
-                      size="icon"
-                      disabled={busy || !question.trim()}
-                      title={t("action.send")}
-                      aria-label={t("action.send")}
-                    >
-                      <MessageSquare size={16} />
-                    </Button>
-                  </div>
-                </form>
-              )}
-            </>
-          ) : (
-            <div className="flex flex-1 items-center justify-center p-8">
-              <Empty
-                icon={<MicIcon size={22} />}
-                title={t("empty.ready")}
-                body={t("empty.ready_body")}
-                action={
-                  // No Record here. The dock at the foot of this same screen is
-                  // the record button — putting a second one in the middle gave
-                  // the empty screen two primary actions that do the same thing,
-                  // eight hundred pixels apart. The shortcut still belongs here,
-                  // where there is room to name it.
-                  <div className="flex items-center justify-center gap-3">
-                    <Button
-                      size="md"
-                      variant="secondary"
-                      onClick={handleImport}
-                      disabled={busy}
-                    >
-                      {t("nav.import")}
-                    </Button>
-                    {!status?.recording && (
-                      <span className="flex items-center gap-2 text-2xs text-fg-subtle">
-                        {t("record.start")}
-                        <kbd className="inline-flex h-6 items-center rounded-xs border border-border bg-surface-2 px-2 font-sans text-2xs">
-                          {RECORD_SHORTCUT}
-                        </kbd>
-                      </span>
-                    )}
-                  </div>
-                }
-              />
-            </div>
-          )}
-
-          {/* The empty screen only. With a meeting open the transcript, the
-              summary and the chat own this column, and a Record button hanging
-              over them offers to start a second recording on top of the one the
-              header is already showing. */}
-          <AnimatePresence>
-            {!selected && !status?.recording && (
-              <RecordDock
-                key="dock"
-                gate={gate}
-                busy={busy}
-                devices={devices}
-                micDeviceId={settings.mic_device_id}
-                systemDeviceId={settings.system_device_id}
-                onStart={requestStart}
-                onOpenSettings={() => setShowSettings(true)}
-              />
-            )}
-          </AnimatePresence>
-        </div>
-      </main>
+        </main>
+      </div>
 
       <AnimatePresence>
         {confirmingRecord && (

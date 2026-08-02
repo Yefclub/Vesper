@@ -20,6 +20,7 @@ import {
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
+import { applyTheme, currentTheme, type Theme } from "../lib/theme";
 import { Button, FOCUS } from "./Button";
 import { ModelPicker } from "./ModelPicker";
 import { LOCALES, PROVIDERS, Segmented } from "./Segmented";
@@ -71,8 +72,17 @@ export function SettingsPanel({
   // that produced it, and that button stayed clickable while it ran.
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
 
-  const [tab, setTab] = useState<"local" | "cloud" | "devices" | "lang">("local");
+  // By job, not by backend. The old axis (Local | OpenRouter) asked the user to
+  // pick a tab before they could pick a model, and the model they wanted was
+  // under whichever tab they had not chosen.
+  const [tab, setTab] = useState<"models" | "devices" | "appearance">("models");
   const panelRef = useRef<HTMLDivElement>(null);
+  /// What was on screen when the drawer opened, and whether a Save has since
+  /// made a previewed theme real. Refs, not state: nothing renders from them and
+  /// the unmount cleanup has to read the latest value, not the one captured when
+  /// the effect ran.
+  const themeOnOpen = useRef<Theme>(currentTheme());
+  const themeSaved = useRef(false);
 
   useEffect(() => {
     api.listDevices().then(setDevices).catch(() => setDevices([]));
@@ -95,6 +105,12 @@ export function SettingsPanel({
     return () => {
       window.removeEventListener("keydown", onKey);
       restore?.focus();
+      // The theme control applies on click so the choice can be seen, which
+      // means leaving by Escape or by the backdrop walks away with a preview
+      // nothing persisted. It also wrote the boot cache, so the next launch
+      // would paint the abandoned theme and then be corrected by the row a
+      // frame later — the exact flash the boot cache exists to prevent.
+      if (!themeSaved.current) applyTheme(themeOnOpen.current);
     };
   }, [onClose]);
 
@@ -110,13 +126,25 @@ export function SettingsPanel({
     (e.shiftKey ? nodes[nodes.length - 1] : nodes[0]).focus();
   }
 
-  // Only when the Cloud tab is showing, and keyed on the SAVED key rather than
-  // the draft. The commands read the key out of the backend's own state and take
-  // no argument, so keying on the draft promised a refresh it could not deliver —
-  // and it fired a pair of calls per keystroke, which is why it needed a debounce
-  // it no longer needs.
+  // Only when the Models tab is showing AND some job is actually pointed at
+  // OpenRouter — with the backend tabs gone there is no longer a tab whose
+  // presence means "the user asked for the cloud", and a local-only install must
+  // not reach the network because the drawer was opened. The provider terms read
+  // the DRAFT: switching a section to OpenRouter has to fill its list before
+  // Save, or the select is empty at the moment it appears.
+  //
+  // The key is still the SAVED one. The commands read it out of the backend's
+  // own state and take no argument, so keying on the draft promised a refresh it
+  // could not deliver — and it fired a pair of calls per keystroke, which is why
+  // it needed a debounce it no longer needs.
   useEffect(() => {
-    if (tab !== "cloud") return;
+    if (tab !== "models") return;
+    if (
+      draft.stt_provider !== "openrouter" &&
+      draft.llm_provider !== "openrouter"
+    ) {
+      return;
+    }
     let live = true;
     setOrFailed(false);
     api.openrouterSttModels().then(setSttOr).catch(() => setSttOr([]));
@@ -131,7 +159,13 @@ export function SettingsPanel({
     return () => {
       live = false;
     };
-  }, [settings.openrouter_api_key, tab, orNonce]);
+  }, [
+    settings.openrouter_api_key,
+    tab,
+    orNonce,
+    draft.stt_provider,
+    draft.llm_provider,
+  ]);
 
   async function save() {
     setSaving(true);
@@ -143,6 +177,10 @@ export function SettingsPanel({
       // language change means the catalog behind `t` is still the previous one
       // at this point.
       setResult({ ok: true });
+      // The preview is real now, and it is the new thing to fall back to if the
+      // user changes their mind again and leaves without saving.
+      themeSaved.current = true;
+      themeOnOpen.current = draft.theme === "dark" ? "dark" : "light";
       // Only now does the backend hold the key the model list is fetched with.
       setOrNonce((n) => n + 1);
     } catch (e) {
@@ -218,11 +256,28 @@ export function SettingsPanel({
   // that refuses a missing one, so offering it is the same dead end.
   const readyStt = models.filter((m) => m.kind === "stt" && m.ready);
   const readyLlm = models.filter((m) => m.kind === "llm" && m.ready);
+  // A download that was started and never finished. "No model installed yet" is
+  // true and stays true — what it hid is the half-finished artifact already on
+  // disk, which the empty slot has to name and offer to pick up.
+  const partialStt = models.find((m) => m.kind === "stt" && m.partial_bytes != null);
+  const partialLlm = models.find((m) => m.kind === "llm" && m.partial_bytes != null);
+  // What is actually on screen wins over a row that does not carry a theme:
+  // until the backend keeps the field, a saved row comes back without it and
+  // the control would read Light while the app is dark.
+  const theme =
+    draft.theme === "dark" || draft.theme === "light"
+      ? draft.theme
+      : currentTheme();
 
   return (
     <motion.div
       {...backdropFade}
-      className="fixed inset-0 z-50 flex justify-end bg-background/70 backdrop-blur-sm"
+      // `p-2` is what puts the drawer in the content card's family: its right
+      // and bottom edges land on the same 8px window inset. The top edge
+      // deliberately does not match — matching two of three edges says "same
+      // family", matching all three would say "another pane", and this is a
+      // modal.
+      className="fixed inset-0 z-50 flex justify-end bg-scrim p-2 backdrop-blur-sm"
       // Clicking away closes, which is what every drawer does and what someone
       // who opened this by accident will try first.
       onClick={onClose}
@@ -236,9 +291,14 @@ export function SettingsPanel({
         data-testid="settings-panel"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={trapTab}
-        // The hairline draws the exposed left edge; the soft layer stays
-        // vertical so the light direction does not change.
-        className="flex h-full w-full max-w-md flex-col border-l border-border-strong bg-surface-1 shadow-occlude"
+        // A suspended panel has four exposed edges, so the hairline is uniform
+        // and the same one the card carries — `border-border-strong` is a state,
+        // not a level, and it was justified by an exposed *left* edge that no
+        // longer exists. `surface-2` because the content card took `surface-1`.
+        // `overflow-hidden` is required: the header and footer rows are
+        // edge-to-edge with a `border-b`/`border-t` and would otherwise escape
+        // the 12px corners.
+        className="flex h-full w-full max-w-md flex-col overflow-hidden rounded-lg border border-border bg-surface-2 shadow-occlude"
       >
         <div className="flex items-center justify-between border-b border-border px-4 py-4">
           <h2 id="settings-title" className="text-lg font-semibold">
@@ -257,72 +317,21 @@ export function SettingsPanel({
           </Button>
         </div>
 
-        {/* Above the tabs, because these two govern them. Both used to sit
-            inside a tab — STT under Local, LLM under OpenRouter — so switching
-            STT to OpenRouter left you looking at the local model list with
-            nothing on screen acknowledging the change, and the LLM switch was
-            invisible unless you happened to open the cloud tab. */}
-        <div className="grid grid-cols-2 gap-3 border-b border-border px-4 py-4">
-          <Segmented
-            label={t("settings.stt_provider")}
-            value={draft.stt_provider}
-            onChange={(v) =>
-              setDraft((d) => ({
-                ...d,
-                stt_provider: v as AppSettings["stt_provider"],
-              }))
-            }
-            options={PROVIDERS}
-          />
-          <Segmented
-            label={t("settings.llm_provider")}
-            value={draft.llm_provider}
-            onChange={(v) =>
-              setDraft((d) => ({
-                ...d,
-                llm_provider: v as AppSettings["llm_provider"],
-              }))
-            }
-            options={PROVIDERS}
-          />
-        </div>
-
+        {/* Three tabs, and the "in use" dot is gone with the two backend ones.
+            The dot marked which of Local / OpenRouter was doing the work —
+            a signal that only existed because the tabs were the wrong axis.
+            Each job now carries its own provider control, so there is nowhere
+            left in the layout for a global backend to be expressed. */}
         <Tabs
           idPrefix="settings"
           className="px-4"
           value={tab}
           onChange={setTab}
-          items={(
-            [
-              ["local", t("settings.local"), "local"],
-              ["cloud", t("settings.cloud"), "openrouter"],
-              ["devices", t("settings.devices"), null],
-              ["lang", t("settings.language"), null],
-            ] as const
-          ).map(([id, label, backend]) => {
-            // The tab that is actually doing the work is marked. Without it the
-            // two backend tabs look interchangeable and the provider choice
-            // above has nowhere to land. The dot is success, not accent — the
-            // accent is reserved for the primary action.
-            const inUse =
-              backend !== null &&
-              (draft.stt_provider === backend || draft.llm_provider === backend);
-            return {
-              id,
-              label,
-              // A dot carries no accessible name of its own — a bare
-              // `aria-label` on a span with no role is dropped — so the state
-              // goes on the tab itself.
-              ariaLabel: inUse ? `${label} — ${t("settings.in_use")}` : undefined,
-              title: inUse ? t("settings.in_use") : undefined,
-              badge: inUse ? (
-                <span
-                  aria-hidden
-                  className="h-1.5 w-1.5 rounded-full bg-success"
-                />
-              ) : undefined,
-            };
-          })}
+          items={[
+            { id: "models", label: t("settings.models") },
+            { id: "devices", label: t("settings.devices") },
+            { id: "appearance", label: t("settings.appearance") },
+          ]}
         />
 
         <div
@@ -331,63 +340,249 @@ export function SettingsPanel({
           aria-labelledby={`settings-tab-${tab}`}
           className="flex-1 space-y-4 overflow-y-auto p-4"
         >
-          {tab === "local" && (
+          {tab === "models" && (
             <>
-              {/* Bound to the catalog rather than free text. Typing the id by
-                  hand meant downloading "Whisper Base" from the list below and
-                  then having to know it is called `whisper-base`. */}
-              {readyStt.length ? (
-                <FieldSelect
-                  label={t("settings.local_stt")}
-                  value={draft.local_stt_model}
-                  onChange={(v) => setDraft((d) => ({ ...d, local_stt_model: v }))}
-                  options={withStaleValue(
-                    readyStt,
-                    draft.local_stt_model,
-                    t("model.not_downloaded"),
-                  )}
-                />
-              ) : (
-                <FieldEmpty
-                  label={t("settings.local_stt")}
-                  text={t("settings.no_local_stt")}
+              {/* One key for both jobs, not one per section: OpenRouter is a
+                  single account and the same string authenticates transcription
+                  and text. It only appears when a section is actually pointed at
+                  it. */}
+              {(draft.stt_provider === "openrouter" ||
+                draft.llm_provider === "openrouter") && (
+                <Field
+                  label={t("onboarding.api_key")}
+                  value={draft.openrouter_api_key ?? ""}
+                  onChange={(v) =>
+                    setDraft((d) => ({ ...d, openrouter_api_key: v }))
+                  }
+                  type="password"
+                  placeholder="sk-or-…"
                 />
               )}
-              {readyLlm.length ? (
+
+              {/* One section per job, each shaped by its own provider. The two
+                  are genuinely independent — local transcription with a cloud
+                  summary is a normal configuration — and the old layout could
+                  not express that without a dot on a tab explaining which
+                  backend was live. */}
+              <section className="space-y-3">
+                <h3 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+                  {t("onboarding.stt_path")}
+                </h3>
+                <Segmented
+                  label={t("settings.stt_provider")}
+                  value={draft.stt_provider}
+                  onChange={(v) =>
+                    setDraft((d) => ({
+                      ...d,
+                      stt_provider: v as AppSettings["stt_provider"],
+                    }))
+                  }
+                  options={PROVIDERS}
+                />
+                {draft.stt_provider === "local" ? (
+                  <>
+                    {/* Bound to the catalog rather than free text. Typing the id
+                        by hand meant downloading "Whisper Base" from the list
+                        below and then having to know it is called
+                        `whisper-base`. */}
+                    {readyStt.length ? (
+                      <FieldSelect
+                        label={t("settings.local_stt")}
+                        value={draft.local_stt_model}
+                        onChange={(v) =>
+                          setDraft((d) => ({ ...d, local_stt_model: v }))
+                        }
+                        options={withStaleValue(
+                          readyStt,
+                          draft.local_stt_model,
+                          t("model.not_downloaded"),
+                        )}
+                      />
+                    ) : (
+                      <FieldEmpty
+                        label={t("settings.local_stt")}
+                        text={t("settings.no_local_stt")}
+                        partial={partialStt ?? null}
+                        busy={progress !== null && progress.error == null}
+                        onDownload={download}
+                      />
+                    )}
+                    <div className="space-y-2">
+                      {models
+                        .filter((m) => m.kind === "stt")
+                        .map((m) => (
+                          <ModelRow
+                            key={m.id}
+                            model={m}
+                            progress={
+                              progress?.model_id === m.id ? progress : null
+                            }
+                            // Every row is out of action while any row is
+                            // transferring — including the rows in the other
+                            // section. Without this the other rows saw
+                            // `progress={null}`, kept an enabled button, and a
+                            // second click started a concurrent download that
+                            // overwrote the first one's readout — and, with
+                            // append-mode resume behind it, wrote into the same
+                            // `.part`. A failed transfer is not busy: its own row
+                            // still offers Retry.
+                            busy={progress !== null && progress.error == null}
+                            onDownload={download}
+                          />
+                        ))}
+                    </div>
+                  </>
+                ) : (
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-xs text-fg-subtle">
+                      {t("settings.pick_stt_model")}
+                    </span>
+                    {/* Stays a native select — 13 options do not need a search
+                        box. The text list below is ~340 long, which is why that
+                        one does not. */}
+                    <select
+                      data-testid="or-stt-select"
+                      className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
+                      value={draft.openrouter_stt_model}
+                      onChange={(e) =>
+                        setDraft((d) => ({
+                          ...d,
+                          openrouter_stt_model: e.target.value,
+                        }))
+                      }
+                    >
+                      {(sttOr.length
+                        ? sttOr
+                        : [
+                            {
+                              id: draft.openrouter_stt_model,
+                              name: draft.openrouter_stt_model,
+                            },
+                          ]
+                      ).map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.name || m.id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {/* Outside the provider branch, because both paths read it —
+                    whisper takes it as `set_language`, the cloud transcriber
+                    sends it as a form field. It is a property of the MEETING,
+                    not of the interface: a Brazilian recording an English
+                    standup needs `en` here, and a locale forced onto the wrong
+                    audio produces phonetic garbage rather than a mislabel. */}
                 <FieldSelect
-                  label={t("settings.local_llm")}
-                  value={draft.local_llm_model}
-                  onChange={(v) => setDraft((d) => ({ ...d, local_llm_model: v }))}
-                  options={withStaleValue(
-                    readyLlm,
-                    draft.local_llm_model,
-                    t("model.not_downloaded"),
-                  )}
+                  label={t("settings.transcription_language")}
+                  value={draft.language}
+                  onChange={(v) => setDraft((d) => ({ ...d, language: v }))}
+                  // Whisper's own codes, and its own list — not the shipped UI
+                  // locales, which carry no `auto` and mean a different thing.
+                  // Language names go untranslated, like the provider names.
+                  options={[
+                    { value: "auto", label: t("language.auto") },
+                    { value: "en", label: "English" },
+                    { value: "pt", label: "Português" },
+                  ]}
                 />
-              ) : (
-                <FieldEmpty
-                  label={t("settings.local_llm")}
-                  text={t("settings.no_local_llm")}
+              </section>
+
+              <section className="space-y-3">
+                <h3 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+                  {t("onboarding.llm_path")}
+                </h3>
+                <Segmented
+                  label={t("settings.llm_provider")}
+                  value={draft.llm_provider}
+                  onChange={(v) =>
+                    setDraft((d) => ({
+                      ...d,
+                      llm_provider: v as AppSettings["llm_provider"],
+                    }))
+                  }
+                  options={PROVIDERS}
                 />
-              )}
-              <div className="space-y-2">
-                {models.map((m) => (
-                  <ModelRow
-                    key={m.id}
-                    model={m}
-                    progress={progress?.model_id === m.id ? progress : null}
-                    // Every row is out of action while any row is transferring.
-                    // Without this the other rows saw `progress={null}`, kept an
-                    // enabled button, and a second click started a concurrent
-                    // download that overwrote the first one's readout — and, with
-                    // append-mode resume behind it, wrote into the same `.part`.
-                    // A failed transfer is not busy: its own row still offers
-                    // Retry.
-                    busy={progress !== null && progress.error == null}
-                    onDownload={download}
-                  />
-                ))}
-              </div>
+                {draft.llm_provider === "local" ? (
+                  <>
+                    {readyLlm.length ? (
+                      <FieldSelect
+                        label={t("settings.local_llm")}
+                        value={draft.local_llm_model}
+                        onChange={(v) =>
+                          setDraft((d) => ({ ...d, local_llm_model: v }))
+                        }
+                        options={withStaleValue(
+                          readyLlm,
+                          draft.local_llm_model,
+                          t("model.not_downloaded"),
+                        )}
+                      />
+                    ) : (
+                      <FieldEmpty
+                        label={t("settings.local_llm")}
+                        text={t("settings.no_local_llm")}
+                        partial={partialLlm ?? null}
+                        busy={progress !== null && progress.error == null}
+                        onDownload={download}
+                      />
+                    )}
+                    <div className="space-y-2">
+                      {models
+                        .filter((m) => m.kind === "llm")
+                        .map((m) => (
+                          <ModelRow
+                            key={m.id}
+                            model={m}
+                            progress={
+                              progress?.model_id === m.id ? progress : null
+                            }
+                            busy={progress !== null && progress.error == null}
+                            onDownload={download}
+                          />
+                        ))}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <ModelPicker
+                      id="settings-or-llm"
+                      testId="or-llm-select"
+                      label={t("settings.pick_llm_model")}
+                      value={draft.openrouter_llm_model}
+                      onChange={(v) =>
+                        setDraft((d) => ({ ...d, openrouter_llm_model: v }))
+                      }
+                      models={llmOr}
+                      recent={settings.recent_openrouter_llm_models}
+                      status={
+                        orFailed
+                          ? "failed"
+                          : settings.openrouter_api_key
+                            ? undefined
+                            : "needs_key"
+                      }
+                      onRetry={() => setOrNonce((n) => n + 1)}
+                    />
+                    <CheckBox
+                      label={t("settings.reasoning")}
+                      checked={draft.reasoning_enabled}
+                      onChange={(v) =>
+                        setDraft((d) => ({ ...d, reasoning_enabled: v }))
+                      }
+                    />
+                  </>
+                )}
+                {/* A text-side option whichever provider writes the summary. */}
+                <CheckBox
+                  label={t("settings.auto_summarize")}
+                  checked={draft.auto_summarize}
+                  onChange={(v) =>
+                    setDraft((d) => ({ ...d, auto_summarize: v }))
+                  }
+                />
+              </section>
+
               {caps && (
                 <div className="rounded-md border border-border bg-surface-2 p-3 text-xs text-fg-muted">
                   <div className="mb-1 font-medium text-fg">
@@ -403,83 +598,6 @@ export function SettingsPanel({
                   </div>
                 </div>
               )}
-            </>
-          )}
-
-          {tab === "cloud" && (
-            <>
-              <Field
-                label={t("onboarding.api_key")}
-                value={draft.openrouter_api_key ?? ""}
-                onChange={(v) =>
-                  setDraft((d) => ({ ...d, openrouter_api_key: v }))
-                }
-                type="password"
-                placeholder="sk-or-…"
-              />
-              <label className="block text-sm">
-                <span className="mb-1 block text-xs text-fg-subtle">
-                  {t("settings.pick_stt_model")}
-                </span>
-                <select
-                  data-testid="or-stt-select"
-                  className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
-                  value={draft.openrouter_stt_model}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      openrouter_stt_model: e.target.value,
-                    }))
-                  }
-                >
-                  {(sttOr.length
-                    ? sttOr
-                    : [
-                        {
-                          id: draft.openrouter_stt_model,
-                          name: draft.openrouter_stt_model,
-                        },
-                      ]
-                  ).map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name || m.id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {/* The STT list beside it stays a native select — 13 options do
-                  not need a search box. This one is ~340 long. */}
-              <ModelPicker
-                id="settings-or-llm"
-                testId="or-llm-select"
-                label={t("settings.pick_llm_model")}
-                value={draft.openrouter_llm_model}
-                onChange={(v) =>
-                  setDraft((d) => ({ ...d, openrouter_llm_model: v }))
-                }
-                models={llmOr}
-                recent={settings.recent_openrouter_llm_models}
-                status={
-                  orFailed
-                    ? "failed"
-                    : settings.openrouter_api_key
-                      ? undefined
-                      : "needs_key"
-                }
-                onRetry={() => setOrNonce((n) => n + 1)}
-              />
-              <CheckBox
-                label={t("settings.reasoning")}
-                checked={draft.reasoning_enabled}
-                onChange={(v) =>
-                  setDraft((d) => ({ ...d, reasoning_enabled: v }))
-                }
-              />
-              <CheckBox
-                label={t("settings.auto_summarize")}
-                checked={draft.auto_summarize}
-                onChange={(v) => setDraft((d) => ({ ...d, auto_summarize: v }))}
-              />
             </>
           )}
 
@@ -537,13 +655,31 @@ export function SettingsPanel({
             </div>
           )}
 
-          {tab === "lang" && (
-            <Segmented
-              label={t("settings.language")}
-              value={draft.ui_locale}
-              onChange={(v) => setDraft((d) => ({ ...d, ui_locale: v }))}
-              options={LOCALES}
-            />
+          {tab === "appearance" && (
+            <div className="space-y-4">
+              {/* The one control whose effect you have to see while deciding, so
+                  it applies on click instead of waiting for Save — and it still
+                  folds into the draft, so the row in SQLite is written by the
+                  same Save path as everything else in this drawer. */}
+              <Segmented
+                label={t("settings.theme")}
+                value={theme}
+                onChange={(v) => {
+                  applyTheme(v === "dark" ? "dark" : "light");
+                  setDraft((d) => ({ ...d, theme: v }));
+                }}
+                options={[
+                  { value: "light", label: t("theme.light") },
+                  { value: "dark", label: t("theme.dark") },
+                ]}
+              />
+              <Segmented
+                label={t("settings.language")}
+                value={draft.ui_locale}
+                onChange={(v) => setDraft((d) => ({ ...d, ui_locale: v }))}
+                options={LOCALES}
+              />
+            </div>
           )}
         </div>
 
@@ -688,17 +824,70 @@ function FieldSelect({
   );
 }
 
+/** `276 MB of 491 MB already downloaded`.
+ *
+ *  Both numbers or nothing: the sentence has two slots and a total the catalog
+ *  did not report cannot be invented — the same reason this file refuses to
+ *  render `0%` for an unknown transfer size.
+ *
+ *  And it is "already downloaded", never "will resume". A `.part` written
+ *  before the ETag sidecar existed carries no validator, so the request goes
+ *  out without `If-Range` and the server may legitimately answer from zero.
+ *  Promising a resume the transport cannot guarantee is the same class of lie
+ *  as an invented percentage. */
+function partialLine(m: ModelInfo, t: (key: string) => string): string | null {
+  if (m.partial_bytes == null || m.size_hint_bytes == null) return null;
+  return t("model.partial")
+    .replace("{done}", formatBytes(m.partial_bytes))
+    .replace("{total}", formatBytes(m.size_hint_bytes));
+}
+
 /** Same box, same label, no control. Not an empty select and not a fake "None":
  *  `validate_models()` rejects an empty model id, so "None" would be unsaveable.
  *  The dashed edge reads as an empty slot, and keeping the box means the panel
- *  does not reflow when a download finishes and the select takes its place. */
-function FieldEmpty({ label, text }: { label: string; text: string }) {
+ *  does not reflow when a download finishes and the select takes its place.
+ *
+ *  "Nothing installed" was true and still is — but it said nothing about the
+ *  half-finished download sitting on disk, which is the state a user who
+ *  started one and lost the connection is actually in. */
+function FieldEmpty({
+  label,
+  text,
+  partial,
+  busy,
+  onDownload,
+}: {
+  label: string;
+  text: string;
+  /** A started-and-abandoned download of this kind, if there is one. */
+  partial: ModelInfo | null;
+  /** Some row — possibly the other section's — is transferring. */
+  busy: boolean;
+  onDownload: (id: string) => void;
+}) {
+  const { t } = useI18n();
+  const line = partial ? partialLine(partial, t) : null;
   return (
     <div className="text-sm">
       <span className="mb-1 block text-xs text-fg-subtle">{label}</span>
       <div className="rounded-md border border-dashed border-border bg-surface-2 px-3 py-2 text-sm text-fg-subtle">
         {text}
       </div>
+      {partial && line && (
+        <div className="mt-2 flex items-center justify-between gap-3">
+          <span className="text-2xs tabular-nums text-fg-subtle">{line}</span>
+          {/* The same call the catalog row makes, so the two buttons cannot
+              start two writers on one `.part`: `busy` closes both. */}
+          <Button
+            variant="secondary"
+            size="xs"
+            disabled={busy}
+            onClick={() => onDownload(partial.id)}
+          >
+            {t("model.continue")}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -760,6 +949,9 @@ const ModelRow = memo(function ModelRow({
   const { t } = useI18n();
   const failed = progress?.error != null;
   const running = progress !== null && !failed;
+  // What is on disk from a transfer that never finished. Only meaningful while
+  // nothing is running: once it is, the live counter is the better number.
+  const partial = partialLine(model, t);
   const total = progress?.total_bytes ?? 0;
   // `total_bytes` is nullable and rendering 0% for it would be a lie about a
   // multi-gigabyte transfer.
@@ -810,7 +1002,9 @@ const ModelRow = memo(function ModelRow({
       ? t("model.ready")
       : model.present
         ? t("model.unverified")
-        : t("model.not_downloaded");
+        : // "Not downloaded" is wrong for a model that is two thirds of the way
+          // there, and it is the reason the same file got started from scratch.
+          (partial ?? t("model.not_downloaded"));
   }
 
   return (
@@ -822,8 +1016,11 @@ const ModelRow = memo(function ModelRow({
             className={`flex items-center gap-2 text-2xs tabular-nums ${failed ? "text-danger" : "text-fg-muted"}`}
           >
             {/* A dot and a word. Absent gets no dot — there is no state to
-                signal there, only the button beside it to press. */}
-            {!progress && (model.ready || model.present) && (
+                signal there, only the button beside it to press. A part-file is
+                a state: it takes the same amber as downloaded-but-unverified,
+                because both are "something is on disk and it is not usable
+                yet". */}
+            {!progress && (model.ready || model.present || partial != null) && (
               <span
                 aria-hidden
                 className={`h-1.5 w-1.5 shrink-0 rounded-full ${
@@ -845,7 +1042,9 @@ const ModelRow = memo(function ModelRow({
               ? t("action.retry")
               : model.present
                 ? t("model.verify")
-                : t("model.download")}
+                : partial != null
+                  ? t("model.continue")
+                  : t("model.download")}
           </Button>
         )}
       </div>

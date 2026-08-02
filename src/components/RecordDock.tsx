@@ -1,10 +1,26 @@
-import { useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
-import { Mic, Settings } from "lucide-react";
+import { Check, Mic, MonitorSpeaker, Settings } from "lucide-react";
+import { clsx } from "clsx";
 import { AudioDevice, StartGate } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { distance, transition } from "../lib/motion";
-import { Button, FOCUS } from "./Button";
+import { Button } from "./Button";
+
+type DeviceKind = AudioDevice["kind"];
+
+/** A row in a channel's popover. `null` is the system default, the same value
+ *  the drawer's empty `<option>` writes. */
+interface DeviceOption {
+  id: string | null;
+  name: string;
+}
 
 interface Props {
   gate: StartGate;
@@ -14,70 +30,57 @@ interface Props {
   systemDeviceId?: string | null;
   onStart: () => void;
   onOpenSettings: () => void;
+  onPickDevice: (kind: DeviceKind, id: string | null) => void;
 }
 
 /**
- * The gear slot's width in px, mirroring `--dock-gear-offset` in
- * styles/index.css: 1px border ×2 + 4px pad ×2 + 36px control + 12px gap.
+ * The width of each side cell in px, mirroring `--dock-side` in
+ * styles/index.css: 8px lead gap + 32px control + 4px gap + 32px control.
  *
  * A number rather than the token itself because framer interpolates numbers —
- * animating `0` to `var(--dock-gear-offset)` mixes a unitless zero with a rem
- * string and snaps instead of easing. Change one, change the other.
+ * animating `0` to `var(--dock-side)` mixes a unitless zero with a rem string
+ * and snaps instead of easing. Change one, change the other.
  */
-const SLOT = 58;
+const DOCK_SIDE = 76;
 
 /**
- * One interpolation, both directions.
+ * Both side cells, off one variant — which is what nails Record's centre to the
+ * screen's axis at every frame of the animation rather than at the two ends of
+ * it. The left cell carries the device buttons, the right cell carries the
+ * gear, and they are the same width by construction.
  *
- * The expansion used to be an `AnimatePresence` mount and a `layout` animation,
- * so it grew on the way in and cut on the way out. Driving both ends off the
- * same variant means framer retargets from wherever the value had got to:
- * pulling the mouse away halfway through closes from halfway, not from the end.
+ * One interpolation, both directions: driving open and closed off the same
+ * variant means framer retargets from wherever the value had got to, so pulling
+ * the mouse away halfway through closes from halfway rather than from the end.
  *
- * Width, height, opacity and scale only. `marginLeft`, `maxHeight`, `padding`,
- * `clipPath` and `filter` would each produce the same reveal, and each of them
- * is exempt from the snap `MotionConfig reducedMotion="user"` applies in
- * App.tsx — half the reveal would honour the setting and half would not. For
- * the same reason there is no `useReducedMotion()` here: these properties are
- * already covered, and opacity is still allowed to fade.
+ * Width and opacity only. `marginLeft`, `maxWidth`, `padding`, `clipPath` and
+ * `filter` would each produce the same reveal, and each of them is exempt from
+ * the snap `MotionConfig reducedMotion="user"` applies in App.tsx — half the
+ * reveal would honour the setting and half would not. For the same reason
+ * there is no `useReducedMotion()` here.
  */
-const slot: Variants = {
-  collapsed: { width: 0 },
-  expanded: { width: SLOT },
-};
-
-const gearIn: Variants = {
-  collapsed: { opacity: 0, scale: 0.92 },
-  expanded: { opacity: 1, scale: 1 },
-};
-
-/**
- * Width as well as height.
- *
- * `height: 0` hides the readout but leaves it setting the shell's *intrinsic
- * width*: a pill holding one 110px button rendered 455px wide, because two
- * device names were measuring it from inside a zero-height box. Collapsing the
- * width too puts the shell back on the control row, which is the whole point of
- * a dock that is only Record at rest. Still width/height/opacity only, so
- * `MotionConfig reducedMotion="user"` snaps all of it.
- */
-const panel: Variants = {
-  collapsed: { height: 0, width: 0, opacity: 0 },
-  expanded: { height: "auto", width: "auto", opacity: 1 },
+const side: Variants = {
+  collapsed: { width: 0, opacity: 0 },
+  expanded: { width: DOCK_SIDE, opacity: 1 },
 };
 
 /**
  * The control that starts a recording, anchored to the bottom of the empty
  * screen — the only screen it appears on.
  *
- * It owns its own position: nothing above or beside it can push it. Once a
- * recording is running the transport moves to the header, where it outlives the
- * empty screen this dock lives on, and the dock leaves downward, towards the
- * edge it sits against.
+ * It owns its own position: nothing above or beside it can push it. The dock's
+ * height is constant by construction — 4px of shell, a 36px control, 4px of
+ * shell — and nothing is ever below the Record row, so expanding cannot move
+ * Record in y. Only the width changes, and it changes symmetrically, so it
+ * cannot move Record in x either.
  *
- * Depth comes from surface lightness and a border rather than a shadow. Shadows
- * read poorly on a near-black background, and the app should pick one technique
- * and keep it.
+ * Once a recording is running the transport moves to the header, where it
+ * outlives the empty screen this dock lives on, and the dock leaves downward,
+ * towards the edge it sits against.
+ *
+ * Depth comes from surface lightness and a border rather than a shadow. Nothing
+ * scrolls under the dock — it renders only on the empty screen — so it needs
+ * neither a blur nor an occlusion shadow to separate itself from anything.
  */
 export function RecordDock({
   gate,
@@ -87,13 +90,20 @@ export function RecordDock({
   systemDeviceId,
   onStart,
   onOpenSettings,
+  onPickDevice,
 }: Props) {
   const { t } = useI18n();
   // Hover and focus are tracked apart: moving the mouse away while a control
-  // inside is focused must not collapse the panel under the keyboard user.
+  // inside is focused must not collapse the dock under the keyboard user.
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
-  const expanded = hovered || focused;
+  // Which channel's list is open, if any. One piece of state for both, so
+  // opening one closes the other and the dock has a single term to read.
+  const [menu, setMenu] = useState<DeviceKind | null>(null);
+  // A popover opened with the mouse keeps focus on its trigger, so `focused`
+  // covers it in practice. `menu` is the explicit guarantee — a dock that
+  // collapsed under an open list would take the list with it.
+  const expanded = hovered || focused || menu !== null;
   const blocked = !gate.allowed;
   // The translated key wins. The backend also ships an English sentence for
   // callers without a catalog, but in the app that sentence is the fallback,
@@ -104,6 +114,23 @@ export function RecordDock({
     devices.find((d) => d.id === id)?.name ??
     devices.find((d) => d.kind === kind && d.is_default)?.name ??
     t("dock.system_default");
+
+  const optionsFor = (kind: DeviceKind): DeviceOption[] => [
+    // The explicit first row, matching the drawer's empty <option>: without it
+    // a null setting reads as the first device in the list, so the screen would
+    // claim a choice the backend has not been given.
+    { id: null, name: t("dock.system_default") },
+    ...devices
+      .filter((d) => d.kind === kind)
+      .map((d) => ({ id: d.id, name: d.name })),
+  ];
+
+  // Stable, so each popover binds its document-level pointerdown listener once
+  // per opening rather than once per render of the dock.
+  const setMenuOpen = useCallback(
+    (kind: DeviceKind, open: boolean) => setMenu(open ? kind : null),
+    [],
+  );
 
   return (
     // Leaves downward, towards the edge it is anchored to, so the eye is sent
@@ -169,15 +196,19 @@ export function RecordDock({
         </AnimatePresence>
       </div>
 
-      {/* The gear is part of the dock's expansion now, not a permanent pill
-          beside it. Nothing but Record is on screen at rest; arriving with the
-          pointer or with Tab grows a slot on the right for the gear and an
-          empty one of the same width on the left, so Record keeps the screen's
-          axis instead of sliding while the row grows.
+      {/* One pill, one border, one fill: the gear used to be a second pill 12px
+          to the right of this one, which is the "separado da caixa" complaint,
+          and the device readout used to be a panel below Record, which is what
+          pushed Record up when it opened.
 
-          The hover surface is this row rather than the dock pill: the pointer
-          has to cross the gap to reach the gear, and a surface that stopped at
-          the pill's edge would close the thing it was travelling towards. */}
+          The hover surface is the pill itself now rather than a wider row,
+          because there is no longer a gap between two boxes for the pointer to
+          cross.
+
+          Both side cells expand while blocked, not just the gear: they animate
+          off one variant, and gating one of them on `blocked` would move Record
+          by 76px exactly when the balloon is asking the user to go and fix
+          something. The device buttons are part of that fix. */}
       <motion.div
         initial="collapsed"
         animate={expanded ? "expanded" : "collapsed"}
@@ -190,94 +221,256 @@ export function RecordDock({
           // its own buttons would close it under the user.
           if (!e.currentTarget.contains(e.relatedTarget as Node)) setFocused(false);
         }}
-        className="flex"
+        data-testid="record-dock"
+        className="pointer-events-auto flex items-center rounded-lg border border-border bg-surface-2 p-1"
       >
-        {/* The counterweight: empty, unreachable, and the only reason Record's
-            centre stays put while the gear grows opposite it. */}
-        <motion.div aria-hidden variants={slot} className="shrink-0" />
-
+        {/* Clipped so the trailing pad disappears at width 0; the buttons are
+            `shrink-0`, so they are clipped rather than squashed on the way. The
+            clip has to lift while a list is open or it would cut the popover
+            off at the cell's edge — safe, because a list can only be opened
+            from an already-expanded dock, where nothing overflows. */}
         <motion.div
-          initial="collapsed"
-          // Off the same hover, but not the same condition: the gear has to
-          // appear while recording is blocked — it is the way out of the block —
-          // while the device readout must not, because the balloon explaining
-          // the block is already open above it.
-          animate={expanded && !blocked ? "expanded" : "collapsed"}
-          transition={transition.base}
-          data-testid="record-dock"
-          className="pointer-events-auto overflow-hidden rounded-lg border border-border border-t-border-strong bg-surface-2/95 p-1 backdrop-blur-md"
+          variants={side}
+          className={clsx(
+            "relative flex shrink-0 items-center gap-1 pr-2",
+            menu === null ? "overflow-hidden" : "overflow-visible",
+          )}
         >
-          {/* 4px of shell around a 36px control: 12px outer radius minus the
-              4px inset is exactly the 8px the button inside carries. */}
-          <div className="flex items-center justify-center">
-            <Button
-              size="md"
-              data-testid="btn-record"
-              disabled={busy || blocked}
-              onClick={onStart}
-            >
-              <Mic size={16} aria-hidden /> {t("record.start")}
-            </Button>
-          </div>
-
-          {/* The lower panel is the device readout and nothing else. The blocked
-              reason moved out to a balloon, so a long sentence no longer
-              stretches the dock and drags the button off centre.
-              Never unmounted, so closing is the opening played backwards; it
-              clips itself rather than relying on the shell, whose 4px of bottom
-              padding would otherwise leak a sliver of text while collapsed. */}
-          <motion.div
-            variants={panel}
-            className="overflow-hidden border-t border-border/60"
-          >
-            {/* w-max so the row keeps its natural width while the box around it
-                animates from zero, instead of reflowing the names on every frame. */}
-            <div className="flex w-max items-center justify-center gap-4 px-4 py-2 text-2xs text-fg-muted">
-              <span className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-me" aria-hidden />
-                <span className="max-w-[14rem] truncate">
-                  {deviceName(micDeviceId, "mic")}
-                </span>
-              </span>
-              <span className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-others" aria-hidden />
-                <span className="max-w-[14rem] truncate">
-                  {deviceName(systemDeviceId, "system")}
-                </span>
-              </span>
-            </div>
-          </motion.div>
+          <DeviceButton
+            kind="mic"
+            name={deviceName(micDeviceId, "mic")}
+            options={optionsFor("mic")}
+            current={micDeviceId ?? null}
+            open={menu === "mic"}
+            onOpenChange={setMenuOpen}
+            onPick={onPickDevice}
+          />
+          <DeviceButton
+            kind="system"
+            name={deviceName(systemDeviceId, "system")}
+            options={optionsFor("system")}
+            current={systemDeviceId ?? null}
+            open={menu === "system"}
+            onOpenChange={setMenuOpen}
+            onPick={onPickDevice}
+          />
         </motion.div>
 
-        {/* The slot carries the width; the gear floats inside it, absolutely
-            placed at the gap so a growing box never squeezes or clips it. The
-            slot also carries the pointer events, because an element at opacity 0
-            still takes clicks — and taking them off the button itself would have
-            left the gear invisible but pressable across the whole 58px. */}
-        <motion.div
-          variants={slot}
-          style={{ pointerEvents: expanded ? "auto" : "none" }}
-          className="relative shrink-0"
+        {/* 4px of shell around a 36px control: 12px outer radius minus the 4px
+            inset is exactly the 8px the button inside carries. */}
+        <Button
+          size="md"
+          data-testid="btn-record"
+          disabled={busy || blocked}
+          onClick={onStart}
         >
-          {/* Same shell as the dock — 1px border, p-1, a 36px control — so the
-              two pills are the same 46px by construction rather than by
-              comment. group-hover, not hover: the padding is part of the
-              target, and a hover that only lights up on the inner square feels
-              dead at the pill's edges. */}
-          <motion.button
-            variants={gearIn}
+          <Mic size={16} aria-hidden /> {t("record.start")}
+        </Button>
+
+        {/* The counterweight carries the gear now instead of being an empty box
+            for nothing. Same width, same variant, right-aligned. */}
+        <motion.div
+          variants={side}
+          className="flex shrink-0 items-center justify-end overflow-hidden pl-2"
+        >
+          <Button
+            variant="ghost"
+            size="icon"
             data-testid="btn-dock-settings"
             onClick={onOpenSettings}
             title={t("nav.settings")}
             aria-label={t("nav.settings")}
-            className={`group absolute left-3 top-0 rounded-lg border border-border border-t-border-strong bg-surface-2/95 p-1 backdrop-blur-md ${FOCUS}`}
           >
-            <span className="flex h-9 w-9 items-center justify-center rounded-md bg-surface-3 text-fg-muted transition-colors group-hover:bg-hover group-hover:text-fg">
-              <Settings size={16} />
-            </span>
-          </motion.button>
+            <Settings size={16} />
+          </Button>
         </motion.div>
       </motion.div>
     </motion.div>
+  );
+}
+
+/**
+ * One capture channel, as a button.
+ *
+ * The device name is never in the dock's box model. It lives in the tooltip, in
+ * the accessible name and in the popover — so a 60-character
+ * `Headset Microphone (Realtek(R) Audio) — 2 - Stereo Mix` cannot set the
+ * dock's width, which is what a 110px button inside a 455px pill was. No colour
+ * on the icons either: violet and cyan distinguish two things of the same kind
+ * in the level meter and the transcript, and a coloured dot 8px from the
+ * accent-filled Record button dilutes the one accent fill on the screen.
+ *
+ * Keyboard, outside click and focus are ModelPicker's handlers minus the search
+ * box and the sections: ↑↓ clamped rather than wrapped, Enter commits, Escape
+ * closes, a document-level `pointerdown` closes on an outside click. With no
+ * search box to hold focus it stays on the trigger, which is why the trigger is
+ * a `combobox` naming its active row rather than a plain button.
+ */
+function DeviceButton({
+  kind,
+  name,
+  options,
+  current,
+  open,
+  onOpenChange,
+  onPick,
+}: {
+  kind: DeviceKind;
+  name: string;
+  options: DeviceOption[];
+  current: string | null;
+  open: boolean;
+  onOpenChange: (kind: DeviceKind, open: boolean) => void;
+  onPick: (kind: DeviceKind, id: string | null) => void;
+}) {
+  const { t } = useI18n();
+  const [active, setActive] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const listId = `dock-devices-${kind}`;
+  const label = t(kind === "mic" ? "onboarding.mic" : "onboarding.system");
+
+  useEffect(() => {
+    if (!open) return;
+    // Land on the current device rather than on row one: Enter straight after
+    // opening would otherwise switch the capture device silently.
+    setActive(Math.max(0, options.findIndex((o) => o.id === current)));
+    // Deliberately keyed on `open` alone — re-running as the device list
+    // refreshes would fight the arrow keys.
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) onOpenChange(kind, false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [open, kind, onOpenChange]);
+
+  // Focus stays on the trigger, so the highlighted row has to be brought into
+  // view by hand. `nearest` is a no-op when the row is already visible, which is
+  // what keeps it from fighting the mouse.
+  useEffect(() => {
+    if (!open) return;
+    listRef.current
+      ?.querySelector<HTMLElement>("[data-active='true']")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [active, open]);
+
+  function commit(id: string | null) {
+    // Writes immediately: there is no Save button within 400px of the dock, and
+    // a choice that needs confirming somewhere else is not a choice made here.
+    onPick(kind, id);
+    onOpenChange(kind, false);
+  }
+
+  function onKeyDown(e: KeyboardEvent<HTMLButtonElement>) {
+    // Closed, Enter and Space are the trigger's own activation and must stay
+    // that way — this handler only owns the open list.
+    if (!open) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onOpenChange(kind, false);
+      return;
+    }
+    if (e.key === "Enter") {
+      // Also suppresses the click this keydown would otherwise synthesise,
+      // which would reopen the list the commit just closed.
+      e.preventDefault();
+      const picked = options[active];
+      if (picked) commit(picked.id);
+      return;
+    }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    // Clamped, not wrapped, matching ModelPicker: one idiom for a popover list.
+    setActive((i) =>
+      e.key === "ArrowDown"
+        ? Math.min(options.length - 1, i + 1)
+        : Math.max(0, i - 1),
+    );
+  }
+
+  return (
+    <div
+      ref={rootRef}
+      className="relative"
+      onBlur={(e) => {
+        // Tab out closes, but focus stays where the user sent it — pulling it
+        // back to the trigger would trap Tab inside the dock.
+        if (!e.currentTarget.contains(e.relatedTarget)) onOpenChange(kind, false);
+      }}
+    >
+      <Button
+        variant="ghost"
+        size="icon"
+        data-testid={`btn-dock-${kind}`}
+        // `combobox` rather than a plain button: focus stays here while the list
+        // is open, so the active row has to be named by `aria-activedescendant`,
+        // and that attribute is only valid on a role that owns a popup.
+        role="combobox"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listId : undefined}
+        aria-activedescendant={open ? `${listId}-opt-${active}` : undefined}
+        // The name is the readout. The device name is deliberately outside the
+        // dock's box model, so this is where it is legible at rest.
+        title={`${label} — ${name}`}
+        aria-label={`${label} — ${name}`}
+        onKeyDown={onKeyDown}
+        onClick={() => onOpenChange(kind, !open)}
+      >
+        {kind === "mic" ? <Mic size={16} /> : <MonitorSpeaker size={16} />}
+      </Button>
+
+      {/* Opens upward, because the dock is 24px from the bottom of the card.
+          `max-h-64` with its own scroll because the card clips, and a machine
+          with fifteen capture devices must not push this list through the
+          card's top edge. */}
+      {open && (
+        <div
+          ref={listRef}
+          id={listId}
+          role="listbox"
+          aria-label={label}
+          className="absolute bottom-full left-0 z-20 mb-2 max-h-64 min-w-56 max-w-80 overflow-y-auto rounded-lg border border-border bg-surface-3 p-1 shadow-occlude"
+        >
+          {options.map((o, i) => (
+            <button
+              key={o.id ?? "default"}
+              id={`${listId}-opt-${i}`}
+              type="button"
+              role="option"
+              aria-selected={o.id === current}
+              data-active={i === active}
+              // The list is driven by aria-activedescendant, so the rows must
+              // not be tab stops of their own.
+              tabIndex={-1}
+              title={o.name}
+              onMouseMove={() => setActive(i)}
+              // Keeps focus on the trigger through the click, so picking with
+              // the mouse does not drop focus onto the body when the list
+              // unmounts. The click still fires.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => commit(o.id)}
+              className={clsx(
+                "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm",
+                i === active && "bg-row-selected",
+              )}
+            >
+              <Check
+                size={14}
+                aria-hidden
+                className={clsx("shrink-0", o.id !== current && "opacity-0")}
+              />
+              {/* The popover absorbs the long name — and even here it truncates,
+                  with the whole string in `title`. */}
+              <span className="truncate">{o.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

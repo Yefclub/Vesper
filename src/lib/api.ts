@@ -45,6 +45,10 @@ export interface AppSettings {
   auto_summarize: boolean;
   language: string;
   ui_locale: string;
+  /** `light` | `dark`. Optional because the field lands with the backend change;
+   *  absent reads as light, which is the product default — so the front end
+   *  behaves correctly on its own until the backend starts keeping it. */
+  theme?: string;
   onboarding_complete: boolean;
   mic_device_id?: string | null;
   system_device_id?: string | null;
@@ -74,9 +78,29 @@ export interface SearchHit {
   score: number;
 }
 
-export interface ChatMessage {
-  role: string;
-  content: string;
+/** Where a meeting is between Stop and its summary.
+ *
+ *  No percentage, deliberately: transcription is one blocking pass over the
+ *  whole buffer and the summary is one non-streamed request, so there is no
+ *  progress to report and a number would have to be invented. */
+export type MeetingPhase =
+  | "saving"
+  | "transcribing"
+  | "summarizing"
+  | "ready"
+  | "summary_failed";
+
+/** Payload of the `meeting://progress` event.
+ *
+ *  Optional by absence: the backend that emits it is a separate change, and
+ *  until it lands the event never fires and nothing renders. These names are
+ *  the entire contract between the two halves and nothing type-checks across
+ *  the WebView boundary — they must match the Rust `#[serde(rename_all =
+ *  "snake_case")]` variants exactly. */
+export interface MeetingProgress {
+  meeting_id: string;
+  phase: MeetingPhase;
+  error?: string | null;
 }
 
 export interface MeetingInsights {
@@ -94,6 +118,14 @@ export interface ModelInfo {
   present: boolean;
   path: string;
   download_url?: string | null;
+  /** What the catalog says the finished artifact weighs. Already on the wire;
+   *  it was simply never declared on this side. */
+  size_hint_bytes?: number | null;
+  /** Bytes of a `.part` file sitting beside the artifact — a download that was
+   *  started and never finished. Optional because the backend that reports it
+   *  is a separate change: until it lands the field is absent and the slot
+   *  renders exactly as it does today. */
+  partial_bytes?: number | null;
 }
 
 /** Payload of the `models://download-progress` event.
@@ -128,6 +160,19 @@ export interface StartGate {
   reason_key?: string | null;
 }
 
+/** Whether the OS accepted the global accelerator, and what it is.
+ *
+ *  The command that reports this lands with the backend change, so
+ *  `api.shortcutStatus()` rejects until then — every caller must tolerate a
+ *  `null` and name the key without a note. The in-app listener makes the key
+ *  work while the window is focused either way; only the note about the global
+ *  registration waits on the backend. */
+export interface ShortcutStatus {
+  registered: boolean;
+  accelerator: string;
+  reason_key?: string | null;
+}
+
 export interface OrModel {
   id: string;
   name: string;
@@ -159,6 +204,7 @@ export const api = {
   setReasoning: (enabled: boolean) => invoke<AppSettings>("set_reasoning", { enabled }),
   recorderStatus: () => invoke<RecorderStatus>("recorder_status"),
   canRecord: () => invoke<StartGate>("can_record"),
+  shortcutStatus: () => invoke<ShortcutStatus>("shortcut_status"),
   listDevices: () => invoke<AudioDevice[]>("list_audio_devices_cmd"),
   i18nCatalog: (locale: string) =>
     invoke<Record<string, string>>("get_i18n_catalog", { locale }),
@@ -172,11 +218,19 @@ export const api = {
   pollLiveStt: () => invoke<LiveTranscript>("poll_live_stt"),
   summarize: (id: string, template?: string) =>
     invoke<MeetingInsights>("summarize_meeting", { id, template }),
-  chat: (id: string, question: string) => invoke<ChatMessage>("chat_meeting", { id, question }),
-  listChat: (id: string) => invoke<ChatMessage[]>("list_chat", { id }),
   importAudio: (path: string, title?: string) =>
     invoke<MeetingRecord>("import_audio", { path, title }),
   retranscribe: (id: string) => invoke<MeetingRecord>("retranscribe", { id }),
+  // The only new command on this side that cannot degrade to nothing: a rename
+  // the backend has not learned yet rejects, and the caller surfaces that
+  // rather than showing a title the database does not carry.
+  renameMeeting: (id: string, title: string) =>
+    invoke<MeetingRecord>("rename_meeting", { id, title }),
+  // The title, sanitised for the filesystem by the side that owns the rule
+  // table. Every caller must have a fallback name — it lands with the backend
+  // change and rejects until then.
+  suggestedExportName: (id: string, format: string) =>
+    invoke<string>("suggested_export_name", { id, format }),
   exportMeeting: (id: string, path: string, format: string) =>
     invoke<string>("export_meeting_cmd", { id, path, format }),
   listModels: () => invoke<ModelInfo[]>("list_models_cmd"),

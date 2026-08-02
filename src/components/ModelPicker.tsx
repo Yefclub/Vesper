@@ -322,7 +322,7 @@ export function ModelPicker({
                           onClick={() => commit(m.id)}
                           className={clsx(
                             "block w-full rounded-xs px-2 py-1 text-left",
-                            i === active && "bg-hover",
+                            i === active && "bg-row-selected",
                           )}
                         >
                           <span className="block truncate">{m.name || m.id}</span>

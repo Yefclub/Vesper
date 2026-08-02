@@ -39,12 +39,24 @@ const SIZE = {
 /** `link` carries no colour of its own: it inherits from the sentence it sits
  *  in, so the same component reads red inside the error banner and accent
  *  inside the update banner without a per-variant override fighting Tailwind's
- *  emission order. */
+ *  emission order.
+ *
+ *  The filled hovers are tokens, not `hover:brightness-110`. Brightening a fill
+ *  on near-black pushes it away from the canvas and improves the ink; on
+ *  near-white it pushes the fill *toward* the canvas and the ink drops from
+ *  7.51:1 to 6.58:1 — the button gets quieter on hover. The dark values are
+ *  literally what `brightness(1.1)` produced, so dark does not move.
+ *
+ *  `ghost` takes the alpha rung rather than an opaque one: it rests on the
+ *  canvas, on `surface-1` and on `surface-2` depending on where it is used, and
+ *  one opaque value cannot be right for all three. `secondary` has a fill of
+ *  its own, so it keeps the opaque rung — an alpha there would replace the fill
+ *  instead of layering on it. */
 const VARIANT = {
-  primary: `bg-accent text-background hover:brightness-110 ${FOCUS}`,
+  primary: `bg-accent text-background hover:bg-accent-hover ${FOCUS}`,
   secondary: `bg-surface-3 text-fg hover:bg-hover ${FOCUS}`,
-  ghost: `text-fg-muted hover:bg-surface-3 hover:text-fg ${FOCUS}`,
-  danger: `bg-danger text-background hover:brightness-110 ${FOCUS_DANGER}`,
+  ghost: `text-fg-muted hover:bg-row-hover hover:text-fg ${FOCUS}`,
+  danger: `bg-danger text-background hover:bg-danger-hover ${FOCUS_DANGER}`,
   link: `rounded-xs underline underline-offset-2 ${FOCUS}`,
 } as const;
 
