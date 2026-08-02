@@ -29,6 +29,7 @@ import {
   StartGate,
 } from "./lib/api";
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
+import { formatMeetingDateTime } from "./lib/datetime";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise, segmentArrive } from "./lib/motion";
 import { applyTheme } from "./lib/theme";
@@ -134,6 +135,9 @@ function AppShell({
   const [confirmingRecord, setConfirmingRecord] = useState(false);
   const [skipRecordReminder, setSkipRecordReminder] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<MeetingRecord | null>(null);
+  /// Whether the meeting header's title is being edited. A generated title is a
+  /// guess, and a guess the user cannot correct is worse than a date.
+  const [renaming, setRenaming] = useState(false);
   const confirmBeforeRecordingRef = useRef(settings.confirm_before_recording);
   confirmBeforeRecordingRef.current = settings.confirm_before_recording;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -486,6 +490,14 @@ function AppShell({
     pinnedRef.current = true;
   }, [selectedId, tab]);
 
+  /// A rename belongs to the meeting it was opened on. Clicking away commits it
+  /// through the field's own blur, but nothing else does — the tray, a
+  /// `meeting://ready` landing, the sidebar's arrow keys — and an open field
+  /// carrying the previous meeting's name is how the wrong title gets saved.
+  useEffect(() => {
+    setRenaming(false);
+  }, [selectedId, tab]);
+
   // Keyed on what the transcript *contains*, not on the object: `poll_live_stt`
   // replaces it every 1200ms whether or not a word was added, so keying on
   // `transcript` would yank the column back down on every silent tick.
@@ -570,7 +582,13 @@ function AppShell({
     if (!selectedId) return;
     try {
       const path = await save({
-        defaultPath: `vesper-export.${format}`,
+        // The meeting's own name, sanitised by the backend, so a folder of
+        // exports is readable instead of `vesper-export (4).md`. One extra IPC
+        // hop on a click that is about to open a native dialog — free — and it
+        // keeps the Windows filename rules where `cargo test` can reach them.
+        defaultPath: await api
+          .suggestedExportName(selectedId, format)
+          .catch(() => `vesper-export.${format}`),
         filters: [{ name: format.toUpperCase(), extensions: [format] }],
       });
       if (!path) return;
@@ -599,6 +617,25 @@ function AppShell({
     clearWorkspace();
     setTab("transcript");
     setError(null);
+  }
+
+  /// Nothing is written optimistically: the title on screen only changes once
+  /// the backend has kept it, so a rejected rename leaves the header showing
+  /// what the database actually holds and there is nothing to roll back.
+  ///
+  /// The id is a parameter rather than read from `selected`, so a rename that
+  /// commits on the way out of the field can never land on the meeting the user
+  /// just clicked.
+  async function commitRename(id: string, next: string) {
+    setRenaming(false);
+    const title = next.trim();
+    if (!title || title === meetings.find((m) => m.id === id)?.title) return;
+    try {
+      const m = await api.renameMeeting(id, title);
+      setMeetings((prev) => prev.map((x) => (x.id === m.id ? m : x)));
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   async function handleDelete(id: string) {
@@ -807,10 +844,59 @@ function AppShell({
                     to the card's own border and putting a full-width divide
                     inside a rounded corner. */}
                 <div className="mx-auto flex w-full max-w-pane items-center justify-between border-b border-border px-6 py-3">
-                  <div>
-                    <h1 className="text-base font-medium">{selected.title}</h1>
-                    <p className="text-xs text-fg-muted">
-                      {selected.status} · {formatDuration(selected.duration_ms)}
+                  <div className="min-w-0">
+                    {/* Click to edit, in place. `bg-transparent` and the same
+                        size and weight as the heading it replaces, so the title
+                        does not read as a form field at rest — the field is the
+                        heading, not a control beside it. */}
+                    {renaming ? (
+                      <input
+                        autoFocus
+                        data-testid="rename-input"
+                        aria-label={t("nav.rename")}
+                        defaultValue={selected.title}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void commitRename(selected.id, e.currentTarget.value);
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            // Put the original back before closing. A browser
+                            // that fires blur on the way out would otherwise
+                            // commit the abandoned edit; with the value
+                            // restored, that commit is a no-op.
+                            e.currentTarget.value = selected.title;
+                            setRenaming(false);
+                          }
+                        }}
+                        onBlur={(e) => void commitRename(selected.id, e.currentTarget.value)}
+                        className={`w-full rounded-sm bg-transparent text-base font-medium ${FOCUS}`}
+                      />
+                    ) : (
+                      // The control is inside the heading rather than being
+                      // the heading: an `<h1 onClick>` is a click target with
+                      // no keyboard route, and every other affordance in this
+                      // app has one. `title` also gives the full name back on
+                      // hover once the heading truncates.
+                      <h1 className="truncate text-base font-medium">
+                        <button
+                          type="button"
+                          onClick={() => setRenaming(true)}
+                          title={selected.title}
+                          aria-label={t("nav.rename")}
+                          className={`max-w-full cursor-text truncate rounded-sm text-left ${FOCUS}`}
+                        >
+                          {selected.title}
+                        </button>
+                      </h1>
+                    )}
+                    {/* When it happened, in the reader's own time, and how long
+                        it ran. The status word used to sit here and said
+                        nothing in the normal case; the sidebar's dot already
+                        covers the abnormal one. */}
+                    <p className="text-xs tabular-nums text-fg-muted">
+                      {formatMeetingDateTime(selected.created_at)} ·{" "}
+                      {formatDuration(selected.duration_ms)}
                     </p>
                   </div>
                   {/* Five siblings used to read as five equal actions. Summarize
@@ -820,7 +906,11 @@ function AppShell({
                       tall between two 24px chips, and a group that is half again
                       the height of its neighbours reads as a different tier of
                       control rather than a bracket around three of them. */}
-                  <div className="flex items-center gap-2">
+                  {/* `shrink-0` beside the title's `min-w-0`: a generated or
+                      typed name can be arbitrarily long, and without the pair
+                      the flex algorithm resolves the overflow by squeezing the
+                      buttons instead of truncating the heading. */}
+                  <div className="flex shrink-0 items-center gap-2">
                     <Button size="xs" onClick={() => handleSummarize("general")}>
                       <Sparkles size={16} /> {t("action.summarize")}
                     </Button>

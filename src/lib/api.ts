@@ -213,6 +213,16 @@ export const api = {
   importAudio: (path: string, title?: string) =>
     invoke<MeetingRecord>("import_audio", { path, title }),
   retranscribe: (id: string) => invoke<MeetingRecord>("retranscribe", { id }),
+  // The only new command on this side that cannot degrade to nothing: a rename
+  // the backend has not learned yet rejects, and the caller surfaces that
+  // rather than showing a title the database does not carry.
+  renameMeeting: (id: string, title: string) =>
+    invoke<MeetingRecord>("rename_meeting", { id, title }),
+  // The title, sanitised for the filesystem by the side that owns the rule
+  // table. Every caller must have a fallback name — it lands with the backend
+  // change and rejects until then.
+  suggestedExportName: (id: string, format: string) =>
+    invoke<string>("suggested_export_name", { id, format }),
   exportMeeting: (id: string, path: string, format: string) =>
     invoke<string>("export_meeting_cmd", { id, path, format }),
   listModels: () => invoke<ModelInfo[]>("list_models_cmd"),

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { FileUp, Search, SearchX, SquarePen, Trash2 } from "lucide-react";
 import { MeetingRecord, SearchHit, formatDuration } from "../lib/api";
+import { formatMeetingTime } from "../lib/datetime";
 import { useI18n } from "../lib/i18n";
 import { Button, FOCUS } from "./Button";
 
@@ -288,8 +289,18 @@ export function Sidebar({
                           100% of an `MM:SS` at the exact moment the pointer was
                           there to read it. The digits stay in the accessibility
                           tree, because they are data. */}
-                      <span className="w-11 shrink-0 text-right tabular-nums text-2xs text-fg-subtle transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
-                        {m.duration_ms > 0 ? formatDuration(m.duration_ms) : ""}
+                      {/* Under "Today" the clock time is the more useful
+                          number — it is how you find the meeting you were in
+                          this morning. Further back the date is already the
+                          heading and the length is what distinguishes the rows.
+                          `whitespace-nowrap` because a localised time can carry
+                          a space before AM/PM and the slot is one line tall. */}
+                      <span className="w-11 shrink-0 whitespace-nowrap text-right tabular-nums text-2xs text-fg-subtle transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                        {group.key === "today"
+                          ? formatMeetingTime(m.created_at)
+                          : m.duration_ms > 0
+                            ? formatDuration(m.duration_ms)
+                            : ""}
                       </span>
                     </button>
                     {/* Out of the flow, so the title keeps the ~30px where the
