@@ -199,12 +199,17 @@ impl DualChannelRecorder {
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
-                // One last sweep before the device closes. Stop can arrive
-                // between a pause and the loop noticing it, and then the chunks
-                // captured before the pause are still sitting in the ring with
-                // nothing left to take them. `stream.stop()` drops them, which
-                // costs the user real audio they already recorded — and on a very
-                // short take, all of it.
+                // Pause, then drain, then stop. Stop can arrive between a pause
+                // and the loop noticing it, leaving pre-pause chunks in the ring
+                // with nothing left to take them — real audio the user already
+                // recorded, and on a very short take all of it.
+                //
+                // `pause()` rather than draining straight away: it halts the
+                // producer while leaving the ring readable, which is the property
+                // `EnterPause` above is already built on. Draining first leaves a
+                // window for one more chunk to land behind the sweep, and
+                // `stop()` first would take the queue down with the producer.
+                stream.pause();
                 while let Some(chunk) = stream.poll_chunk() {
                     let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                     inner_mic.lock().mic_samples.extend_from_slice(&pcm);
@@ -282,12 +287,17 @@ impl DualChannelRecorder {
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
-                // One last sweep before the device closes. Stop can arrive
-                // between a pause and the loop noticing it, and then the chunks
-                // captured before the pause are still sitting in the ring with
-                // nothing left to take them. `stream.stop()` drops them, which
-                // costs the user real audio they already recorded — and on a very
-                // short take, all of it.
+                // Pause, then drain, then stop. Stop can arrive between a pause
+                // and the loop noticing it, leaving pre-pause chunks in the ring
+                // with nothing left to take them — real audio the user already
+                // recorded, and on a very short take all of it.
+                //
+                // `pause()` rather than draining straight away: it halts the
+                // producer while leaving the ring readable, which is the property
+                // `EnterPause` above is already built on. Draining first leaves a
+                // window for one more chunk to land behind the sweep, and
+                // `stop()` first would take the queue down with the producer.
+                stream.pause();
                 while let Some(chunk) = stream.poll_chunk() {
                     let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                     inner_sys.lock().sys_samples.extend_from_slice(&pcm);

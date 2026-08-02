@@ -565,7 +565,8 @@ pub async fn stop_recording(
                 .await
             {
                 Ok(chunks) => apply_stt_chunks(&mut live, &chunks),
-                Err(e) => tracing::warn!("final chunk could not be transcribed: {e}"),
+                // Same reason as the summary above: the error names the model.
+                Err(_) => tracing::warn!("final chunk could not be transcribed"),
             }
         }
     }
@@ -607,7 +608,11 @@ pub async fn stop_recording(
             // so propagating this told the user their recording was lost when
             // only the summary was. Report the summary, keep the meeting.
             Err(e) => {
-                tracing::warn!("auto-summary failed: {e}");
+                // The provider's error is not repeated. It carries the model id,
+                // which arrives from the WebView, and this lands in a file on the
+                // user's disk. `done` below still carries the detail to the
+                // window, which is where the person who can act on it is looking.
+                tracing::warn!("auto-summary failed");
                 done = MeetingProgress::summary_failed(&id, &e);
             }
         }

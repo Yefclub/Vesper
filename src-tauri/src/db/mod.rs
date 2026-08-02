@@ -161,12 +161,21 @@ impl Database {
         // Additive, and the only way to add a column to a table that already
         // holds the user's meetings. SQLite has no `ADD COLUMN IF NOT EXISTS`,
         // and re-running is the normal case — every launch after the first — so
-        // the duplicate-column error is the success path on the second run and
-        // is swallowed here rather than aborting the migration behind it.
-        let _ = conn.execute(
+        // the duplicate-column error is the success path on the second run.
+        //
+        // Only that one. Ignoring every error would let a read-only or full
+        // database start the app without the column, and the failure would
+        // resurface as `no such column` on the first attempt to open a meeting —
+        // far from the thing that actually went wrong.
+        if let Err(e) = conn.execute(
             "ALTER TABLE meetings ADD COLUMN title_locked INTEGER NOT NULL DEFAULT 0",
             [],
-        );
+        ) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
         drop(conn);
         self.backfill_search_index()
     }
