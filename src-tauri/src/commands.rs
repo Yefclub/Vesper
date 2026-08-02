@@ -656,10 +656,22 @@ pub async fn poll_live_stt(
         .elapsed_ms()
         .saturating_sub((mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64);
     let settings = state.settings.lock().clone();
-    let chunks = state
+    let chunks = match state
         .stt
         .transcribe_dual(&settings, &mic, &sys, sr, start_ms)
-        .await?;
+        .await
+    {
+        Ok(chunks) => chunks,
+        Err(e) => {
+            // The audio was drained before the call. Propagating without putting
+            // it back threw a slice of the meeting away every 1200ms — so a cloud
+            // provider rejecting every chunk silently shredded the live
+            // transcript while the window showed nothing at all. The cursor goes
+            // back by what was taken and the next poll tries the same audio again.
+            state.recorder.rewind_chunks(mic.len(), sys.len());
+            return Err(e);
+        }
+    };
     let mut guard = state.live.lock();
     let t = guard.entry(id.clone()).or_default();
     apply_stt_chunks(t, &chunks);

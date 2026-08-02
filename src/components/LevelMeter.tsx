@@ -37,6 +37,23 @@ export function LevelMeter({
   );
 }
 
+/**
+ * RMS amplitude (0..1) to a fraction of the bar.
+ *
+ * Linear is why these bars never moved. Speech sits around 0.01–0.1 RMS, so
+ * `value * 16` was 0.2–1.6px inside a `Math.max(4, …)` — the bar rendered at its
+ * 4px floor whether the room was silent or someone was shouting into the
+ * microphone. Loudness is logarithmic, and a meter has to be too.
+ *
+ * -60 dBFS is the floor and 0 dBFS the top, which puts ordinary speech in the
+ * upper half of the bar where it can be seen to move.
+ */
+export function meterScale(rms: number): number {
+  if (!(rms > 0)) return 0;
+  const db = 20 * Math.log10(Math.min(1, rms));
+  return Math.max(0, Math.min(1, (db + 60) / 60));
+}
+
 function Bar({
   label,
   value,
@@ -49,7 +66,7 @@ function Bar({
   compact: boolean;
 }) {
   const full = compact ? 16 : 28;
-  const h = Math.max(4, Math.min(full, Math.round(value * full)));
+  const h = Math.max(2, Math.round(meterScale(value) * full));
   return (
     <div className="flex flex-col items-center gap-1">
       <div
@@ -57,7 +74,14 @@ function Bar({
           compact ? "h-4" : "h-7"
         }`}
       >
-        <div className={`w-full rounded-full ${color}`} style={{ height: h }} />
+        <div
+          className={`w-full rounded-full ${color}`}
+          // Height, not transform: the bar grows from the bottom of a 8-16px
+          // well and there is nothing to composite against. The transition is
+          // what turns ten samples a second into something that reads as a
+          // level rather than as a flicker.
+          style={{ height: h, transition: "height 90ms linear" }}
+        />
       </div>
       {!compact && <span className="text-2xs text-fg-muted">{label}</span>}
     </div>

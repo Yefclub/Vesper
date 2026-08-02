@@ -13,7 +13,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { clsx } from "clsx";
-import { FileAudio, Settings, Sparkles } from "lucide-react";
+import { FileAudio, Settings, Sparkles, TriangleAlert } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -116,6 +116,10 @@ function AppShell({
   const [tab, setTab] = useState<Tab>("transcript");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Kept apart from `error`: a live transcription that keeps failing would
+  // otherwise reappear every 1.2s under a Dismiss the user has already pressed.
+  // This one clears itself the moment a tick succeeds.
+  const [liveSttError, setLiveSttError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [updateNote, setUpdateNote] = useState<string | null>(null);
@@ -457,16 +461,40 @@ function AppShell({
     };
   }, [query]);
 
+  // Levels and the clock, ten times a second. They used to share the transcript's
+  // 1200ms tick, which is why the meters read as static even once their scale was
+  // fixed: a level that refreshes once a second is a still picture. This call only
+  // reads atomics on the other side, so it is cheap enough to ask this often — and
+  // it is the one thing that must keep moving while a slow transcription runs.
+  useEffect(() => {
+    if (!status?.recording || status.paused) return;
+    const id = window.setInterval(async () => {
+      try {
+        setStatus(await api.recorderStatus());
+      } catch {
+        /* keep UI alive */
+      }
+    }, 100);
+    return () => window.clearInterval(id);
+  }, [status?.recording, status?.paused]);
+
   useEffect(() => {
     // Paused means nothing is arriving — no samples, no lines, no clock. Asking
     // twice a second anyway only re-sets the same values.
     if (!status?.recording || status.paused) return;
     const id = window.setInterval(async () => {
       try {
-        setStatus(await api.recorderStatus());
         setTranscript(await api.pollLiveStt());
-      } catch {
-        /* keep UI alive */
+        // A tick that worked clears whatever the last failure said. Kept here
+        // rather than beside the failure so a provider that recovers stops
+        // shouting at the user without needing a second signal.
+        setLiveSttError(null);
+      } catch (e) {
+        // Never swallowed again. A cloud provider that rejects every chunk —
+        // wrong model id, no credit, a 400 — produced an empty screen and no
+        // explanation, because this catch was `{ /* keep UI alive */ }` and the
+        // audio had already been drained by the time it threw.
+        setLiveSttError(String(e));
       }
     }, 1200);
     return () => window.clearInterval(id);
@@ -807,6 +835,23 @@ function AppShell({
                 <Button variant="link" className="ml-3" onClick={() => setError(null)}>
                   {t("action.dismiss")}
                 </Button>
+              </div>
+            )}
+            {/* Transcription is failing while the recording continues. Not
+                dismissible and not an `error`: the audio is still being captured
+                and saved, so this is a degraded state rather than a lost one, and
+                it goes away by itself when a chunk finally lands. */}
+            {liveSttError && status?.recording && (
+              <div
+                role="status"
+                data-testid="live-stt-error"
+                className="flex items-start gap-2 border-b border-warn/30 bg-warn/10 px-6 py-2 text-sm text-warn"
+              >
+                <TriangleAlert size={16} aria-hidden className="mt-0.5 shrink-0" />
+                <span>
+                  {t("live.stt_failing")}{" "}
+                  <span className="text-fg-muted">{liveSttError}</span>
+                </span>
               </div>
             )}
             {pendingUpdate && (
