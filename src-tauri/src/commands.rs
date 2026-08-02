@@ -10,6 +10,8 @@ use crate::domain::i18n::{catalog, t, Locale};
 use crate::domain::job::{
     MeetingEvent, MeetingPhase, MeetingProgress, MeetingRecord, MeetingStatus,
 };
+use crate::domain::overlay::{dock_right_center, overlay_visible, COLLAPSED, EXPANDED};
+use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, SummaryVersion};
 use crate::domain::search::SearchHit;
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
 use crate::domain::shortcut::ShortcutStatus;
@@ -24,14 +26,14 @@ use crate::stt::catalog::{
     fetch_openrouter_stt_models, OrModel,
 };
 use crate::stt::local::LocalSttEngine;
-use crate::stt::pipeline::{apply_stt_chunks, SttService};
+use crate::stt::pipeline::{apply_stt_chunks, SttChunkResult, SttService};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 pub struct AppState {
@@ -56,6 +58,26 @@ pub struct AppState {
     /// draining audio. Two tickers would split each window between them and run
     /// concurrent transcriptions over halves of the same speech.
     pub live_stt_generation: AtomicU64,
+    /// Held across a refinement's whole read, model call and write.
+    ///
+    /// A version is the *whole* insight set, so two refinements that each read
+    /// the meeting before either wrote would each build a version from a stale
+    /// snapshot, and the second to land would carry the other's section from
+    /// before it was improved. The window already allows one at a time; this is
+    /// what makes it true.
+    pub refine_flight: tokio::sync::Mutex<()>,
+    /// Which meetings have had at least one live transcription pass complete.
+    ///
+    /// Not the same question as "does the transcript have segments": a paid pass
+    /// can answer with no words and still have been billed, and treating that as
+    /// "no live transcription happened" sends the whole recording through the
+    /// provider a second time at stop — charging twice for the same audio.
+    ///
+    /// Keyed by meeting rather than counted globally: stopping one recording
+    /// while its pass is still in flight and immediately starting another let
+    /// the first one's completion answer for the second, and the second then
+    /// skipped a fallback it needed.
+    pub live_stt_passes: Mutex<HashSet<String>>,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -78,6 +100,8 @@ impl AppState {
             stt_flight: tokio::sync::Mutex::new(()),
             download_flight: tokio::sync::Mutex::new(()),
             live_stt_generation: AtomicU64::new(0),
+            refine_flight: tokio::sync::Mutex::new(()),
+            live_stt_passes: Mutex::new(HashSet::new()),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -475,13 +499,19 @@ pub fn start_recording(
         key_points: None,
         project: None,
         title_locked,
+        cost_nano_usd: None,
+        cost_label: None,
     };
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
     *state.active_meeting.lock() = Some(id);
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
-    spawn_live_stt_ticker(app, Arc::clone(&state));
+    spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
+    // A recording can be started by the tray or the accelerator while the window
+    // is already minimized, so the card has to be considered here and not only
+    // when the window is minimized.
+    sync_overlay(&app, &state, false);
     Ok(meeting)
 }
 
@@ -549,6 +579,9 @@ pub async fn stop_recording(
     // the generation makes it immediate, and makes a start that follows quickly
     // unambiguous about which ticker owns the microphone.
     state.live_stt_generation.fetch_add(1, Ordering::SeqCst);
+    // Before the tail transcription and the summary, which take seconds: the
+    // card must not sit there advertising a recording that has already stopped.
+    sync_overlay(&app, &state, false);
     let duration = state.recorder.elapsed_ms();
     // Take the tail here, synchronously, while this is still the only thing that
     // has touched the recorder since it stopped. Draining it later — after the
@@ -601,7 +634,11 @@ pub async fn stop_recording(
         &MeetingProgress::new(&id, MeetingPhase::Transcribing),
     );
 
-    if live.segments().is_empty() {
+    // Whether a pass *ran*, not whether it produced words. A paid pass can answer
+    // with no text and still have been billed, and reading the empty transcript
+    // as "live transcription never happened" sent the whole recording through
+    // the provider again — charging twice for the same audio.
+    if !state.live_stt_passes.lock().remove(&id) {
         // Nothing was transcribed live — cloud STT down, or a recording short
         // enough that no poll ever ran. Transcribe the whole saved WAV.
         if let Ok((mic, sys, sr)) = read_dual_wav(&path) {
@@ -610,6 +647,7 @@ pub async fn stop_recording(
                 .transcribe_dual(&settings, &mic, &sys, sr, 0)
                 .await
             {
+                bill_chunks(&state.db, &id, &chunks);
                 apply_stt_chunks(&mut live, &chunks);
             }
         }
@@ -627,7 +665,10 @@ pub async fn stop_recording(
                 .transcribe_dual(&settings, &mic, &sys, sr, tail_ms)
                 .await
             {
-                Ok(chunks) => apply_stt_chunks(&mut live, &chunks),
+                Ok(chunks) => {
+                    bill_chunks(&state.db, &id, &chunks);
+                    apply_stt_chunks(&mut live, &chunks)
+                }
                 // Same reason as the summary above: the error names the model.
                 Err(_) => tracing::warn!("final chunk could not be transcribed"),
             }
@@ -644,6 +685,11 @@ pub async fn stop_recording(
 
     let mut done = MeetingProgress::new(&id, MeetingPhase::Ready);
     if settings.auto_summarize && !meeting.transcript_text.is_empty() {
+        // The same flight every other whole-set replacement takes. A refinement
+        // started before Stop can be awaiting its model call right now, and
+        // without this its result would be overwritten by the snapshot this path
+        // has been holding since before the call was made.
+        let _flight = state.refine_flight.lock().await;
         let _ = app.emit(
             "meeting://progress",
             &MeetingProgress::new(&id, MeetingPhase::Summarizing),
@@ -657,8 +703,13 @@ pub async fn stop_recording(
             )
             .await
         {
-            Ok(insights) => {
+            Ok((insights, cost)) => {
                 state.db.save_insights(&id, &insights)?;
+                // A meeting's first insights are version 1. Recording it here
+                // rather than lazily means the history is complete from the
+                // start instead of from whenever someone first opened it.
+                state.db.push_summary_version(&id, "summarize", &insights)?;
+                state.db.add_meeting_cost(&id, cost)?;
                 meeting.summary = Some(insights.summary.clone());
                 meeting.action_items = Some(insights.action_items_text());
                 meeting.key_points = Some(insights.key_points_text());
@@ -742,6 +793,11 @@ async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), St
             return Err(e);
         }
     };
+    // Charged before the transcript is merged. The sum goes through SQL rather
+    // than a read-modify-write here: two channels transcribe concurrently and
+    // one would overwrite the other.
+    bill_chunks(&state.db, &id, &chunks);
+    state.live_stt_passes.lock().insert(id.clone());
     let mut guard = state.live.lock();
     let t = guard.entry(id.clone()).or_default();
     apply_stt_chunks(t, &chunks);
@@ -809,10 +865,17 @@ async fn name_meeting(
         .title(settings, summary, &meeting.transcript_text)
         .await
     {
-        Ok(raw) => match parse_title(&raw) {
-            Some(title) => meeting.title = title,
-            None => tracing::warn!("the model answered with no usable title"),
-        },
+        Ok((raw, cost)) => {
+            // Charged to the meeting even when the answer is unusable: the call
+            // was made and the provider billed it.
+            if let Err(e) = state.db.add_meeting_cost(&meeting.id, cost) {
+                tracing::warn!("could not record the cost of a generated title: {e}");
+            }
+            match parse_title(&raw) {
+                Some(title) => meeting.title = title,
+                None => tracing::warn!("the model answered with no usable title"),
+            }
+        }
         // The provider's error is not repeated. It carries the model id, which
         // arrives from the WebView, and this now lands in a file on the user's
         // disk. A failed title is a nuisance, not something worth widening what
@@ -839,11 +902,26 @@ pub async fn summarize_meeting(
         .transition(MeetingEvent::StartSummarize)
         .unwrap_or(MeetingStatus::Summarizing);
     state.db.upsert_meeting(&m)?;
-    let insights = state
+    // Held for the same reason a refinement holds it: this replaces the whole
+    // insight set, and a refinement awaiting its model call would otherwise
+    // write a version built from what this is about to overwrite.
+    let _flight = state.refine_flight.lock().await;
+    let (insights, cost) = state
         .llm
         .summarize(&settings, &m.transcript_text, tpl)
         .await?;
+    // The summary being replaced has to become a version before it is gone.
+    // Without this, re-summarising a meeting nobody had opened the history of
+    // left the original unrecoverable — the lazy baseline would then record the
+    // replacement as if it had always been the first.
+    if m.summary.is_some() && state.db.list_summary_versions(&id)?.is_empty() {
+        state
+            .db
+            .push_summary_version(&id, "summarize", &current_insights(&m))?;
+    }
     state.db.save_insights(&id, &insights)?;
+    state.db.push_summary_version(&id, "summarize", &insights)?;
+    state.db.add_meeting_cost(&id, cost)?;
     m.status = MeetingStatus::Ready;
     m.summary = Some(insights.summary.clone());
     m.action_items = Some(insights.action_items_text());
@@ -869,7 +947,7 @@ pub async fn chat_meeting(
     let history = state.db.list_chat(&id)?;
     let settings = state.settings.lock().clone();
     state.db.add_chat(&id, "user", &question)?;
-    let answer = state
+    let (answer, cost) = state
         .llm
         .chat(
             &settings,
@@ -880,6 +958,9 @@ pub async fn chat_meeting(
             &question,
         )
         .await?;
+    // Billed to the meeting it is about: it is the same OpenRouter spend and the
+    // user is looking at that meeting's total.
+    state.db.add_meeting_cost(&id, cost)?;
     state.db.add_chat(&id, "assistant", &answer)?;
     Ok(ChatMessage {
         role: "assistant".into(),
@@ -930,6 +1011,8 @@ pub async fn import_audio(
         key_points: None,
         project: None,
         title_locked,
+        cost_nano_usd: None,
+        cost_label: None,
     };
     state.db.upsert_meeting(&meeting)?;
     let settings = state.settings.lock().clone();
@@ -939,6 +1022,9 @@ pub async fn import_audio(
         .transcribe_dual(&settings, &pcm, &[], sr, 0)
         .await?;
     let mut t = LiveTranscript::new();
+    // Billed like every other transcription path: this one calls the same
+    // provider and it was the meeting's only charge on an imported file.
+    bill_chunks(&state.db, &id, &chunks);
     apply_stt_chunks(&mut t, &chunks);
     state.db.save_transcript(&id, &t)?;
     meeting.transcript_text = t.plain_text();
@@ -981,6 +1067,9 @@ pub async fn retranscribe(
         .transcribe_dual(&settings, &mic, &sys, sr, 0)
         .await?;
     let mut t = LiveTranscript::new();
+    // Billed like every other transcription path: this one calls the same
+    // provider and it was the meeting's only charge on an imported file.
+    bill_chunks(&state.db, &id, &chunks);
     apply_stt_chunks(&mut t, &chunks);
     state.db.save_transcript(&id, &t)?;
     meeting.transcript_text = t.plain_text();
@@ -1138,6 +1227,245 @@ pub fn shortcut_status(status: State<'_, ShortcutStatus>) -> ShortcutStatus {
 /// Rename a meeting.
 ///
 /// The typed name goes through the same `parse_title` as the model's answer —
+/// Charge a meeting for a batch of transcription chunks.
+///
+/// `Some(0)` and `None` are different answers and the difference is the whole
+/// point of the column: a free cloud model reported a real zero and the meeting
+/// should read `$0.00`, while a meeting transcribed on this machine reported
+/// nothing and should show no price at all. Summing to zero and skipping the
+/// write would have collapsed the first into the second.
+fn bill_chunks(db: &Database, id: &str, chunks: &[SttChunkResult]) -> Option<i64> {
+    let mut total: Option<i64> = None;
+    for c in chunks {
+        if let Some(n) = c.cost_nano_usd {
+            total = Some(total.unwrap_or(0) + n);
+        }
+    }
+    if let Some(total) = total {
+        if let Err(e) = db.add_meeting_cost(id, Some(total)) {
+            // A bookkeeping row is not worth losing a transcript over.
+            tracing::warn!("could not record a transcription charge: {e}");
+        }
+    }
+    total
+}
+
+/// Show, hide, move and size the minimized-recording card.
+///
+/// Both inputs are re-read here rather than remembered: a recording can stop
+/// while the window is minimized and the window can be restored while recording,
+/// and a flag toggled by whichever event fired last gets one of those wrong.
+fn sync_overlay(app: &AppHandle, state: &AppState, expanded: bool) {
+    let Some(overlay) = app.get_webview_window("overlay") else {
+        return;
+    };
+    let recording = state.recorder.is_recording();
+    let minimized = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_minimized().ok())
+        .unwrap_or(false);
+
+    if !overlay_visible(recording, minimized) {
+        let _ = overlay.hide();
+        return;
+    }
+
+    let size = if expanded { EXPANDED } else { COLLAPSED };
+    // The monitor the main window is on, not the primary: on a two-screen desk
+    // the card belongs beside the work, and the scale factor differs per display.
+    let monitor = app
+        .get_webview_window("main")
+        .and_then(|w| w.current_monitor().ok().flatten())
+        .or_else(|| overlay.primary_monitor().ok().flatten());
+    if let Some(m) = monitor {
+        let pos = m.position();
+        let msize = m.size();
+        let (x, y) = dock_right_center(
+            (pos.x, pos.y),
+            (msize.width, msize.height),
+            m.scale_factor(),
+            size,
+        );
+        let _ = overlay.set_size(tauri::LogicalSize::new(size.0, size.1));
+        let _ = overlay.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    let _ = overlay.show();
+}
+
+/// Re-derive the card's visibility after the main window moved or changed state.
+///
+/// Collapsed on purpose: the pointer is not over the card at the moment the
+/// window is minimized, and starting expanded would put a 340px panel on screen
+/// that nothing asked for.
+pub fn sync_overlay_for(app: &AppHandle, state: &AppState) {
+    sync_overlay(app, state, false);
+}
+
+/// The card asking to grow or shrink as the pointer arrives and leaves.
+#[tauri::command]
+pub fn set_overlay_expanded(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    expanded: bool,
+) -> Result<(), String> {
+    sync_overlay(&app, &state, expanded);
+    Ok(())
+}
+
+/// Rebuild the insight set a meeting currently shows, so a refinement can be
+/// stored as a version without reparsing its markdown twice.
+fn current_insights(m: &MeetingRecord) -> MeetingInsights {
+    MeetingInsights {
+        summary: m.summary.clone().unwrap_or_default(),
+        key_points: bullets(m.key_points.as_deref()),
+        action_items: bullets(m.action_items.as_deref()),
+    }
+}
+
+fn bullets(text: Option<&str>) -> Vec<String> {
+    text.map(parse_refined_list).unwrap_or_default()
+}
+
+/// Every stored version of a meeting's insights, oldest first.
+///
+/// Backfills a baseline on first read for meetings summarised before versioning
+/// existed: without it their first improvement would be version 1 and the
+/// original would be the thing that vanished. A write on read, and idempotent —
+/// the next call finds the baseline already there.
+#[tauri::command]
+pub fn list_summary_versions(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<SummaryVersion>, String> {
+    let existing = state.db.list_summary_versions(&id)?;
+    if !existing.is_empty() {
+        return Ok(existing);
+    }
+    let meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    if meeting.summary.is_none() {
+        return Ok(existing);
+    }
+    state
+        .db
+        .push_summary_version(&id, "summarize", &current_insights(&meeting))?;
+    state.db.list_summary_versions(&id)
+}
+
+/// Ask the model to improve one section, keeping everything it replaces.
+#[tauri::command]
+pub async fn refine_summary_section(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    section: String,
+) -> Result<SummaryVersion, String> {
+    // From the WebView, so it is parsed rather than trusted: an unrecognised
+    // value picks no prompt and merges into nothing, and failing here says so.
+    let section = Section::parse(&section).ok_or_else(|| "unknown section".to_string())?;
+    // Taken before the read and held past the write, so every version is built
+    // on what the one before it produced.
+    let _flight = state.refine_flight.lock().await;
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    if meeting.summary.is_none() {
+        return Err("summarize this meeting before improving it".into());
+    }
+    // The baseline has to exist before the improvement is written, or the
+    // original is what gets lost.
+    if state.db.list_summary_versions(&id)?.is_empty() {
+        state
+            .db
+            .push_summary_version(&id, "summarize", &current_insights(&meeting))?;
+    }
+
+    let settings = state.settings.lock().clone();
+    let current = match section {
+        Section::KeyPoints => meeting.key_points.clone().unwrap_or_default(),
+        Section::ActionItems => meeting.action_items.clone().unwrap_or_default(),
+    };
+    // The timestamped, speaker-labelled transcript rather than the flattened
+    // text the first pass used: the whole transcript already went in, so "more
+    // information" is the structure, not more of it.
+    let transcript = state
+        .live
+        .lock()
+        .get(&id)
+        .map(|t| t.timestamped_text())
+        .unwrap_or_else(|| meeting.transcript_text.clone());
+    let prompt = build_refine_prompt(section, &current, &transcript, settings.locale());
+    let messages = vec![ChatMessage {
+        role: "user".into(),
+        content: prompt,
+    }];
+    let (raw, cost) = state.llm.complete_for_refine(&settings, &messages).await?;
+    state.db.add_meeting_cost(&id, cost)?;
+
+    let improved = parse_refined_list(&raw);
+    if improved.is_empty() {
+        // A model that answered with prose has not produced a list. Writing it
+        // would replace good notes with a sentence about not improving them.
+        return Err("the model did not answer with a list".into());
+    }
+    let mut insights = current_insights(&meeting);
+    match section {
+        Section::KeyPoints => insights.key_points = improved,
+        Section::ActionItems => insights.action_items = improved,
+    }
+    let version = state
+        .db
+        .push_summary_version(&id, section.as_str(), &insights)?;
+    state.db.save_insights(&id, &insights)?;
+    meeting.summary = Some(insights.summary.clone());
+    meeting.key_points = Some(insights.key_points_text());
+    meeting.action_items = Some(insights.action_items_text());
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    state.db.upsert_meeting(&meeting)?;
+    Ok(version)
+}
+
+/// Put an earlier version back, as a new version.
+///
+/// Appended rather than rewound: history stays append-only, so restoring is
+/// itself undoable and nothing the user has seen ever disappears.
+#[tauri::command]
+pub async fn restore_summary_version(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    version: i64,
+) -> Result<SummaryVersion, String> {
+    // The same flight a refinement holds. A restore landing while one is
+    // awaiting its model call would be overwritten the moment that call returned
+    // with the pre-restore snapshot it had been holding all along.
+    let _flight = state.refine_flight.lock().await;
+    let wanted = state
+        .db
+        .list_summary_versions(&id)?
+        .into_iter()
+        .find(|v| v.version == version)
+        .ok_or_else(|| "version not found".to_string())?;
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    let insights = MeetingInsights {
+        summary: wanted.summary.clone(),
+        key_points: parse_refined_list(&wanted.key_points),
+        action_items: parse_refined_list(&wanted.action_items),
+    };
+    let created = state.db.push_summary_version(&id, "restore", &insights)?;
+    state.db.save_insights(&id, &insights)?;
+    meeting.summary = Some(insights.summary.clone());
+    meeting.key_points = Some(insights.key_points_text());
+    meeting.action_items = Some(insights.action_items_text());
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    state.db.upsert_meeting(&meeting)?;
+    Ok(created)
+}
+
 /// the WebView is the trust boundary, and a title reaches a filename, a PDF
 /// header and an FTS index. `upsert_meeting` re-indexes search in the same
 /// transaction, so the new name is findable immediately.

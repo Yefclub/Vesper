@@ -326,8 +326,15 @@ export function ModelPicker({
                           )}
                         >
                           <span className="block truncate">{m.name || m.id}</span>
-                          <span className="block truncate text-2xs text-fg-subtle">
-                            {m.id}
+                          <span className="flex items-baseline justify-between gap-3 text-2xs text-fg-subtle">
+                            <span className="truncate">{m.id}</span>
+                            {/* Absent means the catalogue did not quote one.
+                                Rendering nothing beats rendering "free". */}
+                            {m.price_label ? (
+                              <span className="shrink-0 tabular-nums">
+                                {m.price_label}
+                              </span>
+                            ) : null}
                           </span>
                         </button>
                       );

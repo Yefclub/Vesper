@@ -169,6 +169,30 @@ pub fn run() {
                 } else {
                     tauri::Theme::Light
                 }));
+
+                // There is no `WindowEvent::Minimized` in Tauri. Windows reports
+                // a minimize as `Resized(0,0)` followed by `Focused(false)`, so
+                // both are listened for and `is_minimized()` — which is
+                // `IsIconic` underneath — is the authority rather than the
+                // payload.
+                let handle = app.handle().clone();
+                w.on_window_event(move |event| {
+                    if matches!(
+                        event,
+                        tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_)
+                    ) {
+                        let state = handle.state::<Arc<AppState>>();
+                        commands::sync_overlay_for(&handle, &state);
+                    }
+                    // A hidden window is still a window and Tauri only exits once
+                    // every one is destroyed, so closing the main window has to
+                    // take the card with it or Vesper keeps running invisibly.
+                    if matches!(event, tauri::WindowEvent::Destroyed) {
+                        if let Some(o) = handle.get_webview_window("overlay") {
+                            let _ = o.close();
+                        }
+                    }
+                });
             }
 
             Ok(())
@@ -200,6 +224,10 @@ pub fn run() {
             commands::resume_recording,
             commands::stop_recording,
             commands::summarize_meeting,
+            commands::list_summary_versions,
+            commands::refine_summary_section,
+            commands::restore_summary_version,
+            commands::set_overlay_expanded,
             commands::chat_meeting,
             commands::list_chat,
             commands::import_audio,

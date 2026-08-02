@@ -15,6 +15,11 @@ export interface LiveTranscript {
 }
 
 export interface MeetingRecord {
+  /// Provider spend for this meeting, and the same figure formatted by the
+  /// backend. Absent on a meeting that never called a paid provider, which is
+  /// why the header renders nothing rather than a zero.
+  cost_nano_usd?: number | null;
+  cost_label?: string | null;
   id: string;
   title: string;
   status: string;
@@ -173,9 +178,22 @@ export interface ShortcutStatus {
   reason_key?: string | null;
 }
 
+export interface SummaryVersion {
+  version: number;
+  /// `summarize`, `key_points`, `action_items` or `restore`.
+  origin: string;
+  created_at: string;
+  summary: string;
+  key_points: string;
+  action_items: string;
+}
+
 export interface OrModel {
   id: string;
   name: string;
+  /// What the model charges per million tokens. Absent when the catalogue did
+  /// not quote one — unknown, never free.
+  price_label?: string | null;
   kind: string;
 }
 
@@ -219,6 +237,22 @@ export const api = {
   pauseRecording: () => invoke<RecorderStatus>("pause_recording"),
   resumeRecording: () => invoke<RecorderStatus>("resume_recording"),
   stopRecording: () => invoke<MeetingRecord>("stop_recording"),
+  /// Every stored version of a meeting's insights, oldest first. Backfills a
+  /// baseline for meetings summarised before versioning existed.
+  listSummaryVersions: (id: string) =>
+    invoke<SummaryVersion[]>("list_summary_versions", { id }),
+  /// Improve one section. Rejects if the model does not answer with a list —
+  /// the meeting keeps what it had rather than gaining a sentence about failure.
+  refineSummarySection: (id: string, section: "key_points" | "action_items") =>
+    invoke<SummaryVersion>("refine_summary_section", { id, section }),
+  /// Puts an earlier version back, as a new version. Nothing is rewound.
+  restoreSummaryVersion: (id: string, version: number) =>
+    invoke<SummaryVersion>("restore_summary_version", { id, version }),
+  /// The card asking to grow or shrink as the pointer arrives and leaves.
+  /// A no-op unless a recording is running and the main window is minimized —
+  /// the backend re-derives both rather than trusting a remembered flag.
+  setOverlayExpanded: (expanded: boolean) =>
+    invoke<void>("set_overlay_expanded", { expanded }),
   summarize: (id: string, template?: string) =>
     invoke<MeetingInsights>("summarize_meeting", { id, template }),
   importAudio: (path: string, title?: string) =>

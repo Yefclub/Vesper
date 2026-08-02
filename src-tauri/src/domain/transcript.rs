@@ -74,6 +74,29 @@ impl LiveTranscript {
             .join("\n")
     }
 
+    /// The same lines, keeping the clock.
+    ///
+    /// `plain_text` drops the timestamps, which is right for a first summary —
+    /// they are noise when the task is "what happened". A refinement is being
+    /// asked to find what the first pass missed, and when something was said is
+    /// most of how a model tells a decision from an aside.
+    pub fn timestamped_text(&self) -> String {
+        self.segments
+            .iter()
+            .map(|s| {
+                let secs = s.start_ms / 1000;
+                format!(
+                    "[{:02}:{:02}] {}: {}",
+                    secs / 60,
+                    secs % 60,
+                    s.speaker.label(),
+                    s.text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn merge_from(other: &LiveTranscript) -> LiveTranscript {
         let mut t = LiveTranscript::new();
         for s in other.segments() {

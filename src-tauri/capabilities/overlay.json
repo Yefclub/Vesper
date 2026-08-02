@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "The minimized-recording card. Listens for transcript events and drives the recorder; it has no reason to reach the filesystem, the updater or the shell.",
+  "windows": [
+    "overlay"
+  ],
+  "permissions": [
+    "core:event:default"
+  ]
+}
