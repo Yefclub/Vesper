@@ -616,7 +616,7 @@ export function SettingsPanel({
                   </div>
                   <div>
                     {t("cap.recommended")}: {caps.recommended_backend} /{" "}
-                    {caps.recommended_stt_model}
+                    {caps.recommended_stt_model} / {caps.recommended_llm_model}
                   </div>
                 </div>
               )}
