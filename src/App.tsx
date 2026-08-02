@@ -13,7 +13,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { clsx } from "clsx";
-import { FileAudio, Settings, Sparkles } from "lucide-react";
+import { Moon, Settings, Sparkles, Sun, TriangleAlert } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -37,10 +37,12 @@ import { Button, FOCUS } from "./components/Button";
 import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { CopyButton } from "./components/CopyButton";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { RecordTransport } from "./components/RecordTransport";
 import { Sidebar } from "./components/Sidebar";
+import { WindowControls } from "./components/WindowControls";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
@@ -116,6 +118,10 @@ function AppShell({
   const [tab, setTab] = useState<Tab>("transcript");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Kept apart from `error`: a live transcription that keeps failing would
+  // otherwise reappear every 1.2s under a Dismiss the user has already pressed.
+  // This one clears itself the moment a tick succeeds.
+  const [liveSttError, setLiveSttError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [updateNote, setUpdateNote] = useState<string | null>(null);
@@ -337,6 +343,17 @@ function AppShell({
       track(
         await listen<LiveTranscript>("transcript://append", (e) => {
           setTranscript(e.payload);
+          // A window that filled clears whatever the last failure said, so a
+          // provider that recovers stops shouting without needing a second
+          // signal.
+          setLiveSttError(null);
+        }),
+      );
+      track(
+        // Never swallowed. A cloud provider rejecting every chunk — wrong model
+        // id, no credit, a 400 — used to be an empty screen and no explanation.
+        await listen<string>("transcript://error", (e) => {
+          setLiveSttError(e.payload);
         }),
       );
       track(
@@ -457,20 +474,23 @@ function AppShell({
     };
   }, [query]);
 
+  // Levels and the clock, ten times a second. They used to share the transcript's
+  // 1200ms tick, which is why the meters read as static even once their scale was
+  // fixed: a level that refreshes once a second is a still picture. This call only
+  // reads atomics on the other side, so it is cheap enough to ask this often — and
+  // it is the one thing that must keep moving while a slow transcription runs.
   useEffect(() => {
-    // Paused means nothing is arriving — no samples, no lines, no clock. Asking
-    // twice a second anyway only re-sets the same values.
     if (!status?.recording || status.paused) return;
     const id = window.setInterval(async () => {
       try {
         setStatus(await api.recorderStatus());
-        setTranscript(await api.pollLiveStt());
       } catch {
         /* keep UI alive */
       }
-    }, 1200);
+    }, 100);
     return () => window.clearInterval(id);
   }, [status?.recording, status?.paused]);
+
 
   /// Jump the reading column to its newest line.
   ///
@@ -720,7 +740,10 @@ function AppShell({
           header. */}
       <header
         data-tauri-drag-region
-        className="grid h-12 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 pl-4 pr-2"
+        // `pr-0` now: the window controls run to the window's own edge, the way
+        // every other application on the platform draws them. The 46px targets
+        // supply their own inset.
+        className="grid h-12 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 pl-4 pr-0"
       >
         <div className="flex items-center gap-2">
           {/* No radius: the asset is the mark alone now, not a rounded tile, so
@@ -760,7 +783,41 @@ function AppShell({
           </AnimatePresence>
         </div>
 
-        <div className="flex items-center justify-end gap-3">
+        <div className="flex items-center justify-end gap-1">
+          {/* The theme is one click from anywhere, not four (gear → Appearance →
+              pick → close). It applies immediately and writes straight through
+              to settings, because there is no draft out here to be dirty and
+              nothing to save. `theme` is read off the row rather than off the
+              DOM so the button and the stored value cannot disagree. */}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => {
+              const previous = settings.theme;
+              const next = previous === "dark" ? "light" : "dark";
+              applyTheme(next);
+              setSettings((s) => ({ ...s, theme: next }));
+              // Only the theme goes over the wire. Sending a whole snapshot for
+              // one field made this a lost update: a toggle still in flight
+              // landed after a drawer Save carrying the pre-drawer value of
+              // every other setting.
+              api
+                .setTheme(next)
+                .then(onSettingsChange)
+                .catch((e) => {
+                  // Put it back. Leaving the header showing a theme the database
+                  // does not have means the next launch silently disagrees with
+                  // what is on screen.
+                  applyTheme(previous === "dark" ? "dark" : "light");
+                  setSettings((s) => ({ ...s, theme: previous }));
+                  setError(String(e));
+                });
+            }}
+            title={t(settings.theme === "dark" ? "theme.light" : "theme.dark")}
+            aria-label={t(settings.theme === "dark" ? "theme.light" : "theme.dark")}
+          >
+            {settings.theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+          </Button>
           <Button
             variant="ghost"
             size="icon"
@@ -770,6 +827,10 @@ function AppShell({
           >
             <Settings size={16} />
           </Button>
+          {/* Drawn by the app because `decorations` is off. The system frame put
+              a light grey Windows bar above a cream window with no way to theme
+              it, which is the seam the product owner is pointing at. */}
+          <WindowControls />
         </div>
       </header>
 
@@ -807,6 +868,23 @@ function AppShell({
                 <Button variant="link" className="ml-3" onClick={() => setError(null)}>
                   {t("action.dismiss")}
                 </Button>
+              </div>
+            )}
+            {/* Transcription is failing while the recording continues. Not
+                dismissible and not an `error`: the audio is still being captured
+                and saved, so this is a degraded state rather than a lost one, and
+                it goes away by itself when a chunk finally lands. */}
+            {liveSttError && status?.recording && (
+              <div
+                role="status"
+                data-testid="live-stt-error"
+                className="flex items-start gap-2 border-b border-warn/30 bg-warn/10 px-6 py-2 text-sm text-warn"
+              >
+                <TriangleAlert size={16} aria-hidden className="mt-0.5 shrink-0" />
+                <span>
+                  {t("live.stt_failing")}{" "}
+                  <span className="text-fg-muted">{liveSttError}</span>
+                </span>
               </div>
             )}
             {pendingUpdate && (
@@ -935,29 +1013,43 @@ function AppShell({
                         </Button>
                       ))}
                     </div>
-                    <Button
-                      size="xs"
-                      variant="secondary"
-                      onClick={() =>
-                        selectedId &&
-                        api.retranscribe(selectedId).then((m) => loadMeeting(m.id))
-                      }
-                    >
-                      <FileAudio size={16} /> {t("action.retranscribe")}
-                    </Button>
                   </div>
                 </div>
 
-                <Tabs
-                  idPrefix="content"
-                  className="mx-auto w-full max-w-pane px-6"
-                  value={tab}
-                  onChange={setTab}
-                  items={[
-                    { id: "transcript", label: t("tab.transcript") },
-                    { id: "summary", label: t("tab.summary") },
-                  ]}
-                />
+                {/* The copy control rides the tab rule rather than the pane:
+                    the transcript scrolls and a button inside it would leave
+                    with the rows. `relative` + absolute keeps `Tabs` owning its
+                    own width, which its roving keyboard nav measures. */}
+                <div className="relative">
+                  <Tabs
+                    idPrefix="content"
+                    className="mx-auto w-full max-w-pane px-6"
+                    value={tab}
+                    onChange={setTab}
+                    items={[
+                      { id: "transcript", label: t("tab.transcript") },
+                      { id: "summary", label: t("tab.summary") },
+                    ]}
+                  />
+                  {tab === "transcript" && transcript.segments?.length ? (
+                    <div className="pointer-events-none absolute inset-y-0 right-0 mx-auto flex w-full max-w-pane items-center justify-end px-6">
+                      <CopyButton
+                        className="pointer-events-auto"
+                        label={t("tab.transcript")}
+                        text={transcript.segments
+                          .map(
+                            (s) =>
+                              `[${formatDuration(s.start_ms)}] ${
+                                s.speaker === "me"
+                                  ? t("speaker.me")
+                                  : t("speaker.others")
+                              }: ${s.text}`,
+                          )
+                          .join("\n")}
+                      />
+                    </div>
+                  ) : null}
+                </div>
 
                 {/* The scroll container is the tab panel: the two panes swap
                     inside it, so the id follows the selected tab rather than
@@ -1101,10 +1193,17 @@ function AppShell({
                                 boxing it is what makes the product's headline
                                 output read as a widget instead of as the
                                 answer. */}
-                            <section>
-                              <h2 className="mb-2 text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
-                                {t("section.summary")}
-                              </h2>
+                            <section className="group">
+                              <div className="mb-2 flex items-start justify-between gap-2">
+                                <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+                                  {t("section.summary")}
+                                </h2>
+                                <CopyButton
+                                  text={selected.summary || ""}
+                                  label={t("section.summary")}
+                                  className="-mt-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                                />
+                              </div>
                               <Markdown text={selected.summary || "—"} />
                             </section>
                             {/* The two lists become a right-hand rail and keep
@@ -1297,6 +1396,9 @@ function AppShell({
             settings={settings}
             models={models}
             onClose={() => setShowSettings(false)}
+            onThemeChange={(theme) =>
+              setSettings((prev) => ({ ...prev, theme }))
+            }
             onSave={async (s) => {
               const next = await api.saveSettings(s);
               setSettings(next);
@@ -1322,10 +1424,21 @@ function AppShell({
 
 function Section({ title, body }: { title: string; body: string }) {
   return (
-    <section className="rounded-lg border border-border bg-surface-2 p-4">
-      <h2 className="mb-2 text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
-        {title}
-      </h2>
+    // `group` so the copy button is quiet until the pointer is on the block it
+    // copies. A control that is always lit competes with the text it sits on;
+    // one that only exists on hover is unreachable — `focus-within` keeps it for
+    // the keyboard.
+    <section className="group rounded-lg border border-border bg-surface-2 p-4">
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+          {title}
+        </h2>
+        <CopyButton
+          text={body}
+          label={title}
+          className="-mr-1 -mt-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+        />
+      </div>
       {/* Not a `<pre>`. The summariser is asked for markdown, so the app's
           headline deliverable — the first thing read after a recording stops —
           was reaching the screen as literal `**` and `- `. */}

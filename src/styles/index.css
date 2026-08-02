@@ -292,8 +292,8 @@ body,
    these — when it is present the engine ignores the pseudo styles entirely and
    falls back to overlay scrollbars. */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--color-border-strong);
@@ -301,7 +301,70 @@ body,
   background-clip: content-box;
   border-radius: 999px;
 }
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-fg-faint);
+  background-clip: content-box;
+}
 ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Stepper arrows at both ends.
+
+   WebKit hides these unless every one of the four is given a display, and it
+   draws no glyph of its own. The mark has to arrive as a `background-image`:
+   scrollbar pseudo-elements honour only a subset of CSS and `-webkit-mask-*`
+   is not in it, so a mask renders as a flat filled square — which is exactly
+   what the first attempt shipped.
+
+   That means the colour is baked into the data URI and cannot be a token, so
+   each theme gets its own pair. The values are `--color-fg-subtle` for that
+   theme, kept in step by hand.
+
+   The `single-button` selectors fire when a bar has one arrow per end, which is
+   what this 12px bar gets; `double-button` covers the pair-at-one-end style some
+   platforms use, and without it those render as two blank squares. */
+::-webkit-scrollbar-button:single-button,
+::-webkit-scrollbar-button:double-button {
+  display: block;
+  height: 12px;
+  width: 12px;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 7px 7px;
+}
+::-webkit-scrollbar-button:vertical:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath fill='%235e5b61' d='M5 2.5 9 7.5H1z'/%3E%3C/svg%3E");
+}
+::-webkit-scrollbar-button:vertical:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath fill='%235e5b61' d='M5 7.5 1 2.5h8z'/%3E%3C/svg%3E");
+}
+::-webkit-scrollbar-button:horizontal:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath fill='%235e5b61' d='M2.5 5 7.5 1v8z'/%3E%3C/svg%3E");
+}
+::-webkit-scrollbar-button:horizontal:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath fill='%235e5b61' d='M7.5 5 2.5 9V1z'/%3E%3C/svg%3E");
+}
+:root[data-theme="dark"] ::-webkit-scrollbar-button:vertical:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath fill='%23939197' d='M5 2.5 9 7.5H1z'/%3E%3C/svg%3E");
+}
+:root[data-theme="dark"] ::-webkit-scrollbar-button:vertical:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath fill='%23939197' d='M5 7.5 1 2.5h8z'/%3E%3C/svg%3E");
+}
+:root[data-theme="dark"] ::-webkit-scrollbar-button:horizontal:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath fill='%23939197' d='M2.5 5 7.5 1v8z'/%3E%3C/svg%3E");
+}
+:root[data-theme="dark"] ::-webkit-scrollbar-button:horizontal:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath fill='%23939197' d='M7.5 5 2.5 9V1z'/%3E%3C/svg%3E");
+}
+/* The corner between two bars, and the second button of a pair, must not render
+   as a floating square. */
+::-webkit-scrollbar-button:vertical:decrement:end,
+::-webkit-scrollbar-button:vertical:increment:start,
+::-webkit-scrollbar-button:horizontal:decrement:end,
+::-webkit-scrollbar-button:horizontal:increment:start,
+::-webkit-scrollbar-corner {
+  display: none;
   background: transparent;
 }
 

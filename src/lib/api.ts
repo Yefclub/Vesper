@@ -197,6 +197,10 @@ export const api = {
   search: (query: string) => invoke<SearchHit[]>("search_meetings_cmd", { query }),
   getSettings: () => invoke<AppSettings>("get_settings"),
   saveSettings: (settings: AppSettings) => invoke<AppSettings>("save_settings", { settings }),
+  /// The theme alone. A whole-settings write for one field is a lost update
+  /// waiting to happen: a toggle still in flight lands after a drawer Save and
+  /// carries the pre-drawer value of every other field.
+  setTheme: (theme: string) => invoke<AppSettings>("set_theme", { theme }),
   completeOnboarding: (settings: AppSettings) =>
     invoke<AppSettings>("complete_onboarding", { settings }),
   switchStt: (provider: string) => invoke<AppSettings>("switch_stt_provider", { provider }),
@@ -215,12 +219,10 @@ export const api = {
   pauseRecording: () => invoke<RecorderStatus>("pause_recording"),
   resumeRecording: () => invoke<RecorderStatus>("resume_recording"),
   stopRecording: () => invoke<MeetingRecord>("stop_recording"),
-  pollLiveStt: () => invoke<LiveTranscript>("poll_live_stt"),
   summarize: (id: string, template?: string) =>
     invoke<MeetingInsights>("summarize_meeting", { id, template }),
   importAudio: (path: string, title?: string) =>
     invoke<MeetingRecord>("import_audio", { path, title }),
-  retranscribe: (id: string) => invoke<MeetingRecord>("retranscribe", { id }),
   // The only new command on this side that cannot degrade to nothing: a rename
   // the backend has not learned yet rejects, and the caller surfaces that
   // rather than showing a title the database does not carry.

@@ -29,7 +29,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
@@ -52,6 +52,10 @@ pub struct AppState {
     /// component that knows a transfer is running, and two transfers of the same
     /// model append to one `.part` file.
     pub download_flight: tokio::sync::Mutex<()>,
+    /// Bumped by every start and stop, so only the newest live-STT ticker keeps
+    /// draining audio. Two tickers would split each window between them and run
+    /// concurrent transcriptions over halves of the same speech.
+    pub live_stt_generation: AtomicU64,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -73,6 +77,7 @@ impl AppState {
             key_in_keychain: AtomicBool::new(in_keychain),
             stt_flight: tokio::sync::Mutex::new(()),
             download_flight: tokio::sync::Mutex::new(()),
+            live_stt_generation: AtomicU64::new(0),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -156,12 +161,12 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
         )
     };
     settings.validate_models().map_err(|e| e.to_string())?;
-    // The WebView is the trust boundary, so "it comes from our own front end" is
-    // not a validation: a value outside this pair would be written to the row and
-    // handed back to the window on every boot.
-    if settings.theme != "light" && settings.theme != "dark" {
-        return Err("invalid theme: expected `light` or `dark`".into());
-    }
+    // The theme is not this command's to write. `set_theme` owns it, and the
+    // drawer's draft carries whatever the theme was when it opened — so a Save
+    // of some unrelated field would put that stale value back and silently undo
+    // a theme picked in between. One writer, and the incoming value is ignored
+    // rather than validated.
+    settings.theme = state.settings.lock().theme.clone();
     // Only an actual change counts as a pick: every save comes through here, and a
     // save that touched the microphone must not reshuffle the model list.
     if settings.openrouter_llm_model != previous_llm_model {
@@ -211,6 +216,39 @@ pub fn save_settings(
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
     Ok(persist_settings(&state, settings)?.public_view())
+}
+
+/// Write the theme and nothing else.
+///
+/// The header toggle used to send a whole settings snapshot for one field, which
+/// made it a lost-update waiting to happen: open the drawer, save something, and
+/// a toggle still in flight lands afterwards carrying the pre-drawer value of
+/// every other field. Reading the current row here and changing one member of it
+/// under the lock means the two writers cannot disagree about anything they did
+/// not each touch.
+#[tauri::command]
+pub fn set_theme(state: State<'_, Arc<AppState>>, theme: String) -> Result<AppSettings, String> {
+    // The WebView is the trust boundary. `persist_settings` rejects anything
+    // outside the pair and this path must too, or it becomes the way around it.
+    if theme != "light" && theme != "dark" {
+        return Err("invalid theme: expected `light` or `dark`".into());
+    }
+    // Whichever home is holding the key keeps holding it. Hardcoding `Keychain`
+    // here would strip the key from the row on a machine whose keychain refused
+    // to cooperate — the one place it is still stored — and a theme toggle would
+    // silently cost the user their credential.
+    let home = if state.key_in_keychain.load(Ordering::Relaxed) {
+        KeyHome::Keychain
+    } else {
+        KeyHome::KeepInRow
+    };
+    // The guard is held across the database write. Releasing it first left a
+    // window in which a concurrent save could land between the read and the
+    // write, and the loser's whole snapshot would overwrite the winner's row.
+    let mut current = state.settings.lock();
+    current.theme = theme;
+    state.db.save_settings_with(&current, home)?;
+    Ok(current.public_view())
 }
 
 #[tauri::command]
@@ -380,6 +418,7 @@ pub fn complete_onboarding(
 
 #[tauri::command]
 pub fn start_recording(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     title: Option<String>,
 ) -> Result<MeetingRecord, String> {
@@ -440,6 +479,9 @@ pub fn start_recording(
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
     *state.active_meeting.lock() = Some(id);
+    // Started here rather than by the window, so transcription keeps running when
+    // the window is minimized and its timers are throttled to a crawl.
+    spawn_live_stt_ticker(app, Arc::clone(&state));
     Ok(meeting)
 }
 
@@ -502,7 +544,19 @@ pub async fn stop_recording(
         .clone()
         .ok_or_else(|| "no active meeting".to_string())?;
     let path = state.recorder.stop().map_err(|e| e.to_string())?;
+    // Retire the ticker with the recording it belongs to. `is_recording` is
+    // already false above, so it would stop on its own within 1200ms — bumping
+    // the generation makes it immediate, and makes a start that follows quickly
+    // unambiguous about which ticker owns the microphone.
+    state.live_stt_generation.fetch_add(1, Ordering::SeqCst);
     let duration = state.recorder.elapsed_ms();
+    // Take the tail here, synchronously, while this is still the only thing that
+    // has touched the recorder since it stopped. Draining it later — after the
+    // await for `stt_flight` — read whatever buffer existed by then, and a
+    // recording started in the meantime owns that buffer: its opening seconds
+    // were transcribed into the meeting that had just ended, and left as a hole
+    // in the one that had just begun.
+    let tail = state.recorder.drain_chunks();
     let mut meeting = state
         .db
         .get_meeting(&id)?
@@ -515,7 +569,16 @@ pub async fn stop_recording(
     meeting.audio_path = Some(path.display().to_string());
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
-    *state.active_meeting.lock() = None;
+    // Compare before clearing. This command awaits `stt_flight` for the final
+    // pass, and a recording started in the meantime has already written its own
+    // id here — blanking it would leave that recorder running with pause, resume
+    // and stop all answering "no active meeting", and no way to finish it.
+    {
+        let mut active = state.active_meeting.lock();
+        if active.as_deref() == Some(id.as_str()) {
+            *active = None;
+        }
+    }
     // First point where the command can no longer fail early: the recording is
     // on disk and the row knows where. Announcing a phase before this would
     // leave the window on a phase for a command that then returned an error.
@@ -555,7 +618,7 @@ pub async fn stop_recording(
         // everything spoken between that drain and the stop is still sitting in
         // the buffer. Skipping it — which is what happened whenever any live
         // segment existed — silently dropped the end of every meeting.
-        let (mic, sys, sr) = state.recorder.drain_chunks();
+        let (mic, sys, sr) = tail;
         if !mic.is_empty() || !sys.is_empty() {
             let tail_ms = duration
                 .saturating_sub((mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64);
@@ -625,18 +688,25 @@ pub async fn stop_recording(
     Ok(meeting)
 }
 
-#[tauri::command]
-pub async fn poll_live_stt(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<LiveTranscript, String> {
+/// Cadence of the backend live-STT ticker.
+const LIVE_STT_INTERVAL_MS: u64 = 1200;
+
+/// Drain whatever audio has arrived and transcribe it.
+///
+/// No longer a command. It used to be driven by a `setInterval` in the window,
+/// and WebView2 treats a minimized window as a hidden page: its timers clamp to
+/// roughly one a second and then to one a minute after five. Since this call is
+/// what *drains* the recorder, that did not merely slow the display down — it
+/// stalled transcription itself for anyone who minimized the app during a
+/// meeting, which is precisely when they would.
+async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), String> {
     let id = state
         .active_meeting
         .lock()
         .clone()
         .ok_or_else(|| "no active meeting".to_string())?;
     if !state.recorder.is_recording() || state.recorder.is_paused() {
-        return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
+        return Ok(());
     }
     // Single-flight. The UI polls every 1200ms and a chunk can take longer than
     // that to transcribe, so without this the next poll drains a second slice of
@@ -645,28 +715,69 @@ pub async fn poll_live_stt(
     // the wrong order. Overlapping polls now just return what is already there;
     // the audio stays in the buffer for the next turn.
     let Ok(_flight) = state.stt_flight.try_lock() else {
-        return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
+        return Ok(());
     };
     let (mic, sys, sr) = state.recorder.drain_chunks();
     if mic.is_empty() && sys.is_empty() {
-        return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
+        return Ok(());
     }
     let start_ms = state
         .recorder
         .elapsed_ms()
         .saturating_sub((mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64);
     let settings = state.settings.lock().clone();
-    let chunks = state
+    let chunks = match state
         .stt
         .transcribe_dual(&settings, &mic, &sys, sr, start_ms)
-        .await?;
+        .await
+    {
+        Ok(chunks) => chunks,
+        Err(e) => {
+            // The audio was drained before the call. Propagating without putting
+            // it back threw a slice of the meeting away every 1200ms — so a cloud
+            // provider rejecting every chunk silently shredded the live
+            // transcript while the window showed nothing at all. The cursor goes
+            // back by what was taken and the next poll tries the same audio again.
+            state.recorder.rewind_chunks(mic.len(), sys.len());
+            return Err(e);
+        }
+    };
     let mut guard = state.live.lock();
     let t = guard.entry(id.clone()).or_default();
     apply_stt_chunks(t, &chunks);
     let snapshot = t.clone();
     drop(guard);
     let _ = app.emit("transcript://append", &snapshot);
-    Ok(snapshot)
+    Ok(())
+}
+
+/// Drive live transcription from the backend for as long as this recording lasts.
+///
+/// Retired by generation rather than by a stop flag: a stop followed quickly by a
+/// start would otherwise leave two tickers alive, splitting each window of audio
+/// between them and running concurrent transcriptions over halves of the same
+/// speech. The check runs before the work, never mid-flight, so a pass already
+/// running still lands.
+fn spawn_live_stt_ticker(app: AppHandle, state: Arc<AppState>) {
+    let generation = state.live_stt_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(LIVE_STT_INTERVAL_MS)).await;
+            if state.live_stt_generation.load(Ordering::SeqCst) != generation
+                || !state.recorder.is_recording()
+            {
+                break;
+            }
+            if let Err(e) = drive_live_stt(&app, &state).await {
+                // The window has to be told, or a provider rejecting every chunk
+                // is a screen that simply never fills. The audio is still being
+                // captured and saved, so this is degraded rather than lost — and
+                // the message carries no model id, which arrives from the WebView
+                // and must not reach the log this may also be written to.
+                let _ = app.emit("transcript://error", &e);
+            }
+        }
+    });
 }
 
 /// Replace the date label with a title read out of the meeting itself.

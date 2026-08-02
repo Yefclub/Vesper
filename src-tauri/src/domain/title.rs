@@ -117,13 +117,39 @@ pub fn parse_title(raw: &str) -> Option<String> {
 
     let cut: String = t.chars().take(MAX_TITLE_CHARS).collect();
     let cut = cut.trim_end();
-    (!cut.is_empty()).then(|| cut.to_string())
+    // A title has to contain something readable. Whisper writes `[BLANK_AUDIO]`
+    // and friends for silence, and a model handed nothing but those answers with
+    // them — a recording of an empty room came out named `: [BLANK_AUDIO]?`.
+    // Rejecting here rather than stripping the markers: a model that had only
+    // silence to work with has not named anything, and the date label is the
+    // honest fallback.
+    let usable = cut
+        .split(['[', ']'])
+        .step_by(2)
+        .any(|outside| outside.chars().any(char::is_alphanumeric));
+    (!cut.is_empty() && usable).then(|| cut.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// Whisper's silence marker is not a name. A recording of an empty room came
+    /// back titled `: [BLANK_AUDIO]?` before this.
+    #[test]
+    fn a_transcript_of_silence_does_not_produce_a_title() {
+        assert_eq!(parse_title(": [BLANK_AUDIO]?"), None);
+        assert_eq!(parse_title("[BLANK_AUDIO]"), None);
+        assert_eq!(parse_title("[ Silence ]"), None);
+        assert_eq!(parse_title("**\"[BLANK_AUDIO]\"**"), None);
+        // A real title keeps working, including one that happens to bracket
+        // something inside it.
+        assert_eq!(
+            parse_title("Weekly sync [Q3]").as_deref(),
+            Some("Weekly sync [Q3]")
+        );
+    }
 
     fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()

@@ -394,6 +394,23 @@ impl DualChannelRecorder {
         (mic, sys, sample_rate)
     }
 
+    /// Put back what `drain_chunks` just handed out.
+    ///
+    /// The samples never left `mic_samples`/`sys_samples` — draining only advances
+    /// a cursor — so this rewinds the cursor by what was taken. A transcription
+    /// that failed cost the meeting that slice of audio every time, which with a
+    /// provider rejecting every chunk meant the live transcript was being shredded
+    /// 1200ms at a time while the window showed nothing.
+    ///
+    /// Saturating on purpose: a rewind can only ever race a drain, and landing at
+    /// zero re-reads audio that was already transcribed. Duplicated text is
+    /// recoverable; a hole in the transcript is not.
+    pub fn rewind_chunks(&self, mic_len: usize, sys_len: usize) {
+        let mut g = self.inner.lock();
+        g.mic_stt_pos = g.mic_stt_pos.saturating_sub(mic_len);
+        g.sys_stt_pos = g.sys_stt_pos.saturating_sub(sys_len);
+    }
+
     /// Snapshot of the full dual-channel recording (for tests / diagnostics).
     pub fn recording_len(&self) -> (usize, usize) {
         let g = self.inner.lock();
@@ -599,6 +616,39 @@ pub fn read_dual_wav(path: &Path) -> Result<(Vec<i16>, Vec<i16>, u32), CaptureEr
 
 #[cfg(test)]
 mod tests {
+
+    /// A failed transcription must not cost the meeting its audio.
+    #[test]
+    fn rewinding_hands_the_same_chunk_back_to_the_next_poll() {
+        let rec = DualChannelRecorder::new();
+        rec.push_samples_for_test(&[7i16; 1600], &[9i16; 1600]);
+
+        let (mic, sys, _) = rec.drain_chunks();
+        assert_eq!(mic.len(), 1600);
+        // Draining again with nothing new gives nothing — the cursor moved.
+        assert!(rec.drain_chunks().0.is_empty());
+
+        rec.rewind_chunks(mic.len(), sys.len());
+        let (again, _, _) = rec.drain_chunks();
+        assert_eq!(
+            again.len(),
+            1600,
+            "the audio a failed transcription was holding must come back"
+        );
+        assert_eq!(again[0], 7);
+    }
+
+    /// Rewinding more than was ever taken lands at the start rather than
+    /// underflowing, which on a `usize` would be a panic in release and a
+    /// catastrophic cursor in debug.
+    #[test]
+    fn rewinding_past_the_beginning_is_not_an_underflow() {
+        let rec = DualChannelRecorder::new();
+        rec.push_samples_for_test(&[1i16; 100], &[1i16; 100]);
+        let _ = rec.drain_chunks();
+        rec.rewind_chunks(usize::MAX, usize::MAX);
+        assert_eq!(rec.drain_chunks().0.len(), 100);
+    }
     use super::*;
     use tempfile::tempdir;
 
