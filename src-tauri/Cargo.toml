@@ -122,6 +122,15 @@ tracing-appender = "0.2.5"
 # the right answer on a platform that cannot ship the loadable kind anyway.
 [target.'cfg(windows)'.dependencies]
 llama-cpp-2 = { version = "0.1.150", default-features = false, features = ["dynamic-link", "dynamic-backends"] }
+# Never named in the code. It is here so cargo hands `DEP_LLAMA_ROOT` and
+# `DEP_LLAMA_BACKENDS_DIR` to this crate's build script: `links` metadata only
+# reaches a *direct* dependent, and those two variables are the only pointers
+# that name the unit cargo is building right now. Everything else — newest
+# directory, matching feature set — is a guess that a second build output in the
+# same profile can defeat, and guessing wrong stages a mismatched `llama.dll`
+# next to the executable. Unified with the copy llama-cpp-2 already builds, so
+# it costs nothing.
+llama-cpp-sys-2 = { version = "0.1.150", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

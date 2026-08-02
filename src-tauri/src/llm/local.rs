@@ -42,9 +42,14 @@ fn backend() -> Result<&'static LlamaBackend, String> {
 /// installed app keeps them beside the executable; a `cargo run` has them only
 /// in the build tree, which is the path the crate baked in as `BACKENDS_DIR`.
 ///
+/// Gated on Windows and not on a GPU feature, because that is where
+/// `dynamic-backends` is enabled. A default Windows build has its CPU backends
+/// as separate modules too, and skipping this there would leave llama.cpp with
+/// no backend at all rather than merely without a GPU.
+///
 /// Loading nothing here does not fall back to a slow CPU path — there would be
 /// no CPU backend either, and every model load would fail.
-#[cfg(all(windows, any(feature = "gpu-cuda", feature = "gpu-vulkan")))]
+#[cfg(windows)]
 fn load_ggml_backends() {
     use llama_cpp_2::llama_backend::{load_backends_from_path, BACKENDS_DIR};
 
@@ -66,7 +71,7 @@ fn load_ggml_backends() {
 /// Probing for a CPU variant and not for `ggml-vulkan`: the CPU ones are always
 /// built when dynamic backends are on, so their absence means the directory is
 /// the wrong one rather than that the machine has no GPU.
-#[cfg(all(windows, any(feature = "gpu-cuda", feature = "gpu-vulkan")))]
+#[cfg(windows)]
 fn holds_a_backend(dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
@@ -80,7 +85,7 @@ fn holds_a_backend(dir: &Path) -> bool {
 }
 
 /// Backends are linked in, so there is nothing to find.
-#[cfg(not(all(windows, any(feature = "gpu-cuda", feature = "gpu-vulkan"))))]
+#[cfg(not(windows))]
 fn load_ggml_backends() {}
 
 /// What this machine offers, asked of ggml rather than guessed at.

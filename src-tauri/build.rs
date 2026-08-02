@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn main() {
     stage_ggml_backends();
@@ -77,7 +77,7 @@ fn stage_ggml_backends() {
         .expect("writing the backend manifest");
 }
 
-/// The directories the sys crate left shared libraries in.
+/// The directories the sys crate left shared libraries in, named by cargo.
 ///
 /// Two of them, for two different reasons. `bin` holds llama and ggml
 /// themselves, which `dynamic-link` turns into libraries the binary imports at
@@ -85,89 +85,25 @@ fn stage_ggml_backends() {
 /// `backends` holds the ones `dynamic-backends` produces, which ggml opens
 /// later by scanning the executable's directory.
 ///
-/// Found rather than read from `DEP_LLAMA_BACKENDS_DIR`: that variable is only
-/// handed to a *direct* dependent of the crate declaring `links`, and this
-/// crate reaches llama-cpp-sys-2 through llama-cpp-2.
+/// Both come from the `links` metadata llama-cpp-sys-2 emits, which is why that
+/// crate is a direct dependency. Searching the profile directory instead does
+/// not work: it can hold one build output per feature set and per crate version
+/// ever built there, they are told apart only by a hash, and staging the wrong
+/// one puts a `llama.dll` beside the executable that its import library does
+/// not match — an app that installs cleanly and then will not start.
 fn library_dirs() -> Vec<PathBuf> {
-    let Ok(out_dir) = std::env::var("OUT_DIR") else {
-        return Vec::new();
-    };
-    // `OUT_DIR` is `<profile>/build/<pkg>-<hash>/out`, so the sibling build
-    // directories are two levels up. Derived rather than assumed: the profile
-    // directory moves with `--target` and with `CARGO_TARGET_DIR`.
-    let Some(build_root) = PathBuf::from(out_dir)
-        .ancestors()
-        .nth(2)
-        .map(Path::to_path_buf)
-    else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(&build_root) else {
-        return Vec::new();
-    };
+    // Set only when the sys crate built shared libraries, which is to say only
+    // where `dynamic-link` is on. Everywhere else there is nothing to stage.
+    println!("cargo:rerun-if-env-changed=DEP_LLAMA_ROOT");
+    println!("cargo:rerun-if-env-changed=DEP_LLAMA_BACKENDS_DIR");
 
-    // One profile directory holds a `llama-cpp-sys-2-<hash>` output per feature
-    // set ever built there, and they all look alike from here. Picking by
-    // timestamp does not work: a cached build leaves its directory untouched, so
-    // a CPU-only package built after a GPU one would inherit `ggml-vulkan` and
-    // ship a backend it was never linked for.
-    //
-    // The features this build was asked for are the discriminator, and cargo
-    // hands them over directly.
-    let want_vulkan = std::env::var_os("CARGO_FEATURE_GPU_VULKAN").is_some();
-    let want_cuda = std::env::var_os("CARGO_FEATURE_GPU_CUDA").is_some();
-
-    let mut chosen = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_llama = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("llama-cpp-sys-2-"));
-        if !is_llama || !holds_ggml(&path.join("out").join("bin")) {
-            continue;
-        }
-        let backends = path.join("out").join("backends");
-        if holds_prefix(&backends, "ggml-vulkan") == want_vulkan
-            && holds_prefix(&backends, "ggml-cuda") == want_cuda
-        {
-            chosen = Some(path);
-            break;
-        }
+    let mut dirs = Vec::new();
+    if let Ok(root) = std::env::var("DEP_LLAMA_ROOT") {
+        dirs.push(PathBuf::from(root).join("bin"));
     }
-
-    let Some(chosen) = chosen else {
-        // Not fatal on its own: a build with no GPU feature and no shared
-        // libraries has nothing to stage, and `BACKENDS.txt` will say so.
-        return Vec::new();
-    };
-    let out = chosen.join("out");
-    ["bin", "backends"]
-        .into_iter()
-        .map(|name| out.join(name))
-        .filter(|dir| holds_ggml(dir))
-        .collect()
-}
-
-/// Whether a directory is one of ggml's own output directories.
-///
-/// Matching on the `ggml` prefix rather than on a specific file: which
-/// libraries exist depends on the features, and the point here is only to
-/// avoid picking up some unrelated crate's build output.
-fn holds_ggml(path: &Path) -> bool {
-    holds_prefix(path, "ggml")
-}
-
-/// By prefix and not by full name, because the extension is `.dll`, `.so` or
-/// `.dylib` depending on where this runs.
-fn holds_prefix(path: &Path, prefix: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(prefix))
-    })
+    if let Ok(backends) = std::env::var("DEP_LLAMA_BACKENDS_DIR") {
+        dirs.push(PathBuf::from(backends));
+    }
+    dirs.retain(|dir| dir.is_dir());
+    dirs
 }
