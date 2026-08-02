@@ -11,6 +11,11 @@ pub struct SttChunkResult {
     pub text: String,
     pub start_ms: u64,
     pub end_ms: u64,
+    /// What this chunk cost, when a provider reported it. `None` for a local
+    /// model, which is not the same as zero — a meeting that never left the
+    /// machine shows no price at all.
+    #[serde(default)]
+    pub cost_nano_usd: Option<i64>,
 }
 
 /// Pure merge of STT chunk results into a live transcript (testable without engines).
@@ -58,12 +63,13 @@ impl SttService {
             return Ok(SttChunkResult {
                 speaker,
                 text: String::new(),
+                cost_nano_usd: None,
                 start_ms,
                 end_ms: start_ms,
             });
         }
         let duration_ms = (pcm.len() as u64 * 1000) / sample_rate.max(1) as u64;
-        let text = match settings.stt_provider {
+        let (text, cost_nano_usd) = match settings.stt_provider {
             // whisper.cpp inference is CPU-bound and runs for seconds. Called
             // directly it parks a tokio worker for that whole time, and since the
             // UI polls every 1200ms the parked workers pile up until the runtime
@@ -73,11 +79,12 @@ impl SttService {
                 let pcm = pcm.to_vec();
                 let model = settings.local_stt_model.clone();
                 let language = settings.language.clone();
-                tokio::task::spawn_blocking(move || {
+                let text = tokio::task::spawn_blocking(move || {
                     engine.transcribe(&pcm, sample_rate, &model, &language)
                 })
                 .await
-                .map_err(|e| format!("transcription task failed: {e}"))??
+                .map_err(|e| format!("transcription task failed: {e}"))??;
+                (text, None)
             }
             SttProvider::OpenRouter => {
                 settings
@@ -97,6 +104,7 @@ impl SttService {
         Ok(SttChunkResult {
             speaker,
             text,
+            cost_nano_usd,
             start_ms,
             end_ms: start_ms + duration_ms,
         })
@@ -152,12 +160,14 @@ mod tests {
             SttChunkResult {
                 speaker: Speaker::Others,
                 text: "world".into(),
+                cost_nano_usd: None,
                 start_ms: 500,
                 end_ms: 900,
             },
             SttChunkResult {
                 speaker: Speaker::Me,
                 text: "hello".into(),
+                cost_nano_usd: None,
                 start_ms: 0,
                 end_ms: 400,
             },

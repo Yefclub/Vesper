@@ -475,6 +475,8 @@ pub fn start_recording(
         key_points: None,
         project: None,
         title_locked,
+        cost_nano_usd: None,
+        cost_label: None,
     };
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
@@ -627,7 +629,17 @@ pub async fn stop_recording(
                 .transcribe_dual(&settings, &mic, &sys, sr, tail_ms)
                 .await
             {
-                Ok(chunks) => apply_stt_chunks(&mut live, &chunks),
+                Ok(chunks) => {
+                    let tail_cost: i64 = chunks.iter().filter_map(|c| c.cost_nano_usd).sum();
+                    if tail_cost > 0 {
+                        // A failure here would cost the user their tail
+                        // transcript over a bookkeeping row.
+                        if let Err(e) = state.db.add_meeting_cost(&id, Some(tail_cost)) {
+                            tracing::warn!("could not record the cost of the final chunk: {e}");
+                        }
+                    }
+                    apply_stt_chunks(&mut live, &chunks)
+                }
                 // Same reason as the summary above: the error names the model.
                 Err(_) => tracing::warn!("final chunk could not be transcribed"),
             }
@@ -657,8 +669,9 @@ pub async fn stop_recording(
             )
             .await
         {
-            Ok(insights) => {
+            Ok((insights, cost)) => {
                 state.db.save_insights(&id, &insights)?;
+                state.db.add_meeting_cost(&id, cost)?;
                 meeting.summary = Some(insights.summary.clone());
                 meeting.action_items = Some(insights.action_items_text());
                 meeting.key_points = Some(insights.key_points_text());
@@ -742,6 +755,13 @@ async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), St
             return Err(e);
         }
     };
+    // Charged before the transcript is merged, and by summing the chunks rather
+    // than reading a total and writing it back: two channels transcribe
+    // concurrently and a read-modify-write here would drop one of them.
+    let chunk_cost: i64 = chunks.iter().filter_map(|c| c.cost_nano_usd).sum();
+    if chunk_cost > 0 {
+        state.db.add_meeting_cost(&id, Some(chunk_cost))?;
+    }
     let mut guard = state.live.lock();
     let t = guard.entry(id.clone()).or_default();
     apply_stt_chunks(t, &chunks);
@@ -809,10 +829,17 @@ async fn name_meeting(
         .title(settings, summary, &meeting.transcript_text)
         .await
     {
-        Ok(raw) => match parse_title(&raw) {
-            Some(title) => meeting.title = title,
-            None => tracing::warn!("the model answered with no usable title"),
-        },
+        Ok((raw, cost)) => {
+            // Charged to the meeting even when the answer is unusable: the call
+            // was made and the provider billed it.
+            if let Err(e) = state.db.add_meeting_cost(&meeting.id, cost) {
+                tracing::warn!("could not record the cost of a generated title: {e}");
+            }
+            match parse_title(&raw) {
+                Some(title) => meeting.title = title,
+                None => tracing::warn!("the model answered with no usable title"),
+            }
+        }
         // The provider's error is not repeated. It carries the model id, which
         // arrives from the WebView, and this now lands in a file on the user's
         // disk. A failed title is a nuisance, not something worth widening what
@@ -839,11 +866,12 @@ pub async fn summarize_meeting(
         .transition(MeetingEvent::StartSummarize)
         .unwrap_or(MeetingStatus::Summarizing);
     state.db.upsert_meeting(&m)?;
-    let insights = state
+    let (insights, cost) = state
         .llm
         .summarize(&settings, &m.transcript_text, tpl)
         .await?;
     state.db.save_insights(&id, &insights)?;
+    state.db.add_meeting_cost(&id, cost)?;
     m.status = MeetingStatus::Ready;
     m.summary = Some(insights.summary.clone());
     m.action_items = Some(insights.action_items_text());
@@ -869,7 +897,7 @@ pub async fn chat_meeting(
     let history = state.db.list_chat(&id)?;
     let settings = state.settings.lock().clone();
     state.db.add_chat(&id, "user", &question)?;
-    let answer = state
+    let (answer, cost) = state
         .llm
         .chat(
             &settings,
@@ -880,6 +908,9 @@ pub async fn chat_meeting(
             &question,
         )
         .await?;
+    // Billed to the meeting it is about: it is the same OpenRouter spend and the
+    // user is looking at that meeting's total.
+    state.db.add_meeting_cost(&id, cost)?;
     state.db.add_chat(&id, "assistant", &answer)?;
     Ok(ChatMessage {
         role: "assistant".into(),
@@ -930,6 +961,8 @@ pub async fn import_audio(
         key_points: None,
         project: None,
         title_locked,
+        cost_nano_usd: None,
+        cost_label: None,
     };
     state.db.upsert_meeting(&meeting)?;
     let settings = state.settings.lock().clone();

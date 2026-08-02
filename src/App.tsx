@@ -987,6 +987,18 @@ function AppShell({
                       <p className="text-xs tabular-nums text-fg-muted">
                         {formatMeetingDateTime(selected.created_at)} ·{" "}
                         {formatDuration(selected.duration_ms)}
+                        {/* Only when a paid provider was actually called. A
+                            meeting transcribed and summarised on this machine
+                            has no price, and printing "$0.00" for it would be a
+                            claim about spending rather than the absence of any. */}
+                        {selected.cost_label ? (
+                          <>
+                            {" · "}
+                            <span title={t("meeting.cost")}>
+                              {selected.cost_label}
+                            </span>
+                          </>
+                        ) : null}
                       </p>
                     </div>
                     {/* Five siblings used to read as five equal actions. Summarize

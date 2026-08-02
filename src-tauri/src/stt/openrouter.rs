@@ -1,5 +1,6 @@
 //! OpenRouter audio transcription client (`/api/v1/audio/transcriptions`).
 
+use crate::domain::cost::usd_to_nano;
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
 
@@ -45,7 +46,7 @@ impl OpenRouterStt {
         api_key: &str,
         model: &str,
         language: &str,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Option<i64>), String> {
         if api_key.trim().is_empty() {
             return Err("OpenRouter API key required".into());
         }
@@ -78,11 +79,16 @@ impl OpenRouterStt {
             return Err(format!("OpenRouter STT {status}: {body}"));
         }
         let v: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        Ok(v.get("text")
+        // The transcription endpoint reports its price in the same response, so
+        // nothing here has to know what the model charges per second of audio.
+        let cost = v["usage"]["cost"].as_f64().and_then(usd_to_nano);
+        let text = v
+            .get("text")
             .and_then(|t| t.as_str())
             .unwrap_or("")
             .trim()
-            .to_string())
+            .to_string();
+        Ok((text, cost))
     }
 }
 

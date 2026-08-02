@@ -92,6 +92,18 @@ pub struct MeetingRecord {
     /// a fallback that would swallow the error and lose the row.
     #[serde(default)]
     pub title_locked: bool,
+    /// What this meeting has cost in provider charges, in nano-USD.
+    ///
+    /// `None` means it never called a paid provider — a locally transcribed and
+    /// locally summarised meeting shows no price at all, which is a different
+    /// statement from `Some(0)` for one that ran on a free model.
+    #[serde(default)]
+    pub cost_nano_usd: Option<i64>,
+    /// The same figure as the window shows it. Derived on read, never stored:
+    /// money formatting is one decision and it belongs on the side that owns
+    /// the number.
+    #[serde(default)]
+    pub cost_label: Option<String>,
 }
 
 /// What the app is doing to a meeting after Stop, as the window renders it.

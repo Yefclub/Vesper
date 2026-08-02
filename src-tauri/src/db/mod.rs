@@ -176,6 +176,15 @@ impl Database {
                 return Err(message);
             }
         }
+        // Nullable on purpose: NULL means "this meeting never called a paid
+        // provider" and renders nothing, which is a different statement from a
+        // meeting that ran on a free model and genuinely cost $0.00.
+        if let Err(e) = conn.execute("ALTER TABLE meetings ADD COLUMN cost_nano_usd INTEGER", []) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
         drop(conn);
         self.backfill_search_index()
     }
@@ -197,6 +206,23 @@ impl Database {
                     || coalesce(action_items,'') || char(10) || coalesce(key_points,'')
              FROM meetings",
             [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Add a provider charge to a meeting's running total.
+    ///
+    /// The sum happens in SQL rather than by reading the row and writing it
+    /// back: two channels transcribe concurrently and a read-modify-write would
+    /// silently drop one of them. `COALESCE` is what turns the first charge on a
+    /// NULL row into a total instead of into another NULL.
+    pub fn add_meeting_cost(&self, id: &str, nano: Option<i64>) -> Result<(), String> {
+        let Some(nano) = nano else { return Ok(()) };
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE meetings SET cost_nano_usd = COALESCE(cost_nano_usd, 0) + ?1 WHERE id = ?2",
+            params![nano, id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -245,7 +271,8 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
-                        transcript_text, summary, action_items, key_points, project, title_locked
+                        transcript_text, summary, action_items, key_points, project, title_locked,
+                        cost_nano_usd
                  FROM meetings WHERE id=?1",
             )
             .map_err(|e| e.to_string())?;
@@ -266,7 +293,8 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
-                        '' AS transcript_text, summary, action_items, key_points, project, title_locked
+                        '' AS transcript_text, summary, action_items, key_points, project, title_locked,
+                        cost_nano_usd
                  FROM meetings ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -624,6 +652,13 @@ fn row_to_meeting(row: &rusqlite::Row<'_>) -> Result<MeetingRecord, String> {
         key_points: row.get(10).map_err(|e| e.to_string())?,
         project: row.get(11).map_err(|e| e.to_string())?,
         title_locked: row.get::<_, i64>(12).map_err(|e| e.to_string())? != 0,
+        cost_nano_usd: row.get(13).map_err(|e| e.to_string())?,
+        // Derived on read. Formatting money is one decision and it belongs on
+        // the side that owns the number, not repeated in the window.
+        cost_label: row
+            .get::<_, Option<i64>>(13)
+            .map_err(|e| e.to_string())?
+            .map(crate::domain::cost::format_cost),
     })
 }
 
@@ -651,6 +686,8 @@ mod tests {
             key_points: None,
             project: Some("Core".into()),
             title_locked: false,
+            cost_nano_usd: None,
+            cost_label: None,
         };
         db.upsert_meeting(&m).unwrap();
         let mut t = LiveTranscript::new();
@@ -839,6 +876,36 @@ mod tests {
         );
     }
 
+    /// The reason the sum is in SQL. Two channels transcribe at once, and a
+    /// read-modify-write in Rust would let one charge overwrite the other.
+    #[test]
+    fn charges_accumulate_and_a_stale_upsert_cannot_roll_them_back() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let m = sample_meeting("m1", "One");
+        db.upsert_meeting(&m).unwrap();
+
+        // Nothing charged yet: no price at all, which is not the same as zero.
+        assert_eq!(db.get_meeting("m1").unwrap().unwrap().cost_nano_usd, None);
+
+        db.add_meeting_cost("m1", Some(508_000)).unwrap();
+        db.add_meeting_cost("m1", Some(492_000)).unwrap();
+        // A local chunk reports nothing and must not reset the total.
+        db.add_meeting_cost("m1", None).unwrap();
+        let after = db.get_meeting("m1").unwrap().unwrap();
+        assert_eq!(after.cost_nano_usd, Some(1_000_000));
+        assert_eq!(after.cost_label.as_deref(), Some("$0.0010"));
+
+        // `m` is the pre-charge snapshot a caller may still be holding. Writing
+        // it back must not undo what was billed in between.
+        db.upsert_meeting(&m).unwrap();
+        assert_eq!(
+            db.get_meeting("m1").unwrap().unwrap().cost_nano_usd,
+            Some(1_000_000),
+            "an upsert carrying a stale record must not roll a charge back"
+        );
+    }
+
     fn sample_meeting(id: &str, title: &str) -> MeetingRecord {
         MeetingRecord {
             id: id.into(),
@@ -853,6 +920,8 @@ mod tests {
             action_items: None,
             key_points: None,
             title_locked: false,
+            cost_nano_usd: None,
+            cost_label: None,
             project: None,
         }
     }

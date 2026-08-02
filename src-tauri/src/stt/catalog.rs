@@ -10,6 +10,24 @@ pub struct OrModel {
     pub id: String,
     pub name: String,
     pub kind: String,
+    /// What the model charges, per million tokens, as the picker shows it.
+    ///
+    /// `None` when the catalogue did not quote a price — the built-in fallback
+    /// list has none, and a missing price is unknown rather than free.
+    #[serde(default)]
+    pub price_label: Option<String>,
+}
+
+/// The `pricing` block OpenRouter attaches to every catalogue entry.
+///
+/// Quoted per token as decimal strings, which is unreadable at that scale — the
+/// formatting into "per million" lives in `domain::cost` with its tests.
+fn price_of(m: &Value) -> Option<String> {
+    let p = m.get("pricing")?;
+    crate::domain::cost::format_price_per_mtok(
+        p.get("prompt").and_then(|v| v.as_str()),
+        p.get("completion").and_then(|v| v.as_str()),
+    )
 }
 
 /// Parse OpenRouter models JSON into STT/transcription models.
@@ -39,10 +57,12 @@ pub fn parse_openrouter_stt_models(body: &str) -> Result<Vec<OrModel>, String> {
             .to_string();
 
         if is_stt_model(m, &id) {
+            let price_label = price_of(m);
             out.push(OrModel {
                 id,
                 name,
                 kind: "stt".into(),
+                price_label,
             });
         }
     }
@@ -122,21 +142,25 @@ pub fn default_stt_models() -> Vec<OrModel> {
             id: "openai/gpt-4o-mini-transcribe".into(),
             name: "OpenAI: GPT-4o Mini Transcribe".into(),
             kind: "stt".into(),
+            price_label: None,
         },
         OrModel {
             id: "openai/gpt-4o-transcribe".into(),
             name: "OpenAI: GPT-4o Transcribe".into(),
             kind: "stt".into(),
+            price_label: None,
         },
         OrModel {
             id: "openai/whisper-1".into(),
             name: "OpenAI: Whisper".into(),
             kind: "stt".into(),
+            price_label: None,
         },
         OrModel {
             id: "mistralai/voxtral-mini-2507".into(),
             name: "Mistral: Voxtral Mini Transcribe".into(),
             kind: "stt".into(),
+            price_label: None,
         },
     ]
 }
@@ -147,31 +171,37 @@ pub fn default_llm_models() -> Vec<OrModel> {
             id: "openai/gpt-4o-mini".into(),
             name: "OpenAI: GPT-4o Mini".into(),
             kind: "llm".into(),
+            price_label: None,
         },
         OrModel {
             id: "openai/gpt-4o".into(),
             name: "OpenAI: GPT-4o".into(),
             kind: "llm".into(),
+            price_label: None,
         },
         OrModel {
             id: "anthropic/claude-sonnet-4".into(),
             name: "Anthropic: Claude Sonnet 4".into(),
             kind: "llm".into(),
+            price_label: None,
         },
         OrModel {
             id: "google/gemini-2.5-flash".into(),
             name: "Google: Gemini 2.5 Flash".into(),
             kind: "llm".into(),
+            price_label: None,
         },
         OrModel {
             id: "meta-llama/llama-3.3-70b-instruct".into(),
             name: "Meta: Llama 3.3 70B Instruct".into(),
             kind: "llm".into(),
+            price_label: None,
         },
         OrModel {
             id: "qwen/qwen-2.5-72b-instruct".into(),
             name: "Qwen: 2.5 72B Instruct".into(),
             kind: "llm".into(),
+            price_label: None,
         },
     ]
 }
@@ -203,10 +233,12 @@ pub fn parse_openrouter_llm_models(body: &str) -> Result<Vec<OrModel>, String> {
             .and_then(|x| x.as_str())
             .unwrap_or(&id)
             .to_string();
+        let price_label = price_of(m);
         out.push(OrModel {
             id,
             name,
             kind: "llm".into(),
+            price_label,
         });
     }
     if out.is_empty() {

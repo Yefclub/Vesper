@@ -15,6 +15,11 @@ export interface LiveTranscript {
 }
 
 export interface MeetingRecord {
+  /// Provider spend for this meeting, and the same figure formatted by the
+  /// backend. Absent on a meeting that never called a paid provider, which is
+  /// why the header renders nothing rather than a zero.
+  cost_nano_usd?: number | null;
+  cost_label?: string | null;
   id: string;
   title: string;
   status: string;
@@ -176,6 +181,9 @@ export interface ShortcutStatus {
 export interface OrModel {
   id: string;
   name: string;
+  /// What the model charges per million tokens. Absent when the catalogue did
+  /// not quote one — unknown, never free.
+  price_label?: string | null;
   kind: string;
 }
 

@@ -23,14 +23,20 @@ impl LlmService {
         settings: &AppSettings,
         transcript: &str,
         template: SummaryTemplate,
-    ) -> Result<MeetingInsights, String> {
+    ) -> Result<(MeetingInsights, Option<i64>), String> {
         match settings.llm_provider {
-            LlmProvider::Local => self.local.summarize(
-                transcript,
-                template,
-                settings.locale(),
-                &settings.local_llm_model,
-            ),
+            // A local model costs nothing, which is not the same as costing
+            // zero: `None` is what stops a meeting that never left the machine
+            // from displaying a price at all.
+            LlmProvider::Local => self
+                .local
+                .summarize(
+                    transcript,
+                    template,
+                    settings.locale(),
+                    &settings.local_llm_model,
+                )
+                .map(|insights| (insights, None)),
             LlmProvider::OpenRouter => {
                 settings
                     .require_openrouter_key()
@@ -60,7 +66,7 @@ impl LlmService {
         settings: &AppSettings,
         summary: &str,
         transcript: &str,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Option<i64>), String> {
         let prompt = build_title_prompt(summary, transcript);
         match settings.llm_provider {
             // Loading a GGUF and generating from it takes seconds of pure CPU. On
@@ -74,6 +80,7 @@ impl LlmService {
                 tokio::task::spawn_blocking(move || local.title(&prompt, &model))
                     .await
                     .map_err(|e| e.to_string())?
+                    .map(|title| (title, None))
             }
             LlmProvider::OpenRouter => {
                 settings
@@ -106,7 +113,7 @@ impl LlmService {
         summary: Option<&str>,
         history: &[ChatMessage],
         question: &str,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Option<i64>), String> {
         let messages = build_chat_context(
             meeting_title,
             transcript,
@@ -118,7 +125,8 @@ impl LlmService {
         match settings.llm_provider {
             LlmProvider::Local => self
                 .local
-                .chat(&messages, transcript, &settings.local_llm_model),
+                .chat(&messages, transcript, &settings.local_llm_model)
+                .map(|answer| (answer, None)),
             LlmProvider::OpenRouter => {
                 settings
                     .require_openrouter_key()
