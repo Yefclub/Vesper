@@ -42,6 +42,32 @@ pub fn status_from<E>(result: Result<(), E>) -> ShortcutStatus {
 mod tests {
     use super::*;
 
+    /// The window reads these three names off the IPC payload and nothing checks
+    /// that contract across the boundary — the front end is a separate branch in
+    /// another language. A rename or a stray `rename_all` would leave every test
+    /// here green and the shortcut notice permanently blank.
+    #[test]
+    fn the_wire_shape_is_the_one_the_window_reads() {
+        let taken = serde_json::to_value(status_from::<&str>(Err("taken"))).unwrap();
+        assert_eq!(
+            taken,
+            serde_json::json!({
+                "registered": false,
+                "accelerator": RECORD_ACCELERATOR,
+                "reason_key": "shortcut.unavailable",
+            })
+        );
+        let ok = serde_json::to_value(status_from::<&str>(Ok(()))).unwrap();
+        assert_eq!(
+            ok,
+            serde_json::json!({
+                "registered": true,
+                "accelerator": RECORD_ACCELERATOR,
+                "reason_key": null,
+            })
+        );
+    }
+
     #[test]
     fn an_unregistered_shortcut_names_its_reason_key() {
         let s = status_from::<&str>(Err("already registered"));

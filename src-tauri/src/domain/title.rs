@@ -156,6 +156,18 @@ mod tests {
         assert!(!is_fallback_title(""));
     }
 
+    /// The hole this predicate cannot close on its own, and the reason a meeting
+    /// carries `title_locked`: what the user typed is allowed to look exactly
+    /// like the label, and shape alone would hand it back to the generator.
+    #[test]
+    fn a_user_title_shaped_like_the_label_is_still_theirs() {
+        let typed = fallback_title(Local::now());
+        assert!(
+            is_fallback_title(&typed),
+            "shape cannot tell these apart — provenance has to"
+        );
+    }
+
     #[test]
     fn a_model_that_answers_with_a_paragraph_yields_one_line() {
         let raw = "**Title: Weekly roadmap sync**\n\nI chose this because the \

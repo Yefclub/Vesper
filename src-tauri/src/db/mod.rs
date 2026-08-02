@@ -158,6 +158,15 @@ impl Database {
             "#,
         )
         .map_err(|e| e.to_string())?;
+        // Additive, and the only way to add a column to a table that already
+        // holds the user's meetings. SQLite has no `ADD COLUMN IF NOT EXISTS`,
+        // and re-running is the normal case — every launch after the first — so
+        // the duplicate-column error is the success path on the second run and
+        // is swallowed here rather than aborting the migration behind it.
+        let _ = conn.execute(
+            "ALTER TABLE meetings ADD COLUMN title_locked INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         drop(conn);
         self.backfill_search_index()
     }
@@ -192,14 +201,14 @@ impl Database {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute(
             r#"INSERT INTO meetings (id, title, status, created_at, updated_at, duration_ms, audio_path,
-                transcript_text, summary, action_items, key_points, project)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+                transcript_text, summary, action_items, key_points, project, title_locked)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
                ON CONFLICT(id) DO UPDATE SET
                 title=excluded.title, status=excluded.status, updated_at=excluded.updated_at,
                 duration_ms=excluded.duration_ms, audio_path=excluded.audio_path,
                 transcript_text=excluded.transcript_text, summary=excluded.summary,
                 action_items=excluded.action_items, key_points=excluded.key_points,
-                project=excluded.project"#,
+                project=excluded.project, title_locked=excluded.title_locked"#,
             params![
                 m.id,
                 m.title,
@@ -213,6 +222,7 @@ impl Database {
                 m.action_items,
                 m.key_points,
                 m.project,
+                m.title_locked as i64,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -226,7 +236,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
-                        transcript_text, summary, action_items, key_points, project
+                        transcript_text, summary, action_items, key_points, project, title_locked
                  FROM meetings WHERE id=?1",
             )
             .map_err(|e| e.to_string())?;
@@ -247,7 +257,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
-                        '' AS transcript_text, summary, action_items, key_points, project
+                        '' AS transcript_text, summary, action_items, key_points, project, title_locked
                  FROM meetings ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -604,6 +614,7 @@ fn row_to_meeting(row: &rusqlite::Row<'_>) -> Result<MeetingRecord, String> {
         action_items: row.get(9).map_err(|e| e.to_string())?,
         key_points: row.get(10).map_err(|e| e.to_string())?,
         project: row.get(11).map_err(|e| e.to_string())?,
+        title_locked: row.get::<_, i64>(12).map_err(|e| e.to_string())? != 0,
     })
 }
 
@@ -630,6 +641,7 @@ mod tests {
             action_items: None,
             key_points: None,
             project: Some("Core".into()),
+            title_locked: false,
         };
         db.upsert_meeting(&m).unwrap();
         let mut t = LiveTranscript::new();
@@ -831,6 +843,7 @@ mod tests {
             summary: None,
             action_items: None,
             key_points: None,
+            title_locked: false,
             project: None,
         }
     }

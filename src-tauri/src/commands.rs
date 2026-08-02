@@ -404,9 +404,11 @@ pub fn start_recording(
     // label frozen at creation, and the sortable timestamp is the one that must
     // not move. `is_fallback_title` recognises what this writes, which is what
     // lets a generated title replace it and nothing else.
-    let title = title
-        .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| fallback_title(chrono::Local::now()));
+    let given = title.filter(|t| !t.trim().is_empty());
+    // A name the caller supplied is the user's from the start; only the date
+    // label is ours to replace once a summary exists.
+    let title_locked = given.is_some();
+    let title = given.unwrap_or_else(|| fallback_title(chrono::Local::now()));
     let audio_path = recordings_dir().join(format!("{id}.wav"));
     state
         .recorder
@@ -433,6 +435,7 @@ pub fn start_recording(
         action_items: None,
         key_points: None,
         project: None,
+        title_locked,
     };
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
@@ -679,7 +682,10 @@ async fn name_meeting(
     meeting: &mut MeetingRecord,
     summary: &str,
 ) {
-    if !is_fallback_title(&meeting.title) {
+    // Provenance first, shape second. The flag is the answer for anything named
+    // since it existed; the shape test still covers meetings recorded before the
+    // column, whose flag defaults to false and whose title is genuinely ours.
+    if meeting.title_locked || !is_fallback_title(&meeting.title) {
         return;
     }
     match state
@@ -691,7 +697,11 @@ async fn name_meeting(
             Some(title) => meeting.title = title,
             None => tracing::warn!("the model answered with no usable title"),
         },
-        Err(e) => tracing::warn!("title generation failed: {e}"),
+        // The provider's error is not repeated. It carries the model id, which
+        // arrives from the WebView, and this now lands in a file on the user's
+        // disk. A failed title is a nuisance, not something worth widening what
+        // the log holds.
+        Err(_) => tracing::warn!("title generation failed"),
     }
 }
 
@@ -779,11 +789,14 @@ pub async fn import_audio(
     let (pcm, sr) = decode_audio_file(&path).map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
-        path.file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Imported meeting".into())
-    });
+    let given = title
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()));
+    // A supplied name and a file stem are both real names — an imported
+    // `weekly-sync.wav` is called that on purpose, and the generator has no
+    // business renaming it. Only the last resort is ours.
+    let title_locked = given.is_some();
+    let title = given.unwrap_or_else(|| "Imported meeting".into());
     // Persist a dual-channel WAV copy under recordings for retranscription
     let wav_path = recordings_dir().join(format!("{id}.wav"));
     crate::audio::capture::write_dual_wav(&wav_path, sr, &pcm, &[]).map_err(|e| e.to_string())?;
@@ -800,6 +813,7 @@ pub async fn import_audio(
         action_items: None,
         key_points: None,
         project: None,
+        title_locked,
     };
     state.db.upsert_meeting(&meeting)?;
     let settings = state.settings.lock().clone();
@@ -1023,6 +1037,9 @@ pub fn rename_meeting(
         .get_meeting(&id)?
         .ok_or_else(|| "meeting not found".to_string())?;
     meeting.title = title;
+    // From here the name is the user's. Nothing generated replaces it, however
+    // much the shape of what they typed happens to resemble the date label.
+    meeting.title_locked = true;
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
     Ok(meeting)

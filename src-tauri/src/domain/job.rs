@@ -80,6 +80,18 @@ pub struct MeetingRecord {
     pub action_items: Option<String>,
     pub key_points: Option<String>,
     pub project: Option<String>,
+    /// The user named this meeting, so nothing generated may replace it.
+    ///
+    /// Provenance, not inference. Recognising the fallback by its shape works
+    /// until someone renames a meeting to something that happens to have that
+    /// shape — `Meeting 2026-08-01 10:30` is a perfectly ordinary thing to type,
+    /// and the next summary would silently take it back.
+    ///
+    /// `#[serde(default)]` because a row written before this column existed
+    /// deserialises through here, and settings and meetings alike are loaded with
+    /// a fallback that would swallow the error and lose the row.
+    #[serde(default)]
+    pub title_locked: bool,
 }
 
 /// What the app is doing to a meeting after Stop, as the window renders it.

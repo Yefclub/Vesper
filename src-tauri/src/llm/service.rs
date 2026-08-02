@@ -63,7 +63,18 @@ impl LlmService {
     ) -> Result<String, String> {
         let prompt = build_title_prompt(summary, transcript);
         match settings.llm_provider {
-            LlmProvider::Local => self.local.title(&prompt, &settings.local_llm_model),
+            // Loading a GGUF and generating from it takes seconds of pure CPU. On
+            // a runtime worker that stalls every other task on the executor —
+            // including the event pump that is, at this exact moment, telling the
+            // window what it is doing. `summarize` above has the same shape and
+            // predates this; it is pointed at, not changed here.
+            LlmProvider::Local => {
+                let local = self.local.clone();
+                let model = settings.local_llm_model.clone();
+                tokio::task::spawn_blocking(move || local.title(&prompt, &model))
+                    .await
+                    .map_err(|e| e.to_string())?
+            }
             LlmProvider::OpenRouter => {
                 settings
                     .require_openrouter_key()

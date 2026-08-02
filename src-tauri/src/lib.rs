@@ -32,7 +32,13 @@ pub fn run() {
         Ok(file) => {
             use tracing_subscriber::fmt::writer::MakeWriterExt;
             tracing_subscriber::fmt()
-                .with_env_filter("info")
+                // `warn`, not `info`. Daily rotation caps the number of files at
+                // five, but nothing caps the size of the one being written, and a
+                // chatty level on a machine left running for a day is the only
+                // way this grows without a bound. Every call site in this crate is
+                // already a warning or an error, so nothing is lost — the point of
+                // the file is the failure nobody saw, not a narrative.
+                .with_env_filter("warn")
                 // Colour codes are noise in a file, and the console keeps the
                 // same lines either way.
                 .with_ansi(false)

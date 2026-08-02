@@ -199,6 +199,16 @@ impl DualChannelRecorder {
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
+                // One last sweep before the device closes. Stop can arrive
+                // between a pause and the loop noticing it, and then the chunks
+                // captured before the pause are still sitting in the ring with
+                // nothing left to take them. `stream.stop()` drops them, which
+                // costs the user real audio they already recorded — and on a very
+                // short take, all of it.
+                while let Some(chunk) = stream.poll_chunk() {
+                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                }
                 stream.stop();
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
@@ -271,6 +281,16 @@ impl DualChannelRecorder {
                         g.sys_samples.extend_from_slice(&pcm);
                     }
                     thread::sleep(Duration::from_millis(5));
+                }
+                // One last sweep before the device closes. Stop can arrive
+                // between a pause and the loop noticing it, and then the chunks
+                // captured before the pause are still sitting in the ring with
+                // nothing left to take them. `stream.stop()` drops them, which
+                // costs the user real audio they already recorded — and on a very
+                // short take, all of it.
+                while let Some(chunk) = stream.poll_chunk() {
+                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
                 }
                 stream.stop();
                 inner_sys.lock().system_loopback_active = false;
