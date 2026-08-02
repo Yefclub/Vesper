@@ -12,6 +12,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
+import { clsx } from "clsx";
 import { FileAudio, Settings, Sparkles } from "lucide-react";
 import {
   api,
@@ -756,7 +757,12 @@ function AppShell({
                         key="transcript"
                         ref={pinOnPaneMount}
                         {...fadeRise}
-                        className="mx-auto max-w-reading"
+                        // `max-w-pane` (1024px), not `max-w-reading`: the point
+                        // of two sides is the split, and a 576px column gives it
+                        // nowhere to happen. Each bubble caps at `max-w-reading`
+                        // instead, so the measure is protected while the sides
+                        // are genuinely separated.
+                        className="mx-auto max-w-pane"
                         data-testid="transcript-panel"
                       >
                         {transcript.segments?.length ? (
@@ -772,33 +778,64 @@ function AppShell({
                               const opens =
                                 i === 0 ||
                                 transcript.segments[i - 1].speaker !== s.speaker;
+                              // This machine's microphone is the user, so it
+                              // takes the right side; the computer's audio is
+                              // the other people in the meeting and takes the
+                              // left. Reversing these makes every transcript
+                              // wrong in a way no test can see.
+                              const me = s.speaker === "me";
                               return (
                                 <motion.div
                                   key={s.id}
                                   {...segmentArrive}
-                                  className={`flex gap-4 ${
-                                    i === 0 ? "" : opens ? "mt-4" : "mt-1"
-                                  }`}
+                                  className={clsx(
+                                    "flex w-full flex-col",
+                                    me ? "items-end" : "items-start",
+                                    // 24px at a turn change against 4px within
+                                    // one: 6:1 is enough for the grouping to
+                                    // read without drawing a rule.
+                                    i === 0 ? "" : opens ? "mt-6" : "mt-1",
+                                  )}
                                 >
-                                  <span className="w-14 shrink-0 tabular-nums text-2xs text-fg-faint">
-                                    {opens ? formatDuration(s.start_ms) : ""}
-                                  </span>
-                                  <span
-                                    aria-hidden
-                                    className={`w-0.5 shrink-0 self-stretch rounded-full ${
-                                      s.speaker === "me" ? "bg-accent" : "bg-others"
-                                    }`}
-                                  />
-                                  <div className="min-w-0 flex-1">
-                                    {opens && (
-                                      <div className="text-2xs text-fg-subtle">
-                                        {s.speaker === "me"
-                                          ? t("speaker.me")
-                                          : t("speaker.others")}
-                                      </div>
+                                  {/* One meta line per TURN, not per line — the
+                                      one real win of the gutter list this
+                                      replaces. Both fields at `text-fg-subtle`:
+                                      the timestamp is a seek offset into the
+                                      recording, i.e. content, and content
+                                      clears 4.5:1. `flex-row-reverse` on the me
+                                      side so both read outward-in from their
+                                      own edge. */}
+                                  {opens && (
+                                    <div
+                                      className={clsx(
+                                        "flex items-baseline gap-2 px-1 pb-1 text-2xs text-fg-subtle",
+                                        me && "flex-row-reverse",
+                                      )}
+                                    >
+                                      <span className="font-medium">
+                                        {me ? t("speaker.me") : t("speaker.others")}
+                                      </span>
+                                      <span className="tabular-nums">
+                                        {formatDuration(s.start_ms)}
+                                      </span>
+                                    </div>
+                                  )}
+                                  {/* The corner nearest the speaker's own edge
+                                      is cut to 6px — a tail without drawing a
+                                      tail. `me` is a tint rather than a fill
+                                      because `--color-me` is the accent, and a
+                                      second accent fill would compete with the
+                                      one on screen. */}
+                                  <p
+                                    className={clsx(
+                                      "max-w-reading rounded-lg border px-4 py-3 text-base leading-relaxed",
+                                      me
+                                        ? "rounded-br-sm border-me/30 bg-me/10"
+                                        : "rounded-bl-sm border-border bg-surface-2",
                                     )}
-                                    <p className="text-base leading-relaxed">{s.text}</p>
-                                  </div>
+                                  >
+                                    {s.text}
+                                  </p>
                                 </motion.div>
                               );
                             })}
