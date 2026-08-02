@@ -198,7 +198,6 @@ pub fn run() {
             commands::pause_recording,
             commands::resume_recording,
             commands::stop_recording,
-            commands::poll_live_stt,
             commands::summarize_meeting,
             commands::chat_meeting,
             commands::list_chat,

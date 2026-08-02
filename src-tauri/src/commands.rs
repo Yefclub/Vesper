@@ -29,7 +29,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
@@ -52,6 +52,10 @@ pub struct AppState {
     /// component that knows a transfer is running, and two transfers of the same
     /// model append to one `.part` file.
     pub download_flight: tokio::sync::Mutex<()>,
+    /// Bumped by every start and stop, so only the newest live-STT ticker keeps
+    /// draining audio. Two tickers would split each window between them and run
+    /// concurrent transcriptions over halves of the same speech.
+    pub live_stt_generation: AtomicU64,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -73,6 +77,7 @@ impl AppState {
             key_in_keychain: AtomicBool::new(in_keychain),
             stt_flight: tokio::sync::Mutex::new(()),
             download_flight: tokio::sync::Mutex::new(()),
+            live_stt_generation: AtomicU64::new(0),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -380,6 +385,7 @@ pub fn complete_onboarding(
 
 #[tauri::command]
 pub fn start_recording(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     title: Option<String>,
 ) -> Result<MeetingRecord, String> {
@@ -440,6 +446,9 @@ pub fn start_recording(
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
     *state.active_meeting.lock() = Some(id);
+    // Started here rather than by the window, so transcription keeps running when
+    // the window is minimized and its timers are throttled to a crawl.
+    spawn_live_stt_ticker(app, Arc::clone(&state));
     Ok(meeting)
 }
 
@@ -502,6 +511,11 @@ pub async fn stop_recording(
         .clone()
         .ok_or_else(|| "no active meeting".to_string())?;
     let path = state.recorder.stop().map_err(|e| e.to_string())?;
+    // Retire the ticker with the recording it belongs to. `is_recording` is
+    // already false above, so it would stop on its own within 1200ms — bumping
+    // the generation makes it immediate, and makes a start that follows quickly
+    // unambiguous about which ticker owns the microphone.
+    state.live_stt_generation.fetch_add(1, Ordering::SeqCst);
     let duration = state.recorder.elapsed_ms();
     let mut meeting = state
         .db
@@ -625,18 +639,25 @@ pub async fn stop_recording(
     Ok(meeting)
 }
 
-#[tauri::command]
-pub async fn poll_live_stt(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<LiveTranscript, String> {
+/// Cadence of the backend live-STT ticker.
+const LIVE_STT_INTERVAL_MS: u64 = 1200;
+
+/// Drain whatever audio has arrived and transcribe it.
+///
+/// No longer a command. It used to be driven by a `setInterval` in the window,
+/// and WebView2 treats a minimized window as a hidden page: its timers clamp to
+/// roughly one a second and then to one a minute after five. Since this call is
+/// what *drains* the recorder, that did not merely slow the display down — it
+/// stalled transcription itself for anyone who minimized the app during a
+/// meeting, which is precisely when they would.
+async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), String> {
     let id = state
         .active_meeting
         .lock()
         .clone()
         .ok_or_else(|| "no active meeting".to_string())?;
     if !state.recorder.is_recording() || state.recorder.is_paused() {
-        return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
+        return Ok(());
     }
     // Single-flight. The UI polls every 1200ms and a chunk can take longer than
     // that to transcribe, so without this the next poll drains a second slice of
@@ -645,11 +666,11 @@ pub async fn poll_live_stt(
     // the wrong order. Overlapping polls now just return what is already there;
     // the audio stays in the buffer for the next turn.
     let Ok(_flight) = state.stt_flight.try_lock() else {
-        return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
+        return Ok(());
     };
     let (mic, sys, sr) = state.recorder.drain_chunks();
     if mic.is_empty() && sys.is_empty() {
-        return Ok(state.live.lock().get(&id).cloned().unwrap_or_default());
+        return Ok(());
     }
     let start_ms = state
         .recorder
@@ -678,7 +699,36 @@ pub async fn poll_live_stt(
     let snapshot = t.clone();
     drop(guard);
     let _ = app.emit("transcript://append", &snapshot);
-    Ok(snapshot)
+    Ok(())
+}
+
+/// Drive live transcription from the backend for as long as this recording lasts.
+///
+/// Retired by generation rather than by a stop flag: a stop followed quickly by a
+/// start would otherwise leave two tickers alive, splitting each window of audio
+/// between them and running concurrent transcriptions over halves of the same
+/// speech. The check runs before the work, never mid-flight, so a pass already
+/// running still lands.
+fn spawn_live_stt_ticker(app: AppHandle, state: Arc<AppState>) {
+    let generation = state.live_stt_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(LIVE_STT_INTERVAL_MS)).await;
+            if state.live_stt_generation.load(Ordering::SeqCst) != generation
+                || !state.recorder.is_recording()
+            {
+                break;
+            }
+            if let Err(e) = drive_live_stt(&app, &state).await {
+                // The window has to be told, or a provider rejecting every chunk
+                // is a screen that simply never fills. The audio is still being
+                // captured and saved, so this is degraded rather than lost — and
+                // the message carries no model id, which arrives from the WebView
+                // and must not reach the log this may also be written to.
+                let _ = app.emit("transcript://error", &e);
+            }
+        }
+    });
 }
 
 /// Replace the date label with a title read out of the meeting itself.

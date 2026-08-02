@@ -343,6 +343,17 @@ function AppShell({
       track(
         await listen<LiveTranscript>("transcript://append", (e) => {
           setTranscript(e.payload);
+          // A window that filled clears whatever the last failure said, so a
+          // provider that recovers stops shouting without needing a second
+          // signal.
+          setLiveSttError(null);
+        }),
+      );
+      track(
+        // Never swallowed. A cloud provider rejecting every chunk — wrong model
+        // id, no credit, a 400 — used to be an empty screen and no explanation.
+        await listen<string>("transcript://error", (e) => {
+          setLiveSttError(e.payload);
         }),
       );
       track(
@@ -480,27 +491,6 @@ function AppShell({
     return () => window.clearInterval(id);
   }, [status?.recording, status?.paused]);
 
-  useEffect(() => {
-    // Paused means nothing is arriving — no samples, no lines, no clock. Asking
-    // twice a second anyway only re-sets the same values.
-    if (!status?.recording || status.paused) return;
-    const id = window.setInterval(async () => {
-      try {
-        setTranscript(await api.pollLiveStt());
-        // A tick that worked clears whatever the last failure said. Kept here
-        // rather than beside the failure so a provider that recovers stops
-        // shouting at the user without needing a second signal.
-        setLiveSttError(null);
-      } catch (e) {
-        // Never swallowed again. A cloud provider that rejects every chunk —
-        // wrong model id, no credit, a 400 — produced an empty screen and no
-        // explanation, because this catch was `{ /* keep UI alive */ }` and the
-        // audio had already been drained by the time it threw.
-        setLiveSttError(String(e));
-      }
-    }, 1200);
-    return () => window.clearInterval(id);
-  }, [status?.recording, status?.paused]);
 
   /// Jump the reading column to its newest line.
   ///

@@ -215,7 +215,6 @@ export const api = {
   pauseRecording: () => invoke<RecorderStatus>("pause_recording"),
   resumeRecording: () => invoke<RecorderStatus>("resume_recording"),
   stopRecording: () => invoke<MeetingRecord>("stop_recording"),
-  pollLiveStt: () => invoke<LiveTranscript>("poll_live_stt"),
   summarize: (id: string, template?: string) =>
     invoke<MeetingInsights>("summarize_meeting", { id, template }),
   importAudio: (path: string, title?: string) =>
