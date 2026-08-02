@@ -121,7 +121,7 @@ export function Onboarding({ settings, onDone }: Props) {
           is the one screen every user is guaranteed to see. */}
       <div className="w-full max-w-lg rounded-lg border border-border bg-surface-1 p-6 shadow-lift">
         <div className="mb-4 flex items-center gap-3">
-          <img src={logo} alt="Vesper" className="h-12 w-12 rounded-lg" />
+          <img src={logo} alt="Vesper" className="h-12 w-12" />
           <div>
             <h1 className="text-xl font-semibold">{t("onboarding.title")}</h1>
             {/* The step's name. "2/5" in grey says how far along you are and

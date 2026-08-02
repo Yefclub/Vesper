@@ -716,7 +716,9 @@ function AppShell({
         className="grid h-12 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 pl-4 pr-2"
       >
         <div className="flex items-center gap-2">
-          <img src={logo} alt="" className="h-8 w-8 rounded-md" />
+          {/* No radius: the asset is the mark alone now, not a rounded tile, so
+              a corner clip would shave the artwork instead of a background. */}
+          <img src={logo} alt="" className="h-8 w-8" />
           {/* Flat, not a gradient: the gradient made the brightest, most
               saturated thing on screen a piece of chrome the user cannot act
               on, and it was the only reason --color-accent-2 existed. */}
