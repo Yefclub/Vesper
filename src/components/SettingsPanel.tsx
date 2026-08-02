@@ -230,7 +230,12 @@ export function SettingsPanel({
   return (
     <motion.div
       {...backdropFade}
-      className="fixed inset-0 z-50 flex justify-end bg-background/70 backdrop-blur-sm"
+      // `p-2` is what puts the drawer in the content card's family: its right
+      // and bottom edges land on the same 8px window inset. The top edge
+      // deliberately does not match — matching two of three edges says "same
+      // family", matching all three would say "another pane", and this is a
+      // modal.
+      className="fixed inset-0 z-50 flex justify-end bg-scrim p-2 backdrop-blur-sm"
       // Clicking away closes, which is what every drawer does and what someone
       // who opened this by accident will try first.
       onClick={onClose}
@@ -244,9 +249,14 @@ export function SettingsPanel({
         data-testid="settings-panel"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={trapTab}
-        // The hairline draws the exposed left edge; the soft layer stays
-        // vertical so the light direction does not change.
-        className="flex h-full w-full max-w-md flex-col border-l border-border-strong bg-surface-1 shadow-occlude"
+        // A suspended panel has four exposed edges, so the hairline is uniform
+        // and the same one the card carries — `border-border-strong` is a state,
+        // not a level, and it was justified by an exposed *left* edge that no
+        // longer exists. `surface-2` because the content card took `surface-1`.
+        // `overflow-hidden` is required: the header and footer rows are
+        // edge-to-edge with a `border-b`/`border-t` and would otherwise escape
+        // the 12px corners.
+        className="flex h-full w-full max-w-md flex-col overflow-hidden rounded-lg border border-border bg-surface-2 shadow-occlude"
       >
         <div className="flex items-center justify-between border-b border-border px-4 py-4">
           <h2 id="settings-title" className="text-lg font-semibold">

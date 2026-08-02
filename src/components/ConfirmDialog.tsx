@@ -49,7 +49,7 @@ export function ConfirmDialog({
     <motion.div
       {...backdropFade}
       onClick={onCancel}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim p-6 backdrop-blur-sm"
     >
       <motion.div
         role="alertdialog"
