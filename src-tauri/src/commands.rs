@@ -66,6 +66,14 @@ pub struct AppState {
     /// before it was improved. The window already allows one at a time; this is
     /// what makes it true.
     pub refine_flight: tokio::sync::Mutex<()>,
+    /// How many live transcription passes have completed for the current
+    /// recording.
+    ///
+    /// Not the same question as "does the transcript have segments": a paid pass
+    /// can answer with no words and still have been billed, and treating that as
+    /// "no live transcription happened" sent the whole recording through the
+    /// provider a second time at stop — charging twice for the same audio.
+    pub live_stt_passes: AtomicU64,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -89,6 +97,7 @@ impl AppState {
             download_flight: tokio::sync::Mutex::new(()),
             live_stt_generation: AtomicU64::new(0),
             refine_flight: tokio::sync::Mutex::new(()),
+            live_stt_passes: AtomicU64::new(0),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -494,6 +503,7 @@ pub fn start_recording(
     *state.active_meeting.lock() = Some(id);
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
+    state.live_stt_passes.store(0, Ordering::SeqCst);
     spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
     // A recording can be started by the tray or the accelerator while the window
     // is already minimized, so the card has to be considered here and not only
@@ -621,7 +631,11 @@ pub async fn stop_recording(
         &MeetingProgress::new(&id, MeetingPhase::Transcribing),
     );
 
-    if live.segments().is_empty() {
+    // Whether a pass *ran*, not whether it produced words. A paid pass can answer
+    // with no text and still have been billed, and reading the empty transcript
+    // as "live transcription never happened" sent the whole recording through
+    // the provider again — charging twice for the same audio.
+    if state.live_stt_passes.load(Ordering::SeqCst) == 0 {
         // Nothing was transcribed live — cloud STT down, or a recording short
         // enough that no poll ever ran. Transcribe the whole saved WAV.
         if let Ok((mic, sys, sr)) = read_dual_wav(&path) {
@@ -683,6 +697,10 @@ pub async fn stop_recording(
         {
             Ok((insights, cost)) => {
                 state.db.save_insights(&id, &insights)?;
+                // A meeting's first insights are version 1. Recording it here
+                // rather than lazily means the history is complete from the
+                // start instead of from whenever someone first opened it.
+                state.db.push_summary_version(&id, "summarize", &insights)?;
                 state.db.add_meeting_cost(&id, cost)?;
                 meeting.summary = Some(insights.summary.clone());
                 meeting.action_items = Some(insights.action_items_text());
@@ -771,6 +789,7 @@ async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), St
     // than a read-modify-write here: two channels transcribe concurrently and
     // one would overwrite the other.
     bill_chunks(&state.db, &id, &chunks);
+    state.live_stt_passes.fetch_add(1, Ordering::SeqCst);
     let mut guard = state.live.lock();
     let t = guard.entry(id.clone()).or_default();
     apply_stt_chunks(t, &chunks);
@@ -875,11 +894,25 @@ pub async fn summarize_meeting(
         .transition(MeetingEvent::StartSummarize)
         .unwrap_or(MeetingStatus::Summarizing);
     state.db.upsert_meeting(&m)?;
+    // Held for the same reason a refinement holds it: this replaces the whole
+    // insight set, and a refinement awaiting its model call would otherwise
+    // write a version built from what this is about to overwrite.
+    let _flight = state.refine_flight.lock().await;
     let (insights, cost) = state
         .llm
         .summarize(&settings, &m.transcript_text, tpl)
         .await?;
+    // The summary being replaced has to become a version before it is gone.
+    // Without this, re-summarising a meeting nobody had opened the history of
+    // left the original unrecoverable — the lazy baseline would then record the
+    // replacement as if it had always been the first.
+    if m.summary.is_some() && state.db.list_summary_versions(&id)?.is_empty() {
+        state
+            .db
+            .push_summary_version(&id, "summarize", &current_insights(&m))?;
+    }
     state.db.save_insights(&id, &insights)?;
+    state.db.push_summary_version(&id, "summarize", &insights)?;
     state.db.add_meeting_cost(&id, cost)?;
     m.status = MeetingStatus::Ready;
     m.summary = Some(insights.summary.clone());
@@ -1391,11 +1424,15 @@ pub async fn refine_summary_section(
 /// Appended rather than rewound: history stays append-only, so restoring is
 /// itself undoable and nothing the user has seen ever disappears.
 #[tauri::command]
-pub fn restore_summary_version(
+pub async fn restore_summary_version(
     state: State<'_, Arc<AppState>>,
     id: String,
     version: i64,
 ) -> Result<SummaryVersion, String> {
+    // The same flight a refinement holds. A restore landing while one is
+    // awaiting its model call would be overwritten the moment that call returned
+    // with the pre-restore snapshot it had been holding all along.
+    let _flight = state.refine_flight.lock().await;
     let wanted = state
         .db
         .list_summary_versions(&id)?
