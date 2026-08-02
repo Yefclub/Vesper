@@ -81,3 +81,6 @@ tmp/
 # Tauri gen (local)
 src-tauri/gen/schemas/*.json
 !src-tauri/gen/schemas/.gitkeep
+
+# Staged by build.rs from the sys crate; rebuilt on every cargo build.
+src-tauri/gpu-backends/

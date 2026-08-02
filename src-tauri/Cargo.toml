@@ -13,6 +13,44 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+default = []
+
+# GPU acceleration. Off by default so `cargo test` and a contributor without a
+# Vulkan SDK or a CUDA toolkit can still build the app — the SDKs are build-time
+# requirements only, and the shipped binary must never need them installed.
+#
+# The split is not cosmetic. The two engines reach the GPU in different ways and
+# only one of them is safe to enable unconditionally:
+#
+# * `llama-cpp-2` has `dynamic-backends`, which is llama.cpp's `GGML_BACKEND_DL`:
+#   each backend becomes a shared library loaded at runtime, so `ggml-cuda.dll`
+#   is only opened when an NVIDIA driver is actually present. A machine with no
+#   NVIDIA GPU never touches it.
+# * `whisper-rs-sys` has no such thing, and no way to pass CMake arguments. Its
+#   `cuda` feature emits `rustc-link-lib=cudart` and `=cuda` — *load-time*
+#   imports — so a binary built with it does not start at all on a machine
+#   without the NVIDIA runtime. That is why whisper gets Vulkan and not CUDA:
+#   `vulkan-1.dll` ships with every GPU driver, and losing CUDA for
+#   transcription costs far less than losing the single installer. CUDA's real
+#   win is prompt processing, which is the summarisation path, and that is
+#   llama's side.
+gpu = ["gpu-vulkan"]
+
+# Buildable anywhere a Vulkan SDK is installed, which includes this project's
+# own development machine — so this is the combination that gets exercised
+# rather than only compiled.
+gpu-vulkan = ["whisper-rs/vulkan", "llama-cpp-2/vulkan"]
+
+# Needs the CUDA toolkit at build time (nvcc). Kept apart from `gpu-vulkan` so a
+# machine with only the driver can still build every other combination.
+gpu-cuda = ["llama-cpp-2/cuda"]
+
+# Both backends in one binary, chosen at runtime. Windows only in practice —
+# runtime choice is what `dynamic-backends` buys, and that is Windows-only for
+# the reason given beside the dependency.
+gpu-all = ["gpu-vulkan", "gpu-cuda"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
@@ -37,8 +75,27 @@ hound = "3.5"
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "ogg", "flac", "pcm", "wav", "mkv"] }
 # Local STT (whisper.cpp)
 whisper-rs = "0.16"
-# Local LLM (llama.cpp) — compat-only to ease Windows MSVC builds
-llama_cpp = { version = "0.3", default-features = false, features = ["compat"] }
+# Local LLM (llama.cpp). `llama_cpp 0.3.2` pinned a 2024-era llama.cpp with no
+# path to a GPU backend; this line is the current one and is what makes CUDA and
+# Vulkan reachable at all. `openmp` is off because it drags a runtime DLL into
+# the bundle for a gain the GPU backends make irrelevant.
+#
+# `dynamic-link` is not a preference. `whisper-rs-sys` and `llama-cpp-sys-2` each
+# vendor their own ggml, and two static copies of those symbols is `LNK2005` on
+# MSVC and `rust-lld: error: duplicate symbol` on Linux — the link simply fails
+# on both. Shared libraries give each its own copy. `dynamic-backends` rides
+# along because it is only meaningful with shared libraries, and it is what lets
+# one binary pick Vulkan or AVX-512 on the machine it lands on.
+llama-cpp-2 = { version = "0.1.150", default-features = false, features = ["dynamic-link", "dynamic-backends"] }
+# Never named in the code. It is here so cargo hands `DEP_LLAMA_ROOT` and
+# `DEP_LLAMA_BACKENDS_DIR` to this crate's build script: `links` metadata only
+# reaches a *direct* dependent, and those two variables are the only pointers
+# that name the unit cargo is building right now. Everything else — newest
+# directory, matching feature set — is a guess that a second build output in the
+# same profile can defeat, and guessing wrong stages a mismatched `llama.dll`
+# next to the executable. Unified with the copy llama-cpp-2 already builds, so
+# it costs nothing.
+llama-cpp-sys-2 = { version = "0.1.150", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "blocking", "stream"] }
 # `net` is for the loopback server in the resume test; reqwest already pulls it in
 # transitively, so it costs nothing in the bundle.

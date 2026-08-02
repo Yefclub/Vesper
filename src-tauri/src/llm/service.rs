@@ -28,15 +28,19 @@ impl LlmService {
             // A local model costs nothing, which is not the same as costing
             // zero: `None` is what stops a meeting that never left the machine
             // from displaying a price at all.
-            LlmProvider::Local => self
-                .local
-                .summarize(
-                    transcript,
-                    template,
-                    settings.locale(),
-                    &settings.local_llm_model,
-                )
-                .map(|insights| (insights, None)),
+            LlmProvider::Local => {
+                let local = self.local.clone();
+                let transcript = transcript.to_string();
+                let locale = settings.locale();
+                let model = settings.local_llm_model.clone();
+                let backend = settings.compute_backend.clone();
+                tokio::task::spawn_blocking(move || {
+                    local.summarize(&transcript, template, locale, &model, &backend)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+                .map(|insights| (insights, None))
+            }
             LlmProvider::OpenRouter => {
                 settings
                     .require_openrouter_key()
@@ -72,12 +76,12 @@ impl LlmService {
             // Loading a GGUF and generating from it takes seconds of pure CPU. On
             // a runtime worker that stalls every other task on the executor —
             // including the event pump that is, at this exact moment, telling the
-            // window what it is doing. `summarize` above has the same shape and
-            // predates this; it is pointed at, not changed here.
+            // window what it is doing.
             LlmProvider::Local => {
                 let local = self.local.clone();
                 let model = settings.local_llm_model.clone();
-                tokio::task::spawn_blocking(move || local.title(&prompt, &model))
+                let backend = settings.compute_backend.clone();
+                tokio::task::spawn_blocking(move || local.title(&prompt, &model, &backend))
                     .await
                     .map_err(|e| e.to_string())?
                     .map(|title| (title, None))
@@ -123,7 +127,8 @@ impl LlmService {
                 let messages = messages.to_vec();
                 // No offline fallback here. The extractive path cannot reason,
                 // and it would replace good notes with keyword soup.
-                tokio::task::spawn_blocking(move || local.chat(&messages, "", &model))
+                let backend = settings.compute_backend.clone();
+                tokio::task::spawn_blocking(move || local.chat(&messages, "", &model, &backend))
                     .await
                     .map_err(|e| e.to_string())?
                     .map(|answer| (answer, None))
@@ -162,10 +167,18 @@ impl LlmService {
             12_000,
         );
         match settings.llm_provider {
-            LlmProvider::Local => self
-                .local
-                .chat(&messages, transcript, &settings.local_llm_model)
-                .map(|answer| (answer, None)),
+            LlmProvider::Local => {
+                let local = self.local.clone();
+                let transcript = transcript.to_string();
+                let model = settings.local_llm_model.clone();
+                let backend = settings.compute_backend.clone();
+                tokio::task::spawn_blocking(move || {
+                    local.chat(&messages, &transcript, &model, &backend)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+                .map(|answer| (answer, None))
+            }
             LlmProvider::OpenRouter => {
                 settings
                     .require_openrouter_key()

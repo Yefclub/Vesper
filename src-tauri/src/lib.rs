@@ -16,6 +16,12 @@ use tauri::{
     Emitter, Manager,
 };
 
+/// `RUST_LOG` if it is set and parses, `warn` otherwise.
+fn default_log_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // A release build has no console — `main.rs` sets
@@ -32,13 +38,17 @@ pub fn run() {
         Ok(file) => {
             use tracing_subscriber::fmt::writer::MakeWriterExt;
             tracing_subscriber::fmt()
-                // `warn`, not `info`. Daily rotation caps the number of files at
+                // `warn` by default. Daily rotation caps the number of files at
                 // five, but nothing caps the size of the one being written, and a
                 // chatty level on a machine left running for a day is the only
-                // way this grows without a bound. Every call site in this crate is
-                // already a warning or an error, so nothing is lost — the point of
-                // the file is the failure nobody saw, not a narrative.
-                .with_env_filter("warn")
+                // way this grows without a bound. The point of the file is the
+                // failure nobody saw, not a narrative.
+                //
+                // `RUST_LOG` overrides it, which is what makes the `info` lines
+                // reachable — the one naming the compute backend a model was
+                // actually loaded onto answers "why is this slow", and a line
+                // nobody can turn on answers nothing.
+                .with_env_filter(default_log_filter())
                 // Colour codes are noise in a file, and the console keeps the
                 // same lines either way.
                 .with_ansi(false)
@@ -50,7 +60,7 @@ pub fn run() {
         // console too.
         Err(e) => {
             tracing_subscriber::fmt()
-                .with_env_filter("info")
+                .with_env_filter(default_log_filter())
                 .try_init()
                 .ok();
             tracing::warn!("log file unavailable, console only: {e}");

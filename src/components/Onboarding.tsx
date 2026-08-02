@@ -45,8 +45,14 @@ export function Onboarding({ settings, onDone }: Props) {
         setModels(m);
         setDraft((prev) => ({
           ...prev,
-          local_stt_model: prev.local_stt_model || c.recommended_stt_model,
-          local_llm_model: prev.local_llm_model || c.recommended_llm_model,
+          // Taken, not merged. The shipped defaults are `whisper-tiny` and
+          // `qwen2.5-0.5b` — never empty — so a `prev.x || recommendation`
+          // kept the smallest models on every machine and the whole
+          // hardware-aware recommendation never reached anyone. This screen
+          // only ever opens before the first run, so there is no choice of the
+          // user's here to preserve.
+          local_stt_model: c.recommended_stt_model,
+          local_llm_model: c.recommended_llm_model,
           compute_backend: c.recommended_backend,
           mic_device_id:
             prev.mic_device_id ||
@@ -384,7 +390,7 @@ export function Onboarding({ settings, onDone }: Props) {
                   <ul className="space-y-1 text-fg-muted">
                     <li>
                       CPU cores: {caps.cpu_cores} · {t("cap.cuda")}:{" "}
-                      {caps.cuda_available ? caps.cuda_device_name : "—"}
+                      {caps.gpu_name ?? "—"}
                     </li>
                     {caps.notes.map((n, i) => (
                       <li key={i}>• {n}</li>
