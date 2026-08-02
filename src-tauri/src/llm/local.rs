@@ -42,25 +42,32 @@ fn backend() -> Result<&'static LlamaBackend, String> {
 /// installed app keeps them beside the executable; a `cargo run` has them only
 /// in the build tree, which is the path the crate baked in as `BACKENDS_DIR`.
 ///
-/// Gated on Windows and not on a GPU feature, because that is where
-/// `dynamic-backends` is enabled. A default Windows build has its CPU backends
-/// as separate modules too, and skipping this there would leave llama.cpp with
-/// no backend at all rather than merely without a GPU.
+/// Not gated on a GPU feature. Even a build with none has its CPU backends as
+/// separate modules, so skipping this would leave llama.cpp with no backend at
+/// all rather than merely without a GPU.
 ///
 /// Loading nothing here does not fall back to a slow CPU path — there would be
 /// no CPU backend either, and every model load would fail.
-#[cfg(windows)]
 fn load_ggml_backends() {
     use llama_cpp_2::llama_backend::{load_backends_from_path, BACKENDS_DIR};
 
-    // Beside the executable wins over the build tree: a developer machine has
+    // The installed layout wins over the build tree: a developer machine has
     // both, and the libraries the binary shipped with are the ones it was
-    // tested against.
-    let installed = std::env::current_exe()
+    // tested against. Two candidates because the two layouts differ — Windows
+    // puts resources beside the executable, Linux puts them in
+    // `../lib/Vesper` — and asking both is cheaper than asking which platform
+    // this is.
+    let exe_dir = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .filter(|dir| holds_a_backend(dir));
-    match installed.or_else(|| BACKENDS_DIR.map(PathBuf::from)) {
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let mut installed = exe_dir.into_iter().flat_map(|dir| {
+        let resources = dir.join("..").join("lib").join("Vesper");
+        [dir, resources]
+    });
+    match installed
+        .find(|dir| holds_a_backend(dir))
+        .or_else(|| BACKENDS_DIR.map(PathBuf::from))
+    {
         Some(dir) => load_backends_from_path(&dir),
         None => tracing::warn!("no ggml backend directory found; local models will not load"),
     }
@@ -71,7 +78,6 @@ fn load_ggml_backends() {
 /// Probing for a CPU variant and not for `ggml-vulkan`: the CPU ones are always
 /// built when dynamic backends are on, so their absence means the directory is
 /// the wrong one rather than that the machine has no GPU.
-#[cfg(windows)]
 fn holds_a_backend(dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
@@ -83,10 +89,6 @@ fn holds_a_backend(dir: &Path) -> bool {
             .is_some_and(|name| name.starts_with("ggml-cpu"))
     })
 }
-
-/// Backends are linked in, so there is nothing to find.
-#[cfg(not(windows))]
-fn load_ggml_backends() {}
 
 /// What this machine offers, asked of ggml rather than guessed at.
 ///

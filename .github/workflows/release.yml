@@ -70,6 +70,15 @@ jobs:
           $sdk = (Get-ChildItem 'C:\VulkanSDK' | Sort-Object Name -Descending | Select-Object -First 1).FullName
           Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
           Add-Content -Path $env:GITHUB_PATH -Value "$sdk\Bin"
+      # MSBuild's tracker ignores `LongPathsEnabled`, and the nested
+      # `vulkan-shaders-gen` project pushes its log past MAX_PATH from the
+      # default workspace: `FileTracker : error FTK1011: could not create the
+      # new file tracking log file`. A short target directory is the fix, and
+      # it is the same one AGENTS.md documents for a local checkout.
+      - name: Short target directory (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value 'CARGO_TARGET_DIR=C:\vt'
       - run: npm ci
 
       # The signing key is what makes an update verifiable. Without these the

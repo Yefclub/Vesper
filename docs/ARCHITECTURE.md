@@ -58,12 +58,13 @@ SSE4.2 to AVX-512, picked at startup. The libraries are staged by `build.rs`
 into `src-tauri/gpu-backends/` and shipped as bundle resources, which on
 Windows puts them beside the executable — where ggml looks for them.
 
-Shared libraries are Windows-only. The symbol collision they solve is an MSVC
-link error; every other linker takes the first definition out of the archive.
-It matters for what ships: a `.so` beside a Linux binary is not on the loader
-path, since Tauri installs resources under `/usr/lib/Vesper` while the
-executable lives in `/usr/bin`. Linux and macOS therefore link statically, and
-`gpu-vulkan` compiles Vulkan straight into the binary there.
+Shared libraries are not optional anywhere. whisper-rs-sys and llama-cpp-sys-2
+each vendor their own ggml, and two static copies of those symbols is
+`LNK2005` on MSVC and `rust-lld: error: duplicate symbol` on Linux — the link
+fails on both. On Linux that leaves the loader with nothing to go on, since
+Tauri installs resources under `/usr/lib/Vesper` while the executable lives in
+`/usr/bin`, so `build.rs` adds an rpath of `$ORIGIN/../lib/Vesper` and the
+runtime search looks there too.
 
 **What the release actually carries today**: Vulkan on Windows and Linux, CPU
 on macOS. `gpu-cuda` builds and is wired end to end, but nothing publishes it

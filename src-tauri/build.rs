@@ -2,7 +2,30 @@ use std::path::PathBuf;
 
 fn main() {
     stage_ggml_backends();
+    find_libraries_beside_the_app();
     tauri_build::build()
+}
+
+/// Teach the Linux loader where the bundled libraries are.
+///
+/// llama and ggml are imported at load time, and on Linux nothing points at
+/// them: Tauri installs bundle resources under `/usr/lib/Vesper` while the
+/// executable is `/usr/bin/vesper`, and neither is a default search path. The
+/// app would install cleanly and then fail to start.
+///
+/// `$ORIGIN` is resolved by the dynamic loader at run time, not by a shell, so
+/// it survives being passed through verbatim. Both entries earn their place —
+/// the resource directory is where a deb, an rpm and an AppImage all put them,
+/// and `$ORIGIN` itself covers a binary run straight out of a build tree.
+///
+/// Windows needs none of this: a DLL beside the executable is already the first
+/// place it looks, which is exactly where the bundle puts them.
+fn find_libraries_beside_the_app() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        return;
+    }
+    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/Vesper");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
 }
 
 /// Where the bundler will look for ggml's backend libraries.

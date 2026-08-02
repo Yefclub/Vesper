@@ -80,8 +80,22 @@ whisper-rs = "0.16"
 # Vulkan reachable at all. `openmp` is off because it drags a runtime DLL into
 # the bundle for a gain the GPU backends make irrelevant.
 #
-# Statically linked everywhere except Windows — see the target section below.
-llama-cpp-2 = { version = "0.1.150", default-features = false }
+# `dynamic-link` is not a preference. `whisper-rs-sys` and `llama-cpp-sys-2` each
+# vendor their own ggml, and two static copies of those symbols is `LNK2005` on
+# MSVC and `rust-lld: error: duplicate symbol` on Linux — the link simply fails
+# on both. Shared libraries give each its own copy. `dynamic-backends` rides
+# along because it is only meaningful with shared libraries, and it is what lets
+# one binary pick Vulkan or AVX-512 on the machine it lands on.
+llama-cpp-2 = { version = "0.1.150", default-features = false, features = ["dynamic-link", "dynamic-backends"] }
+# Never named in the code. It is here so cargo hands `DEP_LLAMA_ROOT` and
+# `DEP_LLAMA_BACKENDS_DIR` to this crate's build script: `links` metadata only
+# reaches a *direct* dependent, and those two variables are the only pointers
+# that name the unit cargo is building right now. Everything else — newest
+# directory, matching feature set — is a guess that a second build output in the
+# same profile can defeat, and guessing wrong stages a mismatched `llama.dll`
+# next to the executable. Unified with the copy llama-cpp-2 already builds, so
+# it costs nothing.
+llama-cpp-sys-2 = { version = "0.1.150", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "blocking", "stream"] }
 # `net` is for the loopback server in the resume test; reqwest already pulls it in
 # transitively, so it costs nothing in the bundle.
@@ -101,36 +115,6 @@ tar = "0.4"
 keyring = { version = "4.1.6", features = ["apple-native-keyring-store"] }
 tauri-plugin-single-instance = "2.4.3"
 tracing-appender = "0.2.5"
-
-# Windows links llama and ggml as DLLs, and everywhere else does not.
-#
-# This is not a preference. `whisper-rs-sys` and `llama-cpp-sys-2` each vendor
-# their own ggml, and on MSVC two static copies of the same symbols is
-# `LNK2005: already defined` — the link simply fails. Shared libraries give each
-# its own copy and the link succeeds. Every other platform's linker takes the
-# first definition out of the archive and moves on, which is what the project
-# did before llama-cpp-2 and what it still does.
-#
-# Confining it to Windows matters for what ships. A `.so` next to a Linux binary
-# is not on the loader path — Tauri installs resources under `/usr/lib/Vesper`
-# while the executable lives in `/usr/bin` — so a dynamically linked Linux
-# bundle would not start at all. A `.dll` beside `vesper.exe` is exactly where
-# Windows looks.
-#
-# `dynamic-backends` rides along because it is only meaningful with shared
-# libraries. Without it, Vulkan is compiled straight into the binary, which is
-# the right answer on a platform that cannot ship the loadable kind anyway.
-[target.'cfg(windows)'.dependencies]
-llama-cpp-2 = { version = "0.1.150", default-features = false, features = ["dynamic-link", "dynamic-backends"] }
-# Never named in the code. It is here so cargo hands `DEP_LLAMA_ROOT` and
-# `DEP_LLAMA_BACKENDS_DIR` to this crate's build script: `links` metadata only
-# reaches a *direct* dependent, and those two variables are the only pointers
-# that name the unit cargo is building right now. Everything else — newest
-# directory, matching feature set — is a guess that a second build output in the
-# same profile can defeat, and guessing wrong stages a mismatched `llama.dll`
-# next to the executable. Unified with the copy llama-cpp-2 already builds, so
-# it costs nothing.
-llama-cpp-sys-2 = { version = "0.1.150", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
