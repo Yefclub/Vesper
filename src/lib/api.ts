@@ -78,11 +78,6 @@ export interface SearchHit {
   score: number;
 }
 
-export interface ChatMessage {
-  role: string;
-  content: string;
-}
-
 export interface MeetingInsights {
   summary: string;
   key_points: string[];
@@ -176,8 +171,6 @@ export const api = {
   pollLiveStt: () => invoke<LiveTranscript>("poll_live_stt"),
   summarize: (id: string, template?: string) =>
     invoke<MeetingInsights>("summarize_meeting", { id, template }),
-  chat: (id: string, question: string) => invoke<ChatMessage>("chat_meeting", { id, question }),
-  listChat: (id: string) => invoke<ChatMessage[]>("list_chat", { id }),
   importAudio: (path: string, title?: string) =>
     invoke<MeetingRecord>("import_audio", { path, title }),
   retranscribe: (id: string) => invoke<MeetingRecord>("retranscribe", { id }),

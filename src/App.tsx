@@ -12,12 +12,11 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
-import { FileAudio, MessageSquare, Settings, Sparkles } from "lucide-react";
+import { FileAudio, Settings, Sparkles } from "lucide-react";
 import {
   api,
   AppSettings,
   AudioDevice,
-  ChatMessage,
   formatDuration,
   LiveTranscript,
   MeetingRecord,
@@ -41,7 +40,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
 
-type Tab = "transcript" | "summary" | "chat";
+type Tab = "transcript" | "summary";
 
 /// Mirrors the accelerator registered in `src-tauri/src/lib.rs`. No command
 /// reports it, and a global shortcut nobody can see is a shortcut nobody uses.
@@ -114,8 +113,6 @@ function AppShell({
   const [meetingsLoaded, setMeetingsLoaded] = useState(false);
   const [searching, setSearching] = useState(false);
   const [tab, setTab] = useState<Tab>("transcript");
-  const [chat, setChat] = useState<ChatMessage[]>([]);
-  const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -132,10 +129,9 @@ function AppShell({
   const scrollRef = useRef<HTMLDivElement>(null);
   /// Whether the reading column is following the newest line. A ref, not state:
   /// it is written from a scroll handler at up to one frame per pixel, and this
-  /// component owns the meetings, the transcript, the chat and the recorder
-  /// status — a state write here would re-render the whole shell per frame.
+  /// component owns the meetings, the transcript and the recorder status — a
+  /// state write here would re-render the whole shell per frame.
   const pinnedRef = useRef(true);
-  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -169,9 +165,8 @@ function AppShell({
   const loadMeeting = useCallback(async (id: string) => {
     setSelectedId(id);
     try {
-      const [tr, c, m] = await Promise.all([
+      const [tr, m] = await Promise.all([
         api.getTranscript(id),
-        api.listChat(id),
         api.getMeeting(id),
       ]);
       setTranscript(tr);
@@ -181,7 +176,6 @@ function AppShell({
       // content and gives that effect something that changes when the
       // replacement is actually there.
       setTranscriptOwner(id);
-      setChat(c);
       if (m) {
         setMeetings((prev) => {
           const others = prev.filter((x) => x.id !== id);
@@ -356,22 +350,6 @@ function AppShell({
     [pinToBottom],
   );
 
-  // The composer grows with what is typed into it, between `min-h-9` and
-  // `max-h-40`, both of which stay in CSS so the clamp survives this write.
-  // `tab` is a dependency because the element only exists on the chat tab, so
-  // mounting it is what needs the first measurement.
-  useEffect(() => {
-    const el = composerRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }, [question, tab]);
-
-  /// `handleChat` appends the question, awaits, then appends the answer — so
-  /// the thread shows nothing at all in between. Keyed on the last message
-  /// rather than on `busy`, which is also raised by summarizing and importing.
-  const pending = busy && chat[chat.length - 1]?.role === "user";
-
   /// The dock and the hotkey both go through here, so the reminder cannot be
   /// skipped by starting a recording from the keyboard.
   ///
@@ -400,7 +378,6 @@ function AppShell({
       setStatus(await api.recorderStatus());
       setSelectedId(m.id);
       setTranscript({ segments: [] });
-      setChat([]);
       setTab("transcript");
       await refreshMeetings();
     } catch (e) {
@@ -442,22 +419,6 @@ function AppShell({
     // render as the new query. An effect runs after paint, which is one frame
     // of "no matches" — the exact flash the flag exists to prevent.
     setSearching(q.trim().length > 0);
-  }
-
-  async function handleChat() {
-    if (!selectedId || !question.trim()) return;
-    setBusy(true);
-    try {
-      const userMsg = { role: "user", content: question };
-      setChat((c) => [...c, userMsg]);
-      setQuestion("");
-      const ans = await api.chat(selectedId, userMsg.content);
-      setChat((c) => [...c, ans]);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
   }
 
   async function handleSummarize(template = "general") {
@@ -513,7 +474,6 @@ function AppShell({
     setSelectedId(null);
     setTranscript({ segments: [] });
     setTranscriptOwner(null);
-    setChat([]);
   }
 
   /// Back to the empty screen, on demand — there was no way to get there
@@ -524,7 +484,6 @@ function AppShell({
   /// showing it, so there is nothing to warn about either.
   function startNewMeeting() {
     clearWorkspace();
-    setQuestion("");
     setTab("transcript");
     setError(null);
   }
@@ -721,11 +680,10 @@ function AppShell({
                 items={[
                   { id: "transcript", label: t("tab.transcript") },
                   { id: "summary", label: t("tab.summary") },
-                  { id: "chat", label: t("tab.chat") },
                 ]}
               />
 
-              {/* The scroll container is the tab panel: the three panes swap
+              {/* The scroll container is the tab panel: the two panes swap
                   inside it, so the id follows the selected tab rather than
                   living on a pane that unmounts. */}
               <div
@@ -845,105 +803,8 @@ function AppShell({
                       )}
                     </motion.div>
                   )}
-
-                  {tab === "chat" && (
-                    <motion.div
-                      key="chat"
-                      {...fadeRise}
-                      className="mx-auto max-w-reading space-y-4"
-                      data-testid="chat-panel"
-                    >
-                      {chat.map((m, i) => (
-                        // Alignment lives on the row, not on the bubble: an
-                        // `ml-auto` on the bubble left the assistant with no
-                        // alignment class at all and the row with nothing to
-                        // hang a hover affordance off.
-                        <div
-                          key={i}
-                          className={`flex w-full ${
-                            m.role === "user" ? "justify-end" : "justify-start"
-                          }`}
-                        >
-                          {/* The bubble is what says "a person typed this". The
-                              model's answer is the document, so it gets no fill,
-                              no border and the full width. */}
-                          <div
-                            className={
-                              m.role === "user"
-                                ? "max-w-[85%] rounded-lg bg-surface-2 px-4 py-2 text-base"
-                                : "w-full p-0 text-base"
-                            }
-                          >
-                            {m.content}
-                          </div>
-                        </div>
-                      ))}
-                      {pending && (
-                        // Flat, full-width and already in the assistant's shape,
-                        // so nothing reflows when the real answer replaces it.
-                        <div className="flex w-full justify-start">
-                          <p className="shimmer-text w-full text-base">
-                            {t("chat.thinking")}
-                          </p>
-                        </div>
-                      )}
-                    </motion.div>
-                  )}
                 </AnimatePresence>
               </div>
-
-              {/* Pinned to the pane, outside the scroll container. It used to
-                  live inside it, which put a second scrollbar inside the first
-                  one. No `border-t` above it either — it carries its own border,
-                  and a divider 1px away from that is two hard divides in a row. */}
-              {tab === "chat" && (
-                <form
-                  className="px-6 pb-6"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    void handleChat();
-                  }}
-                >
-                  <div className="mx-auto flex max-w-reading items-end gap-1 rounded-lg border border-border bg-surface-2 p-1 focus-within:border-border-strong">
-                    <textarea
-                      ref={composerRef}
-                      value={question}
-                      rows={1}
-                      onChange={(e) => setQuestion(e.target.value)}
-                      onKeyDown={(e) => {
-                        // `isComposing` guards the IME: confirming a candidate
-                        // with Enter used to send the half-typed question.
-                        // Shift+Enter is the newline, which is why this is a
-                        // textarea and not the input it replaced — a pasted
-                        // multi-line question was invisible past line one.
-                        if (
-                          e.key === "Enter" &&
-                          !e.shiftKey &&
-                          !e.nativeEvent.isComposing
-                        ) {
-                          e.preventDefault();
-                          void handleChat();
-                        }
-                      }}
-                      placeholder={t("chat.placeholder")}
-                      aria-label={t("chat.placeholder")}
-                      className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-3 py-1 text-base outline-none placeholder:text-fg-subtle"
-                    />
-                    {/* Inside the field, and not `bg-accent`: one accent fill
-                        per screen, and the record dock owns it. */}
-                    <Button
-                      type="submit"
-                      variant="secondary"
-                      size="icon"
-                      disabled={busy || !question.trim()}
-                      title={t("action.send")}
-                      aria-label={t("action.send")}
-                    >
-                      <MessageSquare size={16} />
-                    </Button>
-                  </div>
-                </form>
-              )}
             </>
           ) : (
             <div className="flex flex-1 items-center justify-center p-8">
@@ -980,10 +841,10 @@ function AppShell({
             </div>
           )}
 
-          {/* The empty screen only. With a meeting open the transcript, the
-              summary and the chat own this column, and a Record button hanging
-              over them offers to start a second recording on top of the one the
-              header is already showing. */}
+          {/* The empty screen only. With a meeting open the transcript and the
+              summary own this column, and a Record button hanging over them
+              offers to start a second recording on top of the one the header is
+              already showing. */}
           <AnimatePresence>
             {!selected && !status?.recording && (
               <RecordDock
