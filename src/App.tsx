@@ -24,6 +24,7 @@ import {
   ModelInfo,
   RecorderStatus,
   SearchHit,
+  ShortcutStatus,
   StartGate,
 } from "./lib/api";
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
@@ -42,10 +43,6 @@ import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
 
 type Tab = "transcript" | "summary";
-
-/// Mirrors the accelerator registered in `src-tauri/src/lib.rs`. No command
-/// reports it, and a global shortcut nobody can see is a shortcut nobody uses.
-const RECORD_SHORTCUT = "Ctrl+Shift+R";
 
 export default function App() {
   const [bootLocale, setBootLocale] = useState("en");
@@ -121,6 +118,11 @@ function AppShell({
   const [updateNote, setUpdateNote] = useState<string | null>(null);
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [gate, setGate] = useState<StartGate>({ allowed: false });
+  /// What the backend says about the global accelerator. `null` until it
+  /// answers, and permanently `null` on a build whose backend does not report
+  /// it — in which case the app names the key it listens for and claims nothing
+  /// about the OS.
+  const [shortcut, setShortcut] = useState<ShortcutStatus | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [confirmingRecord, setConfirmingRecord] = useState(false);
   const [skipRecordReminder, setSkipRecordReminder] = useState(false);
@@ -200,9 +202,75 @@ function AppShell({
     }
   }, []);
 
+  /// These three sit above the effects that call them, and they are
+  /// `useCallback` rather than plain declarations for one reason: an effect
+  /// that lists them as dependencies re-registers when they change. A listener
+  /// registered once with `[]` kept the `t` of the first render, and
+  /// `i18n.tsx:41` builds `t` from a catalog that starts empty — so a gate
+  /// failure reached from the keyboard reported the literal `gate.local_stt`
+  /// instead of the sentence.
+  const handleStart = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const g = await api.canRecord();
+      setGate(g);
+      if (!g.allowed) {
+        setError(g.reason || t("gate.local_stt"));
+        return;
+      }
+      const m = await api.startRecording();
+      setStatus(await api.recorderStatus());
+      setSelectedId(m.id);
+      setTranscript({ segments: [] });
+      setTab("transcript");
+      await refreshMeetings();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [t, refreshMeetings]);
+
+  /// The dock and both keyboard paths go through here, so the reminder cannot
+  /// be skipped by starting a recording from the keyboard.
+  ///
+  /// Reads the preference from a ref rather than the closed-over value: the
+  /// global-hotkey listener outlives a settings change, so it would otherwise
+  /// keep the setting as it was at startup and go on asking after the user
+  /// opted out.
+  const requestStart = useCallback(() => {
+    if (confirmBeforeRecordingRef.current) {
+      setConfirmingRecord(true);
+      return;
+    }
+    void handleStart();
+  }, [handleStart]);
+
+  const handleStop = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const m = await api.stopRecording();
+      setStatus(await api.recorderStatus());
+      await refreshMeetings();
+      await loadMeeting(m.id);
+      setTab("summary");
+      await refreshGate();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [refreshMeetings, loadMeeting, refreshGate]);
+
   useEffect(() => {
     (async () => {
       void refreshDevices();
+      // Whether the OS granted the accelerator is not a startup failure: the
+      // in-app listener works regardless, so a rejection here leaves the note
+      // off rather than putting an error banner on the first screen.
+      setShortcut(await api.shortcutStatus().catch(() => null));
       try {
         await refreshMeetings();
         setModels(await api.listModels());
@@ -224,14 +292,26 @@ function AppShell({
   }, [refreshMeetings, refreshGate, refreshDevices]);
 
   useEffect(() => {
-    let unsubs: Array<() => void> = [];
+    /// `listen()` is a promise, and the cleanup below runs synchronously — so
+    /// it used to run against an empty array while the subscriptions were still
+    /// resolving. Under `React.StrictMode` (main.tsx) the mount→unmount→mount
+    /// cycle therefore left the first set attached forever and every event
+    /// fired twice in dev, which would have double-toggled the recorder the
+    /// moment the shortcut started working. `track` closes that: a
+    /// subscription that lands after teardown unsubscribes itself.
+    let live = true;
+    const unsubs: Array<() => void> = [];
+    const track = (un: () => void) => {
+      if (live) unsubs.push(un);
+      else un();
+    };
     (async () => {
-      unsubs.push(
+      track(
         await listen<LiveTranscript>("transcript://append", (e) => {
           setTranscript(e.payload);
         }),
       );
-      unsubs.push(
+      track(
         await listen<MeetingRecord>("meeting://ready", (e) => {
           setMeetings((prev) => {
             const rest = prev.filter((m) => m.id !== e.payload.id);
@@ -240,7 +320,7 @@ function AppShell({
           setSelectedId(e.payload.id);
         }),
       );
-      unsubs.push(
+      track(
         await listen("hotkey://toggle-record", async () => {
           try {
             const st = await api.recorderStatus();
@@ -252,9 +332,54 @@ function AppShell({
         }),
       );
     })();
-    return () => unsubs.forEach((u) => u());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return () => {
+      live = false;
+      unsubs.forEach((u) => u());
+    };
+  }, [handleStop, requestStart]);
+
+  /// The in-app half of the record shortcut, and the half that actually works.
+  ///
+  /// A webview `keydown` needs no grant from the OS — the global registration
+  /// does, and on a machine where another app already owns the combination it
+  /// is refused. This covers the focused case, which is exactly the case the
+  /// empty state's `<kbd>` describes. It does not replace the global shortcut:
+  /// unfocused is the case that matters most for a meeting recorder, since you
+  /// are in the call, not in Vesper.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      // `e.code`, not `e.key`: layout-independent, and the same `KeyR` the
+      // backend registers.
+      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.code !== "KeyR") return;
+      // Bubble phase and a tag guard, so a field the user is typing in wins.
+      // The capture phase would be right for a shortcut that must fire
+      // unconditionally; this is not one.
+      const el = e.target as HTMLElement | null;
+      if (el?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el?.tagName ?? "")) {
+        return;
+      }
+      // A dialog or the drawer is a question waiting for an answer. Starting a
+      // recording underneath one is not an answer.
+      if (confirmingRecord || pendingDelete || showSettings || showOnboarding) return;
+      // Not optional: Ctrl+Shift+R is WebView2's hard reload. Without it the
+      // dev build reloads the page and loses the recording in flight — and
+      // release builds disable the accelerator, so it looks correct in
+      // `tauri build` and misbehaves in `tauri dev`.
+      e.preventDefault();
+      if (status?.recording) void handleStop();
+      else requestStart();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    status?.recording,
+    confirmingRecord,
+    pendingDelete,
+    showSettings,
+    showOnboarding,
+    handleStop,
+    requestStart,
+  ]);
 
   // Debounced so typing does not fire one query per keystroke. Every run
   // supersedes the one before it, and a stale response that arrives after the
@@ -350,60 +475,6 @@ function AppShell({
     },
     [pinToBottom],
   );
-
-  /// The dock and the hotkey both go through here, so the reminder cannot be
-  /// skipped by starting a recording from the keyboard.
-  ///
-  /// Reads the preference from a ref rather than the closed-over value: the
-  /// hotkey listener is registered once on mount, so it would otherwise keep the
-  /// setting as it was at startup and go on asking after the user opted out.
-  function requestStart() {
-    if (confirmBeforeRecordingRef.current) {
-      setConfirmingRecord(true);
-      return;
-    }
-    void handleStart();
-  }
-
-  async function handleStart() {
-    setBusy(true);
-    setError(null);
-    try {
-      const g = await api.canRecord();
-      setGate(g);
-      if (!g.allowed) {
-        setError(g.reason || t("gate.local_stt"));
-        return;
-      }
-      const m = await api.startRecording();
-      setStatus(await api.recorderStatus());
-      setSelectedId(m.id);
-      setTranscript({ segments: [] });
-      setTab("transcript");
-      await refreshMeetings();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleStop() {
-    setBusy(true);
-    setError(null);
-    try {
-      const m = await api.stopRecording();
-      setStatus(await api.recorderStatus());
-      await refreshMeetings();
-      await loadMeeting(m.id);
-      setTab("summary");
-      await refreshGate();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function handlePauseResume() {
     try {
@@ -930,22 +1001,39 @@ function AppShell({
                     // the empty screen two primary actions that do the same thing,
                     // eight hundred pixels apart. The shortcut still belongs here,
                     // where there is room to name it.
-                    <div className="flex items-center justify-center gap-3">
-                      <Button
-                        size="md"
-                        variant="secondary"
-                        onClick={handleImport}
-                        disabled={busy}
-                      >
-                        {t("nav.import")}
-                      </Button>
-                      {!status?.recording && (
-                        <span className="flex items-center gap-2 text-2xs text-fg-subtle">
-                          {t("record.start")}
-                          <kbd className="inline-flex h-6 items-center rounded-xs border border-border bg-surface-2 px-2 font-sans text-2xs">
-                            {RECORD_SHORTCUT}
-                          </kbd>
-                        </span>
+                    <div>
+                      <div className="flex items-center justify-center gap-3">
+                        <Button
+                          size="md"
+                          variant="secondary"
+                          onClick={handleImport}
+                          disabled={busy}
+                        >
+                          {t("nav.import")}
+                        </Button>
+                        {!status?.recording && (
+                          <span className="flex items-center gap-2 text-2xs text-fg-subtle">
+                            {t("record.start")}
+                            {/* Named, always — the in-app listener above makes
+                                the key true whether or not the OS granted the
+                                global one. The literal is the fallback for a
+                                backend that does not report the accelerator
+                                yet, not a second claim about what is
+                                registered. */}
+                            <kbd className="inline-flex h-6 items-center rounded-xs border border-border bg-surface-2 px-2 font-sans text-2xs">
+                              {shortcut?.accelerator ?? "Ctrl+Shift+R"}
+                            </kbd>
+                          </span>
+                        )}
+                      </div>
+                      {/* Only when the backend says the OS refused it. The app
+                          may not advertise a global shortcut it does not have,
+                          and it may not stay silent about a key that works in
+                          only half the cases the user will try. */}
+                      {!status?.recording && shortcut?.registered === false && (
+                        <p className="mt-2 text-2xs text-fg-subtle">
+                          {t(shortcut.reason_key ?? "shortcut.unavailable")}
+                        </p>
                       )}
                     </div>
                   }

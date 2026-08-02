@@ -127,6 +127,19 @@ export interface StartGate {
   reason_key?: string | null;
 }
 
+/** Whether the OS accepted the global accelerator, and what it is.
+ *
+ *  The command that reports this lands with the backend change, so
+ *  `api.shortcutStatus()` rejects until then — every caller must tolerate a
+ *  `null` and name the key without a note. The in-app listener makes the key
+ *  work while the window is focused either way; only the note about the global
+ *  registration waits on the backend. */
+export interface ShortcutStatus {
+  registered: boolean;
+  accelerator: string;
+  reason_key?: string | null;
+}
+
 export interface OrModel {
   id: string;
   name: string;
@@ -158,6 +171,7 @@ export const api = {
   setReasoning: (enabled: boolean) => invoke<AppSettings>("set_reasoning", { enabled }),
   recorderStatus: () => invoke<RecorderStatus>("recorder_status"),
   canRecord: () => invoke<StartGate>("can_record"),
+  shortcutStatus: () => invoke<ShortcutStatus>("shortcut_status"),
   listDevices: () => invoke<AudioDevice[]>("list_audio_devices_cmd"),
   i18nCatalog: (locale: string) =>
     invoke<Record<string, string>>("get_i18n_catalog", { locale }),
