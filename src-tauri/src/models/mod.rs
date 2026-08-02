@@ -24,6 +24,17 @@ pub struct ModelInfo {
     pub path: String,
     pub download_url: Option<String>,
     pub size_hint_bytes: Option<u64>,
+    /// Bytes of an interrupted download still on disk, when there are any.
+    ///
+    /// Without this the app is honest but useless about a half-finished
+    /// transfer: it correctly reports the model as not installed and says
+    /// nothing about the 276 MB of 491 MB already sitting beside it, which the
+    /// downloader would pick up rather than re-fetch.
+    ///
+    /// It is "already downloaded", never "will resume": a `.part` written
+    /// before the ETag sidecar existed carries no validator, so the resume goes
+    /// out without `If-Range` and the server is free to answer from zero.
+    pub partial_bytes: Option<u64>,
     /// Expected SHA-256 of the artifact served by `download_url`.
     /// Taken from the Hugging Face LFS oid, which is the file digest.
     pub sha256: String,
@@ -149,6 +160,7 @@ pub fn list_models() -> Vec<ModelInfo> {
                 label: label.into(),
                 ready,
                 present,
+                partial_bytes: partial_bytes(&path),
                 path: path.display().to_string(),
                 download_url: Some(url.into()),
                 size_hint_bytes: Some(size),
@@ -156,6 +168,26 @@ pub fn list_models() -> Vec<ModelInfo> {
             }
         })
         .collect()
+}
+
+/// Where a download accumulates before it is verified and renamed into place.
+///
+/// One derivation, used by the transfer and by the reporting: two would let the
+/// drawer offer to continue a file the downloader never looks at.
+fn part_path(artifact: &Path) -> PathBuf {
+    artifact.with_extension("part")
+}
+
+/// How much of an interrupted download is on disk, if any.
+///
+/// A zero-length leftover reports `None` along with an absent one — there is
+/// nothing to continue in either case, and offering to resume 0 bytes is the
+/// same lie in a different shape.
+fn partial_bytes(artifact: &Path) -> Option<u64> {
+    std::fs::metadata(part_path(artifact))
+        .map(|m| m.len())
+        .ok()
+        .filter(|n| *n > 0)
 }
 
 /// Sidecar holding the digest this code verified for an artifact.
@@ -285,7 +317,7 @@ where
         .build()
         .map_err(|e| e.to_string())?;
 
-    let tmp = dest.with_extension("part");
+    let tmp = part_path(&dest);
     let mut pacer = ProgressPacer::new();
     let mut transfer = fetch_to_file(
         &client,
@@ -753,6 +785,39 @@ mod tests {
         std::fs::write(&artifact, b"too small to be a model").unwrap();
         write_artifact_marker(&artifact, &catalog_sha256("whisper-tiny").unwrap()).unwrap();
         assert!(!artifact_is_verified(&artifact, "whisper-tiny"));
+    }
+
+    /// The reporter's disk: `qwen2.5-0.5b/model.part` at 276 MB of 491 MB, and
+    /// an app that says only "not installed".
+    #[test]
+    fn a_part_file_is_reported_as_partial_bytes() {
+        let dir = tempdir().unwrap();
+        let artifact = dir.path().join("model.gguf");
+        std::fs::write(part_path(&artifact), vec![0u8; 4096]).unwrap();
+        assert_eq!(partial_bytes(&artifact), Some(4096));
+    }
+
+    #[test]
+    fn no_part_file_reports_none() {
+        let dir = tempdir().unwrap();
+        let artifact = dir.path().join("model.gguf");
+        assert_eq!(partial_bytes(&artifact), None);
+
+        // A zero-length leftover is not something to offer to continue.
+        std::fs::write(part_path(&artifact), b"").unwrap();
+        assert_eq!(partial_bytes(&artifact), None);
+    }
+
+    #[test]
+    fn a_ready_model_reports_no_partial() {
+        // A finished download is renamed into place and the `.part` goes with
+        // it, so the answer keys off the leftover and never off the artifact.
+        let dir = tempdir().unwrap();
+        let artifact = dir.path().join("model.bin");
+        std::fs::write(&artifact, vec![0u8; 1_100_000]).unwrap();
+        write_artifact_marker(&artifact, &catalog_sha256("whisper-tiny").unwrap()).unwrap();
+        assert!(artifact_is_verified(&artifact, "whisper-tiny"));
+        assert_eq!(partial_bytes(&artifact), None);
     }
 
     #[test]
