@@ -89,13 +89,12 @@ impl DualChannelRecorder {
 
     pub fn elapsed_ms(&self) -> u64 {
         let g = self.inner.lock();
-        let mut total = g.elapsed_before_pause_ms;
-        if let Some(start) = g.start {
-            if !self.paused.load(Ordering::SeqCst) {
-                total += start.elapsed().as_millis() as u64;
-            }
-        }
-        total
+        elapsed(
+            g.start,
+            g.elapsed_before_pause_ms,
+            self.paused.load(Ordering::SeqCst),
+            Instant::now(),
+        )
     }
 
     pub fn start(
@@ -160,8 +159,34 @@ impl DualChannelRecorder {
                     eprintln!("mic start failed: {e}");
                     return;
                 }
+                let mut stream_paused = false;
                 while !stop.load(Ordering::SeqCst) {
-                    if paused.load(Ordering::SeqCst) {
+                    let want_pause = paused.load(Ordering::SeqCst);
+                    match capture_step(want_pause, stream_paused) {
+                        StreamAction::EnterPause => {
+                            stream.pause();
+                            stream_paused = true;
+                            // Chunks already in the ring are pre-pause audio and
+                            // belong in the recording, so take them now.
+                            while let Some(chunk) = stream.poll_chunk() {
+                                let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                                inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                            }
+                        }
+                        StreamAction::LeavePause => {
+                            stream.resume();
+                            stream_paused = false;
+                        }
+                        StreamAction::StayPaused | StreamAction::Poll => {}
+                    }
+                    if want_pause {
+                        // Nothing is arriving; a meter frozen at the last
+                        // pre-pause value says the opposite.
+                        {
+                            let mut g = inner_mic.lock();
+                            g.levels.me_peak = 0.0;
+                            g.levels.me_rms = 0.0;
+                        }
                         thread::sleep(Duration::from_millis(20));
                         continue;
                     }
@@ -207,8 +232,34 @@ impl DualChannelRecorder {
                 {
                     inner_sys.lock().system_loopback_active = true;
                 }
+                let mut stream_paused = false;
                 while !stop_sys.load(Ordering::SeqCst) {
-                    if paused_sys.load(Ordering::SeqCst) {
+                    let want_pause = paused_sys.load(Ordering::SeqCst);
+                    match capture_step(want_pause, stream_paused) {
+                        StreamAction::EnterPause => {
+                            stream.pause();
+                            stream_paused = true;
+                            // Chunks already in the ring are pre-pause audio and
+                            // belong in the recording, so take them now.
+                            while let Some(chunk) = stream.poll_chunk() {
+                                let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                                inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                            }
+                        }
+                        StreamAction::LeavePause => {
+                            stream.resume();
+                            stream_paused = false;
+                        }
+                        StreamAction::StayPaused | StreamAction::Poll => {}
+                    }
+                    if want_pause {
+                        // Nothing is arriving; a meter frozen at the last
+                        // pre-pause value says the opposite.
+                        {
+                            let mut g = inner_sys.lock();
+                            g.levels.others_peak = 0.0;
+                            g.levels.others_rms = 0.0;
+                        }
                         thread::sleep(Duration::from_millis(20));
                         continue;
                     }
@@ -318,6 +369,49 @@ impl DualChannelRecorder {
     pub fn flush_recording_for_test(&self, path: &Path) -> Result<(), CaptureError> {
         let g = self.inner.lock();
         write_dual_wav(path, g.sample_rate, &g.mic_samples, &g.sys_samples)
+    }
+}
+
+/// What a capture worker owes the backend on this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamAction {
+    /// The clock is running: take whatever the stream has.
+    Poll,
+    /// First tick of a pause. Stop the backend's delivery, then take what is
+    /// already in the ring — that audio is from before the pause.
+    EnterPause,
+    /// Still paused. The backend is already stopped; touch nothing.
+    StayPaused,
+    /// First tick after a resume. Start delivery again before polling, or the
+    /// first poll returns nothing and the next one returns a gap.
+    LeavePause,
+}
+
+/// The pause edge, as a value a test can assert on.
+///
+/// Flipping the worker's own `continue` is not a pause: flexaudio keeps filling
+/// a 50-chunk (1 s) DROP_OLDEST ring, and the first poll after a resume splices
+/// that second of pause audio into the recording. Only the edges may talk to the
+/// backend, so a stray extra `pause()` cannot discard a chunk mid-pause.
+fn capture_step(want_pause: bool, was_paused: bool) -> StreamAction {
+    match (want_pause, was_paused) {
+        (true, false) => StreamAction::EnterPause,
+        (true, true) => StreamAction::StayPaused,
+        (false, true) => StreamAction::LeavePause,
+        (false, false) => StreamAction::Poll,
+    }
+}
+
+/// The recording clock at `now`: everything before the current pause, plus the
+/// running span when the clock is not paused.
+///
+/// Lifted out of `elapsed_ms` so the paused case is reachable without an audio
+/// device — the WAV's sample count and this number have to agree, and only one
+/// of the two can be tested here.
+fn elapsed(start: Option<Instant>, before_ms: u64, paused: bool, now: Instant) -> u64 {
+    match start {
+        Some(start) if !paused => before_ms + now.duration_since(start).as_millis() as u64,
+        _ => before_ms,
     }
 }
 
@@ -463,6 +557,31 @@ pub fn read_dual_wav(path: &Path) -> Result<(Vec<i16>, Vec<i16>, u32), CaptureEr
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn entering_pause_drains_then_stops_the_stream() {
+        // Only the false→true edge may touch the backend; every later paused
+        // tick has to leave the already-stopped stream alone.
+        assert_eq!(capture_step(true, false), StreamAction::EnterPause);
+        assert_eq!(capture_step(true, true), StreamAction::StayPaused);
+    }
+
+    #[test]
+    fn leaving_pause_resumes_before_polling() {
+        assert_eq!(capture_step(false, true), StreamAction::LeavePause);
+        assert_eq!(capture_step(false, false), StreamAction::Poll);
+    }
+
+    #[test]
+    fn a_paused_clock_does_not_advance() {
+        let start = Instant::now();
+        let now = start + Duration::from_secs(30);
+        // 10s recorded, then 30s of wall clock spent paused.
+        assert_eq!(elapsed(Some(start), 10_000, true, now), 10_000);
+        assert_eq!(elapsed(Some(start), 10_000, false, now), 40_000);
+        // `pause()` takes `start`, so a paused recorder has none to run from.
+        assert_eq!(elapsed(None, 10_000, false, now), 10_000);
+    }
 
     #[test]
     fn write_and_read_wav_roundtrip_preserves_channels() {
