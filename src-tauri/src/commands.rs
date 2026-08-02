@@ -4,13 +4,17 @@ use crate::audio::devices::{list_audio_devices, AudioDevice};
 use crate::db::{Database, KeyHome};
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::chat::ChatMessage;
-use crate::domain::export::{export_meeting, ExportFormat};
+use crate::domain::export::{export_meeting, safe_file_stem, ExportFormat};
 use crate::domain::gate::{can_start_recording_with, StartGate};
 use crate::domain::i18n::{catalog, t, Locale};
-use crate::domain::job::{MeetingEvent, MeetingRecord, MeetingStatus};
+use crate::domain::job::{
+    MeetingEvent, MeetingPhase, MeetingProgress, MeetingRecord, MeetingStatus,
+};
 use crate::domain::search::SearchHit;
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
+use crate::domain::shortcut::ShortcutStatus;
 use crate::domain::summary::{MeetingInsights, SummaryTemplate};
+use crate::domain::title::{fallback_title, is_fallback_title, parse_title};
 use crate::domain::transcript::LiveTranscript;
 use crate::llm::service::LlmService;
 use crate::models::{download_model_with_progress, list_models, DownloadProgress, ModelInfo};
@@ -152,6 +156,12 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
         )
     };
     settings.validate_models().map_err(|e| e.to_string())?;
+    // The WebView is the trust boundary, so "it comes from our own front end" is
+    // not a validation: a value outside this pair would be written to the row and
+    // handed back to the window on every boot.
+    if settings.theme != "light" && settings.theme != "dark" {
+        return Err("invalid theme: expected `light` or `dark`".into());
+    }
     // Only an actual change counts as a pick: every save comes through here, and a
     // save that touched the microphone must not reshuffle the model list.
     if settings.openrouter_llm_model != previous_llm_model {
@@ -390,9 +400,15 @@ pub fn start_recording(
     }
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let title = title
-        .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| format!("Meeting {}", chrono::Local::now().format("%Y-%m-%d %H:%M")));
+    // Local time here while `created_at` above is UTC, on purpose: a title is a
+    // label frozen at creation, and the sortable timestamp is the one that must
+    // not move. `is_fallback_title` recognises what this writes, which is what
+    // lets a generated title replace it and nothing else.
+    let given = title.filter(|t| !t.trim().is_empty());
+    // A name the caller supplied is the user's from the start; only the date
+    // label is ours to replace once a summary exists.
+    let title_locked = given.is_some();
+    let title = given.unwrap_or_else(|| fallback_title(chrono::Local::now()));
     let audio_path = recordings_dir().join(format!("{id}.wav"));
     state
         .recorder
@@ -419,6 +435,7 @@ pub fn start_recording(
         action_items: None,
         key_points: None,
         project: None,
+        title_locked,
     };
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
@@ -499,6 +516,13 @@ pub async fn stop_recording(
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
     *state.active_meeting.lock() = None;
+    // First point where the command can no longer fail early: the recording is
+    // on disk and the row knows where. Announcing a phase before this would
+    // leave the window on a phase for a command that then returned an error.
+    let _ = app.emit(
+        "meeting://progress",
+        &MeetingProgress::new(&id, MeetingPhase::Saving),
+    );
 
     // Wait for a live poll that is still transcribing before reading the
     // transcript. Without this, stopping mid-chunk reads a transcript that is
@@ -509,6 +533,10 @@ pub async fn stop_recording(
 
     let settings = state.settings.lock().clone();
     let mut live = state.live.lock().get(&id).cloned().unwrap_or_default();
+    let _ = app.emit(
+        "meeting://progress",
+        &MeetingProgress::new(&id, MeetingPhase::Transcribing),
+    );
 
     if live.segments().is_empty() {
         // Nothing was transcribed live — cloud STT down, or a recording short
@@ -537,7 +565,8 @@ pub async fn stop_recording(
                 .await
             {
                 Ok(chunks) => apply_stt_chunks(&mut live, &chunks),
-                Err(e) => tracing::warn!("final chunk could not be transcribed: {e}"),
+                // Same reason as the summary above: the error names the model.
+                Err(_) => tracing::warn!("final chunk could not be transcribed"),
             }
         }
     }
@@ -550,25 +579,48 @@ pub async fn stop_recording(
         .map_err(|e| e.to_string())?;
     state.db.upsert_meeting(&meeting)?;
 
+    let mut done = MeetingProgress::new(&id, MeetingPhase::Ready);
     if settings.auto_summarize && !meeting.transcript_text.is_empty() {
-        let _ = app.emit("meeting://summarizing", &id);
-        let insights = state
+        let _ = app.emit(
+            "meeting://progress",
+            &MeetingProgress::new(&id, MeetingPhase::Summarizing),
+        );
+        match state
             .llm
             .summarize(
                 &settings,
                 &meeting.transcript_text,
                 SummaryTemplate::General,
             )
-            .await?;
-        state.db.save_insights(&id, &insights)?;
-        meeting.summary = Some(insights.summary.clone());
-        meeting.action_items = Some(insights.action_items_text());
-        meeting.key_points = Some(insights.key_points_text());
-        meeting.status = MeetingStatus::Ready;
-        meeting.updated_at = chrono::Utc::now().to_rfc3339();
-        state.db.upsert_meeting(&meeting)?;
+            .await
+        {
+            Ok(insights) => {
+                state.db.save_insights(&id, &insights)?;
+                meeting.summary = Some(insights.summary.clone());
+                meeting.action_items = Some(insights.action_items_text());
+                meeting.key_points = Some(insights.key_points_text());
+                meeting.status = MeetingStatus::Ready;
+                name_meeting(&state, &settings, &mut meeting, &insights.summary).await;
+                meeting.updated_at = chrono::Utc::now().to_rfc3339();
+                state.db.upsert_meeting(&meeting)?;
+            }
+            // The transcript is already saved and the meeting is already Ready,
+            // so propagating this told the user their recording was lost when
+            // only the summary was. Report the summary, keep the meeting.
+            Err(e) => {
+                // The provider's error is not repeated. It carries the model id,
+                // which arrives from the WebView, and this lands in a file on the
+                // user's disk. `done` below still carries the detail to the
+                // window, which is where the person who can act on it is looking.
+                tracing::warn!("auto-summary failed");
+                done = MeetingProgress::summary_failed(&id, &e);
+            }
+        }
     }
 
+    // One terminal phase, emitted once: a `ready` after a `summary_failed` would
+    // supersede it on the single channel and the failure would never be seen.
+    let _ = app.emit("meeting://progress", &done);
     let _ = app.emit("meeting://ready", &meeting);
     Ok(meeting)
 }
@@ -617,6 +669,47 @@ pub async fn poll_live_stt(
     Ok(snapshot)
 }
 
+/// Replace the date label with a title read out of the meeting itself.
+///
+/// Every failure is silent by design. A generated title is a guess: if the model
+/// is missing, refuses or answers with nothing usable, the meeting keeps the
+/// label it was born with and the user is told nothing, because there is nothing
+/// they could do about it. Anything that is *not* the date label — a name the
+/// user typed, an import's file stem — is never touched.
+///
+/// Sends the summary and an excerpt of the transcript to whichever provider the
+/// user already chose for summarisation. Under OpenRouter that is a second
+/// billed call and the excerpt leaves the machine again; under the local model
+/// nothing leaves at all.
+async fn name_meeting(
+    state: &AppState,
+    settings: &AppSettings,
+    meeting: &mut MeetingRecord,
+    summary: &str,
+) {
+    // Provenance first, shape second. The flag is the answer for anything named
+    // since it existed; the shape test still covers meetings recorded before the
+    // column, whose flag defaults to false and whose title is genuinely ours.
+    if meeting.title_locked || !is_fallback_title(&meeting.title) {
+        return;
+    }
+    match state
+        .llm
+        .title(settings, summary, &meeting.transcript_text)
+        .await
+    {
+        Ok(raw) => match parse_title(&raw) {
+            Some(title) => meeting.title = title,
+            None => tracing::warn!("the model answered with no usable title"),
+        },
+        // The provider's error is not repeated. It carries the model id, which
+        // arrives from the WebView, and this now lands in a file on the user's
+        // disk. A failed title is a nuisance, not something worth widening what
+        // the log holds.
+        Err(_) => tracing::warn!("title generation failed"),
+    }
+}
+
 #[tauri::command]
 pub async fn summarize_meeting(
     state: State<'_, Arc<AppState>>,
@@ -644,6 +737,9 @@ pub async fn summarize_meeting(
     m.summary = Some(insights.summary.clone());
     m.action_items = Some(insights.action_items_text());
     m.key_points = Some(insights.key_points_text());
+    // Re-summarising is also the way an old meeting still carrying its date
+    // label gets a real name.
+    name_meeting(&state, &settings, &mut m, &insights.summary).await;
     m.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&m)?;
     Ok(insights)
@@ -698,11 +794,14 @@ pub async fn import_audio(
     let (pcm, sr) = decode_audio_file(&path).map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
-        path.file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Imported meeting".into())
-    });
+    let given = title
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()));
+    // A supplied name and a file stem are both real names — an imported
+    // `weekly-sync.wav` is called that on purpose, and the generator has no
+    // business renaming it. Only the last resort is ours.
+    let title_locked = given.is_some();
+    let title = given.unwrap_or_else(|| "Imported meeting".into());
     // Persist a dual-channel WAV copy under recordings for retranscription
     let wav_path = recordings_dir().join(format!("{id}.wav"));
     crate::audio::capture::write_dual_wav(&wav_path, sr, &pcm, &[]).map_err(|e| e.to_string())?;
@@ -719,6 +818,7 @@ pub async fn import_audio(
         action_items: None,
         key_points: None,
         project: None,
+        title_locked,
     };
     state.db.upsert_meeting(&meeting)?;
     let settings = state.settings.lock().clone();
@@ -912,6 +1012,65 @@ fn is_minisign_key_line(line: &str) -> bool {
         .decode(line)
         .map(|raw| raw.len() == 42 && raw.starts_with(b"Ed"))
         .unwrap_or(false)
+}
+
+/// Whether the OS granted the global accelerator, and which one it is.
+///
+/// Registration happens once during setup; this only reads the result, so the
+/// window can render the key it will actually get instead of a hardcoded string
+/// derived from nothing the backend reports.
+#[tauri::command]
+pub fn shortcut_status(status: State<'_, ShortcutStatus>) -> ShortcutStatus {
+    status.inner().clone()
+}
+
+/// Rename a meeting.
+///
+/// The typed name goes through the same `parse_title` as the model's answer —
+/// the WebView is the trust boundary, and a title reaches a filename, a PDF
+/// header and an FTS index. `upsert_meeting` re-indexes search in the same
+/// transaction, so the new name is findable immediately.
+#[tauri::command]
+pub fn rename_meeting(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    title: String,
+) -> Result<MeetingRecord, String> {
+    let title = parse_title(&title).ok_or_else(|| "a meeting needs a name".to_string())?;
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    meeting.title = title;
+    // From here the name is the user's. Nothing generated replaces it, however
+    // much the shape of what they typed happens to resemble the date label.
+    meeting.title_locked = true;
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    state.db.upsert_meeting(&meeting)?;
+    Ok(meeting)
+}
+
+/// The filename the export dialog should open with.
+///
+/// The stem is the meeting's own title, made safe for the filesystem here rather
+/// than in the front end: the rules are Windows' and a sanitiser written in
+/// TypeScript could not be covered by any test this repo runs.
+#[tauri::command]
+pub fn suggested_export_name(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    format: String,
+) -> Result<String, String> {
+    let fmt = ExportFormat::from_ext(&format).ok_or_else(|| "unsupported format".to_string())?;
+    let meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    Ok(format!(
+        "{}.{}",
+        safe_file_stem(&meeting.title),
+        fmt.extension()
+    ))
 }
 
 #[cfg(test)]

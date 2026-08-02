@@ -21,6 +21,83 @@ impl ExportFormat {
             _ => None,
         }
     }
+
+    /// The extension a suggested filename carries. Derived from the parsed
+    /// format rather than echoed from the caller's string, so the name offered
+    /// in the dialog is always one `from_ext` accepts back.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Markdown => "md",
+            Self::Pdf => "pdf",
+            Self::Docx => "docx",
+        }
+    }
+}
+
+/// Characters Windows refuses in a path component.
+const RESERVED: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+/// MS-DOS device names, which are still not usable filenames, with or without
+/// an extension: `CON.md` opens the console, not a file.
+const DEVICE_NAMES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+
+/// NTFS counts 255 UTF-16 code units per path component and the caller appends
+/// an extension. Counting units rather than chars is the honest measure: one
+/// emoji is two of them.
+const MAX_STEM_UNITS: usize = 240;
+
+/// Turn a meeting title into a filename stem the OS will actually accept.
+///
+/// Five rule classes, not one, because each fails differently: a reserved char
+/// is refused outright, a control char is refused by some APIs and silently
+/// mangled by others, a trailing dot or space is **stripped silently** so the
+/// dialog and the file on disk disagree about the name, a device name resolves
+/// to hardware, and an over-long component is refused whole. A generated title
+/// hits the first of these routinely — `Client call: Q3 budget` is exactly the
+/// shape a model produces.
+pub fn safe_file_stem(title: &str) -> String {
+    // Reserved chars separate rather than substitute: `Client call: Q3 budget`
+    // becomes `Client call - Q3 budget`, which still reads as a title, instead
+    // of `Client call- Q3 budget`, which reads as a bug.
+    let cleaned: String = title.chars().filter(|c| !c.is_control()).collect();
+    let joined = cleaned
+        .split(|c| RESERVED.contains(&c))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" - ");
+
+    let mut stem = String::new();
+    let mut units = 0usize;
+    for ch in joined.chars() {
+        let width = ch.len_utf16();
+        if units + width > MAX_STEM_UNITS {
+            break;
+        }
+        units += width;
+        stem.push(ch);
+    }
+
+    // After the cut, not before: the cut can expose a trailing dot of its own.
+    let stem = stem.trim_end_matches(['.', ' ']);
+    if stem.is_empty() || is_device_name(stem) {
+        return "meeting".into();
+    }
+    stem.into()
+}
+
+fn is_device_name(stem: &str) -> bool {
+    let base = stem.split('.').next().unwrap_or(stem).trim();
+    let upper = base.to_ascii_uppercase();
+    if DEVICE_NAMES.contains(&upper.as_str()) {
+        return true;
+    }
+    // COM1-9 and LPT1-9; COM0 is not reserved.
+    let bytes = upper.as_bytes();
+    (upper.starts_with("COM") || upper.starts_with("LPT"))
+        && bytes.len() == 4
+        && bytes[3].is_ascii_digit()
+        && bytes[3] != b'0'
 }
 
 /// Build canonical markdown for a meeting export.
@@ -182,5 +259,74 @@ mod tests {
         assert_eq!(ExportFormat::from_ext("PDF"), Some(ExportFormat::Pdf));
         assert_eq!(ExportFormat::from_ext("docx"), Some(ExportFormat::Docx));
         assert_eq!(ExportFormat::from_ext("txt"), None);
+    }
+
+    #[test]
+    fn every_format_suggests_an_extension_it_accepts_back() {
+        for fmt in [
+            ExportFormat::Markdown,
+            ExportFormat::Pdf,
+            ExportFormat::Docx,
+        ] {
+            assert_eq!(ExportFormat::from_ext(fmt.extension()), Some(fmt));
+        }
+    }
+
+    #[test]
+    fn a_colon_in_the_title_does_not_reach_the_filesystem() {
+        assert_eq!(
+            safe_file_stem("Client call: Q3 budget"),
+            "Client call - Q3 budget"
+        );
+        assert_eq!(safe_file_stem("Roadmap 2026/2027"), "Roadmap 2026 - 2027");
+        for title in ["a<b", "a>b", "a\"b", "a/b", "a\\b", "a|b", "a?b", "a*b"] {
+            let stem = safe_file_stem(title);
+            assert!(
+                !stem.chars().any(|c| RESERVED.contains(&c)),
+                "{title} produced {stem}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_control_character_never_reaches_the_name() {
+        let stem = safe_file_stem("Sprint\u{7}review\u{1b}");
+        assert_eq!(stem, "Sprintreview");
+        assert!(!stem.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn a_trailing_dot_is_stripped_before_the_dialog_sees_it() {
+        // Windows strips these silently, so the dialog and the file on disk end
+        // up disagreeing about the name unless we strip them first.
+        assert_eq!(safe_file_stem("Retro."), "Retro");
+        assert_eq!(safe_file_stem("Retro. "), "Retro");
+        assert_eq!(safe_file_stem("..."), "meeting");
+        assert_eq!(safe_file_stem("   "), "meeting");
+        assert_eq!(safe_file_stem(""), "meeting");
+    }
+
+    #[test]
+    fn a_device_name_is_not_a_filename() {
+        for title in ["CON", "con", "NUL.md", "aux", "COM1", "lpt9"] {
+            assert_eq!(safe_file_stem(title), "meeting", "{title}");
+        }
+        // Only the exact names are reserved.
+        assert_eq!(safe_file_stem("CONTRACT review"), "CONTRACT review");
+        assert_eq!(safe_file_stem("COM0"), "COM0");
+        assert_eq!(safe_file_stem("COM10"), "COM10");
+    }
+
+    #[test]
+    fn an_over_long_title_is_cut_to_one_path_component() {
+        let stem = safe_file_stem(&"ação ".repeat(200));
+        assert!(stem.chars().map(char::len_utf16).sum::<usize>() <= MAX_STEM_UNITS);
+        assert!(!stem.ends_with(' '));
+        assert!(stem.starts_with("ação"));
+
+        // Counting chars instead of UTF-16 units would let this one through at
+        // twice the length the filesystem allows.
+        let emoji = safe_file_stem(&"\u{1f389}".repeat(200));
+        assert_eq!(emoji.chars().count(), MAX_STEM_UNITS / 2);
     }
 }
