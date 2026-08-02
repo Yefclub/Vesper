@@ -117,17 +117,31 @@ pub fn parse_title(raw: &str) -> Option<String> {
 
     let cut: String = t.chars().take(MAX_TITLE_CHARS).collect();
     let cut = cut.trim_end();
-    // A title has to contain something readable. Whisper writes `[BLANK_AUDIO]`
-    // and friends for silence, and a model handed nothing but those answers with
-    // them — a recording of an empty room came out named `: [BLANK_AUDIO]?`.
-    // Rejecting here rather than stripping the markers: a model that had only
-    // silence to work with has not named anything, and the date label is the
-    // honest fallback.
-    let usable = cut
-        .split(['[', ']'])
-        .step_by(2)
-        .any(|outside| outside.chars().any(char::is_alphanumeric));
-    (!cut.is_empty() && usable).then(|| cut.to_string())
+    // A title has to say something outside a marker. Whisper writes `[BLANK_AUDIO]`
+    // for silence and `(downbeat music)`, `(music)`, `(applause)` for anything it
+    // heard but could not transcribe, and a model handed nothing else answers
+    // with them — two recordings came out named `: [BLANK_AUDIO]?` and
+    // `: (downbeat music)`.
+    //
+    // Rejecting rather than stripping: a model that had only markers to work with
+    // has not named anything, and the date label is the honest fallback. A title
+    // that merely *contains* one — "Weekly sync (Q3)" — still has words of its
+    // own outside it and passes.
+    (!cut.is_empty() && names_something(cut)).then(|| cut.to_string())
+}
+
+/// Whether anything outside a `[...]` or `(...)` span is alphanumeric.
+fn names_something(title: &str) -> bool {
+    let mut depth = 0usize;
+    for ch in title.chars() {
+        match ch {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            c if depth == 0 && c.is_alphanumeric() => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -142,12 +156,20 @@ mod tests {
         assert_eq!(parse_title(": [BLANK_AUDIO]?"), None);
         assert_eq!(parse_title("[BLANK_AUDIO]"), None);
         assert_eq!(parse_title("[ Silence ]"), None);
+        // Whisper's other shape, for audio it heard but could not transcribe.
+        assert_eq!(parse_title(": (downbeat music)"), None);
+        assert_eq!(parse_title("(music)"), None);
+        assert_eq!(parse_title("(applause) [BLANK_AUDIO]"), None);
         assert_eq!(parse_title("**\"[BLANK_AUDIO]\"**"), None);
         // A real title keeps working, including one that happens to bracket
         // something inside it.
         assert_eq!(
             parse_title("Weekly sync [Q3]").as_deref(),
             Some("Weekly sync [Q3]")
+        );
+        assert_eq!(
+            parse_title("Weekly sync (Q3)").as_deref(),
+            Some("Weekly sync (Q3)")
         );
     }
 

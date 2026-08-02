@@ -76,7 +76,11 @@ export function Tabs<T extends string>({
       ref={barRef}
       role="tablist"
       onKeyDown={onKeyDown}
-      className={clsx("flex gap-1 border-b border-border", className)}
+      // No rule of its own. In the meeting pane the tablist is bound to a
+      // centred content column, and a border drawn from here started and stopped
+      // in mid-air a couple of hundred pixels short of the card on either side.
+      // The rule belongs to whatever spans the full width; the caller draws it.
+      className={clsx("flex gap-1", className)}
     >
       {items.map((item) => {
         const active = item.id === value;

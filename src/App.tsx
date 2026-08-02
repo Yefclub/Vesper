@@ -925,93 +925,97 @@ function AppShell({
 
             {selected ? (
               <>
-                {/* `max-w-pane` (1024px) is the card's content column. The
-                    meeting header and the tab bar bound to it so the rules they
-                    carry stop on the same two vertical edges, instead of running
-                    to the card's own border and putting a full-width divide
-                    inside a rounded corner. */}
-                <div className="mx-auto flex w-full max-w-pane items-center justify-between border-b border-border px-6 py-3">
-                  <div className="min-w-0">
-                    {/* Click to edit, in place. `bg-transparent` and the same
-                        size and weight as the heading it replaces, so the title
-                        does not read as a form field at rest — the field is the
-                        heading, not a control beside it. */}
-                    {renaming ? (
-                      <input
-                        autoFocus
-                        data-testid="rename-input"
-                        aria-label={t("nav.rename")}
-                        defaultValue={selected.title}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            void commitRename(selected.id, e.currentTarget.value);
-                          } else if (e.key === "Escape") {
-                            e.preventDefault();
-                            // Put the original back before closing. A browser
-                            // that fires blur on the way out would otherwise
-                            // commit the abandoned edit; with the value
-                            // restored, that commit is a no-op.
-                            e.currentTarget.value = selected.title;
-                            setRenaming(false);
-                          }
-                        }}
-                        onBlur={(e) => void commitRename(selected.id, e.currentTarget.value)}
-                        className={`w-full rounded-sm bg-transparent text-base font-medium ${FOCUS}`}
-                      />
-                    ) : (
-                      // The control is inside the heading rather than being
-                      // the heading: an `<h1 onClick>` is a click target with
-                      // no keyboard route, and every other affordance in this
-                      // app has one. `title` also gives the full name back on
-                      // hover once the heading truncates.
-                      <h1 className="truncate text-base font-medium">
-                        <button
-                          type="button"
-                          onClick={() => setRenaming(true)}
-                          title={selected.title}
+                {/* The rule spans the card; the content sits on the column.
+                    Binding the rule to `max-w-pane` as well left it starting and
+                    stopping a couple of hundred pixels short of the card on
+                    either side — a hairline floating inside a panel, aligned to
+                    nothing, above a title indented from an edge that was still
+                    visible behind it. Chrome spans, prose is measured, which is
+                    how the window header and the sidebar already work. */}
+                <div className="border-b border-border">
+                  <div className="mx-auto flex w-full max-w-pane items-center justify-between px-6 py-3">
+                    <div className="min-w-0">
+                      {/* Click to edit, in place. `bg-transparent` and the same
+                          size and weight as the heading it replaces, so the title
+                          does not read as a form field at rest — the field is the
+                          heading, not a control beside it. */}
+                      {renaming ? (
+                        <input
+                          autoFocus
+                          data-testid="rename-input"
                           aria-label={t("nav.rename")}
-                          className={`max-w-full cursor-text truncate rounded-sm text-left ${FOCUS}`}
-                        >
-                          {selected.title}
-                        </button>
-                      </h1>
-                    )}
-                    {/* When it happened, in the reader's own time, and how long
-                        it ran. The status word used to sit here and said
-                        nothing in the normal case; the sidebar's dot already
-                        covers the abnormal one. */}
-                    <p className="text-xs tabular-nums text-fg-muted">
-                      {formatMeetingDateTime(selected.created_at)} ·{" "}
-                      {formatDuration(selected.duration_ms)}
-                    </p>
-                  </div>
-                  {/* Five siblings used to read as five equal actions. Summarize
-                      is the one primary; MD/PDF/DOCX are one action with a format
-                      parameter, so they sit inside a single bordered group.
-                      The inset is horizontal only: a `p-1` shell would stand 34px
-                      tall between two 24px chips, and a group that is half again
-                      the height of its neighbours reads as a different tier of
-                      control rather than a bracket around three of them. */}
-                  {/* `shrink-0` beside the title's `min-w-0`: a generated or
-                      typed name can be arbitrarily long, and without the pair
-                      the flex algorithm resolves the overflow by squeezing the
-                      buttons instead of truncating the heading. */}
-                  <div className="flex shrink-0 items-center gap-2">
-                    <Button size="xs" onClick={() => handleSummarize("general")}>
-                      <Sparkles size={16} /> {t("action.summarize")}
-                    </Button>
-                    <div className="flex items-center gap-1 rounded-md border border-border px-1">
-                      {(["md", "pdf", "docx"] as const).map((format) => (
-                        <Button
-                          key={format}
-                          size="xs"
-                          variant="ghost"
-                          onClick={() => handleExport(format)}
-                        >
-                          {format.toUpperCase()}
-                        </Button>
-                      ))}
+                          defaultValue={selected.title}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              void commitRename(selected.id, e.currentTarget.value);
+                            } else if (e.key === "Escape") {
+                              e.preventDefault();
+                              // Put the original back before closing. A browser
+                              // that fires blur on the way out would otherwise
+                              // commit the abandoned edit; with the value
+                              // restored, that commit is a no-op.
+                              e.currentTarget.value = selected.title;
+                              setRenaming(false);
+                            }
+                          }}
+                          onBlur={(e) => void commitRename(selected.id, e.currentTarget.value)}
+                          className={`w-full rounded-sm bg-transparent text-base font-medium ${FOCUS}`}
+                        />
+                      ) : (
+                        // The control is inside the heading rather than being
+                        // the heading: an `<h1 onClick>` is a click target with
+                        // no keyboard route, and every other affordance in this
+                        // app has one. `title` also gives the full name back on
+                        // hover once the heading truncates.
+                        <h1 className="truncate text-base font-medium">
+                          <button
+                            type="button"
+                            onClick={() => setRenaming(true)}
+                            title={selected.title}
+                            aria-label={t("nav.rename")}
+                            className={`max-w-full cursor-text truncate rounded-sm text-left ${FOCUS}`}
+                          >
+                            {selected.title}
+                          </button>
+                        </h1>
+                      )}
+                      {/* When it happened, in the reader's own time, and how long
+                          it ran. The status word used to sit here and said
+                          nothing in the normal case; the sidebar's dot already
+                          covers the abnormal one. */}
+                      <p className="text-xs tabular-nums text-fg-muted">
+                        {formatMeetingDateTime(selected.created_at)} ·{" "}
+                        {formatDuration(selected.duration_ms)}
+                      </p>
+                    </div>
+                    {/* Five siblings used to read as five equal actions. Summarize
+                        is the one primary; MD/PDF/DOCX are one action with a format
+                        parameter, so they sit inside a single bordered group.
+                        The inset is horizontal only: a `p-1` shell would stand 34px
+                        tall between two 24px chips, and a group that is half again
+                        the height of its neighbours reads as a different tier of
+                        control rather than a bracket around three of them. */}
+                    {/* `shrink-0` beside the title's `min-w-0`: a generated or
+                        typed name can be arbitrarily long, and without the pair
+                        the flex algorithm resolves the overflow by squeezing the
+                        buttons instead of truncating the heading. */}
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Button size="xs" onClick={() => handleSummarize("general")}>
+                        <Sparkles size={16} /> {t("action.summarize")}
+                      </Button>
+                      <div className="flex items-center gap-1 rounded-md border border-border px-1">
+                        {(["md", "pdf", "docx"] as const).map((format) => (
+                          <Button
+                            key={format}
+                            size="xs"
+                            variant="ghost"
+                            onClick={() => handleExport(format)}
+                          >
+                            {format.toUpperCase()}
+                          </Button>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1020,7 +1024,7 @@ function AppShell({
                     the transcript scrolls and a button inside it would leave
                     with the rows. `relative` + absolute keeps `Tabs` owning its
                     own width, which its roving keyboard nav measures. */}
-                <div className="relative">
+                <div className="relative border-b border-border">
                   <Tabs
                     idPrefix="content"
                     className="mx-auto w-full max-w-pane px-6"

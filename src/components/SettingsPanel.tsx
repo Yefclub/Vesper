@@ -329,7 +329,7 @@ export function SettingsPanel({
             left in the layout for a global backend to be expressed. */}
         <Tabs
           idPrefix="settings"
-          className="px-4"
+          className="border-b border-border px-4"
           value={tab}
           onChange={setTab}
           items={[
