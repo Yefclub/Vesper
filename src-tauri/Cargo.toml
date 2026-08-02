@@ -13,6 +13,47 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+default = []
+
+# GPU acceleration. Off by default so `cargo test` and a contributor without a
+# Vulkan SDK or a CUDA toolkit can still build the app — the SDKs are build-time
+# requirements only, and the shipped binary must never need them installed.
+#
+# The split is not cosmetic. The two engines reach the GPU in different ways and
+# only one of them is safe to enable unconditionally:
+#
+# * `llama-cpp-2` has `dynamic-backends`, which is llama.cpp's `GGML_BACKEND_DL`:
+#   each backend becomes a shared library loaded at runtime, so `ggml-cuda.dll`
+#   is only opened when an NVIDIA driver is actually present. A machine with no
+#   NVIDIA GPU never touches it.
+# * `whisper-rs-sys` has no such thing, and no way to pass CMake arguments. Its
+#   `cuda` feature emits `rustc-link-lib=cudart` and `=cuda` — *load-time*
+#   imports — so a binary built with it does not start at all on a machine
+#   without the NVIDIA runtime. That is why whisper gets Vulkan and not CUDA:
+#   `vulkan-1.dll` ships with every GPU driver, and losing CUDA for
+#   transcription costs far less than losing the single installer. CUDA's real
+#   win is prompt processing, which is the summarisation path, and that is
+#   llama's side.
+gpu = ["gpu-vulkan"]
+
+# Buildable anywhere a Vulkan SDK is installed, which includes this project's
+# own development machine — so this is the combination that gets exercised
+# rather than only compiled.
+gpu-vulkan = [
+  "whisper-rs/vulkan",
+  "llama-cpp-2/vulkan",
+  "llama-cpp-2/dynamic-backends",
+]
+
+# Needs the CUDA toolkit at build time (nvcc). Kept apart from `gpu-vulkan` so a
+# machine with only the driver can still build every other combination.
+gpu-cuda = ["llama-cpp-2/cuda", "llama-cpp-2/dynamic-backends"]
+
+# What the release workflow builds: one binary that uses CUDA on NVIDIA, Vulkan
+# everywhere else, and the best available CPU backend when there is no GPU.
+gpu-all = ["gpu-vulkan", "gpu-cuda"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"

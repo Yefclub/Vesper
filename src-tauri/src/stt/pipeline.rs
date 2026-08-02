@@ -79,8 +79,9 @@ impl SttService {
                 let pcm = pcm.to_vec();
                 let model = settings.local_stt_model.clone();
                 let language = settings.language.clone();
+                let backend = settings.compute_backend.clone();
                 let text = tokio::task::spawn_blocking(move || {
-                    engine.transcribe(&pcm, sample_rate, &model, &language)
+                    engine.transcribe(&pcm, sample_rate, &model, &language, &backend)
                 })
                 .await
                 .map_err(|e| format!("transcription task failed: {e}"))??;
