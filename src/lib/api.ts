@@ -118,6 +118,14 @@ export interface ModelInfo {
   present: boolean;
   path: string;
   download_url?: string | null;
+  /** What the catalog says the finished artifact weighs. Already on the wire;
+   *  it was simply never declared on this side. */
+  size_hint_bytes?: number | null;
+  /** Bytes of a `.part` file sitting beside the artifact — a download that was
+   *  started and never finished. Optional because the backend that reports it
+   *  is a separate change: until it lands the field is absent and the slot
+   *  renders exactly as it does today. */
+  partial_bytes?: number | null;
 }
 
 /** Payload of the `models://download-progress` event.

@@ -240,6 +240,11 @@ export function SettingsPanel({
   // that refuses a missing one, so offering it is the same dead end.
   const readyStt = models.filter((m) => m.kind === "stt" && m.ready);
   const readyLlm = models.filter((m) => m.kind === "llm" && m.ready);
+  // A download that was started and never finished. "No model installed yet" is
+  // true and stays true — what it hid is the half-finished artifact already on
+  // disk, which the empty slot has to name and offer to pick up.
+  const partialStt = models.find((m) => m.kind === "stt" && m.partial_bytes != null);
+  const partialLlm = models.find((m) => m.kind === "llm" && m.partial_bytes != null);
   // What is actually on screen wins over a row that does not carry a theme:
   // until the backend keeps the field, a saved row comes back without it and
   // the control would read Light while the app is dark.
@@ -381,6 +386,9 @@ export function SettingsPanel({
                       <FieldEmpty
                         label={t("settings.local_stt")}
                         text={t("settings.no_local_stt")}
+                        partial={partialStt ?? null}
+                        busy={progress !== null && progress.error == null}
+                        onDownload={download}
                       />
                     )}
                     <div className="space-y-2">
@@ -498,6 +506,9 @@ export function SettingsPanel({
                       <FieldEmpty
                         label={t("settings.local_llm")}
                         text={t("settings.no_local_llm")}
+                        partial={partialLlm ?? null}
+                        busy={progress !== null && progress.error == null}
+                        onDownload={download}
                       />
                     )}
                     <div className="space-y-2">
@@ -797,17 +808,70 @@ function FieldSelect({
   );
 }
 
+/** `276 MB of 491 MB already downloaded`.
+ *
+ *  Both numbers or nothing: the sentence has two slots and a total the catalog
+ *  did not report cannot be invented — the same reason this file refuses to
+ *  render `0%` for an unknown transfer size.
+ *
+ *  And it is "already downloaded", never "will resume". A `.part` written
+ *  before the ETag sidecar existed carries no validator, so the request goes
+ *  out without `If-Range` and the server may legitimately answer from zero.
+ *  Promising a resume the transport cannot guarantee is the same class of lie
+ *  as an invented percentage. */
+function partialLine(m: ModelInfo, t: (key: string) => string): string | null {
+  if (m.partial_bytes == null || m.size_hint_bytes == null) return null;
+  return t("model.partial")
+    .replace("{done}", formatBytes(m.partial_bytes))
+    .replace("{total}", formatBytes(m.size_hint_bytes));
+}
+
 /** Same box, same label, no control. Not an empty select and not a fake "None":
  *  `validate_models()` rejects an empty model id, so "None" would be unsaveable.
  *  The dashed edge reads as an empty slot, and keeping the box means the panel
- *  does not reflow when a download finishes and the select takes its place. */
-function FieldEmpty({ label, text }: { label: string; text: string }) {
+ *  does not reflow when a download finishes and the select takes its place.
+ *
+ *  "Nothing installed" was true and still is — but it said nothing about the
+ *  half-finished download sitting on disk, which is the state a user who
+ *  started one and lost the connection is actually in. */
+function FieldEmpty({
+  label,
+  text,
+  partial,
+  busy,
+  onDownload,
+}: {
+  label: string;
+  text: string;
+  /** A started-and-abandoned download of this kind, if there is one. */
+  partial: ModelInfo | null;
+  /** Some row — possibly the other section's — is transferring. */
+  busy: boolean;
+  onDownload: (id: string) => void;
+}) {
+  const { t } = useI18n();
+  const line = partial ? partialLine(partial, t) : null;
   return (
     <div className="text-sm">
       <span className="mb-1 block text-xs text-fg-subtle">{label}</span>
       <div className="rounded-md border border-dashed border-border bg-surface-2 px-3 py-2 text-sm text-fg-subtle">
         {text}
       </div>
+      {partial && line && (
+        <div className="mt-2 flex items-center justify-between gap-3">
+          <span className="text-2xs tabular-nums text-fg-subtle">{line}</span>
+          {/* The same call the catalog row makes, so the two buttons cannot
+              start two writers on one `.part`: `busy` closes both. */}
+          <Button
+            variant="secondary"
+            size="xs"
+            disabled={busy}
+            onClick={() => onDownload(partial.id)}
+          >
+            {t("model.continue")}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -869,6 +933,9 @@ const ModelRow = memo(function ModelRow({
   const { t } = useI18n();
   const failed = progress?.error != null;
   const running = progress !== null && !failed;
+  // What is on disk from a transfer that never finished. Only meaningful while
+  // nothing is running: once it is, the live counter is the better number.
+  const partial = partialLine(model, t);
   const total = progress?.total_bytes ?? 0;
   // `total_bytes` is nullable and rendering 0% for it would be a lie about a
   // multi-gigabyte transfer.
@@ -919,7 +986,9 @@ const ModelRow = memo(function ModelRow({
       ? t("model.ready")
       : model.present
         ? t("model.unverified")
-        : t("model.not_downloaded");
+        : // "Not downloaded" is wrong for a model that is two thirds of the way
+          // there, and it is the reason the same file got started from scratch.
+          (partial ?? t("model.not_downloaded"));
   }
 
   return (
@@ -931,8 +1000,11 @@ const ModelRow = memo(function ModelRow({
             className={`flex items-center gap-2 text-2xs tabular-nums ${failed ? "text-danger" : "text-fg-muted"}`}
           >
             {/* A dot and a word. Absent gets no dot — there is no state to
-                signal there, only the button beside it to press. */}
-            {!progress && (model.ready || model.present) && (
+                signal there, only the button beside it to press. A part-file is
+                a state: it takes the same amber as downloaded-but-unverified,
+                because both are "something is on disk and it is not usable
+                yet". */}
+            {!progress && (model.ready || model.present || partial != null) && (
               <span
                 aria-hidden
                 className={`h-1.5 w-1.5 shrink-0 rounded-full ${
@@ -954,7 +1026,9 @@ const ModelRow = memo(function ModelRow({
               ? t("action.retry")
               : model.present
                 ? t("model.verify")
-                : t("model.download")}
+                : partial != null
+                  ? t("model.continue")
+                  : t("model.download")}
           </Button>
         )}
       </div>

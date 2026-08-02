@@ -89,6 +89,11 @@ fn en_dict() -> HashMap<&'static str, &'static str> {
         ("model.download", "Download"),
         ("model.unverified", "Downloaded, not verified yet"),
         ("model.verify", "Verify"),
+        // Deliberately not "will resume": a part-file written before the ETag
+        // sidecar existed carries no validator, so the server may answer from
+        // zero. This states what is on disk, which is always true.
+        ("model.partial", "{done} of {total} already downloaded"),
+        ("model.continue", "Continue"),
         ("gate.fix", "Open settings"),
         ("settings.saved", "Saved"),
         ("gate.unavailable", "Could not check whether recording is possible."),
@@ -227,6 +232,8 @@ fn pt_dict() -> HashMap<&'static str, &'static str> {
         ("model.download", "Baixar"),
         ("model.unverified", "Baixado, ainda não verificado"),
         ("model.verify", "Verificar"),
+        ("model.partial", "{done} de {total} já baixados"),
+        ("model.continue", "Continuar"),
         ("gate.fix", "Abrir configurações"),
         ("settings.saved", "Salvo"),
         ("gate.unavailable", "Não foi possível verificar se dá para gravar."),
