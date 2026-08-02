@@ -57,11 +57,17 @@ type Tab = "transcript" | "summary";
  *  maximised window ignores — so the titlebar felt dead in the state the app
  *  starts in. Windows restores the window and hands it to the cursor, and that
  *  is the behaviour to match rather than invent around. */
-async function dragWindow() {
+async function dragWindow(stillPressed: () => boolean) {
   const win = getCurrentWindow();
+  // Each step is a round trip to the backend, and the button can come up
+  // during any of them. Without these checks a flick — four pixels and
+  // release — unmaximised the window and then handed it to the OS move loop
+  // with nothing held down, so it followed the cursor until the next click.
   if (await win.isMaximized()) {
+    if (!stillPressed()) return;
     await win.unmaximize();
   }
+  if (!stillPressed()) return;
   await win.startDragging();
 }
 
@@ -179,7 +185,9 @@ function AppShell({
   const pinnedRef = useRef(true);
   /// Where the titlebar was pressed, until the pointer moves far enough for it
   /// to be a drag rather than a click.
-  const pressRef = useRef<{ x: number; y: number } | null>(null);
+  const pressRef = useRef<{ x: number; y: number; started: boolean } | null>(
+    null,
+  );
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -805,11 +813,16 @@ function AppShell({
           // Left button only, and only on the bar itself — a press that landed
           // on a control is that control's.
           if (e.button !== 0 || e.target !== e.currentTarget) return;
-          pressRef.current = { x: e.clientX, y: e.clientY };
+          // Captured, so the release comes back here even if the pointer has
+          // left the bar by then. Without it a press that ended over the
+          // content below left the press recorded, and the next ordinary move
+          // across the titlebar started a drag with no button held.
+          e.currentTarget.setPointerCapture(e.pointerId);
+          pressRef.current = { x: e.clientX, y: e.clientY, started: false };
         }}
         onPointerMove={(e) => {
           const press = pressRef.current;
-          if (!press) return;
+          if (!press || press.started) return;
           // Four pixels, because a press that never moves is a click. Starting
           // the drag on pointerdown enters the OS move loop immediately, and
           // that loop swallows the second click of a double-click — which is
@@ -817,10 +830,18 @@ function AppShell({
           if (Math.abs(e.clientX - press.x) < 4 && Math.abs(e.clientY - press.y) < 4) {
             return;
           }
-          pressRef.current = null;
-          void dragWindow();
+          press.started = true;
+          // The identity of the press is the cancellation token: a release
+          // clears the ref, and the two awaits below check it before acting.
+          void dragWindow(() => pressRef.current === press);
         }}
         onPointerUp={() => {
+          pressRef.current = null;
+        }}
+        onPointerCancel={() => {
+          pressRef.current = null;
+        }}
+        onLostPointerCapture={() => {
           pressRef.current = null;
         }}
         onDoubleClick={(e) => {
@@ -868,7 +889,13 @@ function AppShell({
                 />
               </motion.div>
             ) : working ? (
-              <motion.div key="processing" {...fadeRise}>
+              <motion.div
+                key="processing"
+                // No pointer opt-in: it is a label, and a label that eats
+                // presses is a strip of titlebar that cannot be dragged.
+                className="pointer-events-none"
+                {...fadeRise}
+              >
                 <ProcessingStatus phase={working} />
               </motion.div>
             ) : null}
