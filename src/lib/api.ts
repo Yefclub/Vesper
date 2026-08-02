@@ -220,7 +220,6 @@ export const api = {
     invoke<MeetingInsights>("summarize_meeting", { id, template }),
   importAudio: (path: string, title?: string) =>
     invoke<MeetingRecord>("import_audio", { path, title }),
-  retranscribe: (id: string) => invoke<MeetingRecord>("retranscribe", { id }),
   // The only new command on this side that cannot degrade to nothing: a rename
   // the backend has not learned yet rejects, and the caller surfaces that
   // rather than showing a title the database does not carry.

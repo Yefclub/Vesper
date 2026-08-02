@@ -292,8 +292,8 @@ body,
    these — when it is present the engine ignores the pseudo styles entirely and
    falls back to overlay scrollbars. */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--color-border-strong);
@@ -301,7 +301,57 @@ body,
   background-clip: content-box;
   border-radius: 999px;
 }
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-fg-faint);
+  background-clip: content-box;
+}
 ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Stepper arrows at both ends.
+   WebKit hides these unless every one of the four is given a display, and it
+   draws no glyph of its own — an SVG background is the only way to get a mark
+   into them. The `single-button` selectors are the ones that fire when a bar has
+   one arrow per end, which is what a 12px bar gets; `double-button` covers the
+   pair-at-one-end style some platforms use, and without it those render as two
+   blank 12px squares.
+
+   The mark is a mask, not a fill, so it takes `--color-fg-subtle` and follows
+   the theme instead of being baked into the data URI twice. */
+::-webkit-scrollbar-button:single-button,
+::-webkit-scrollbar-button:double-button {
+  display: block;
+  height: 12px;
+  width: 12px;
+  background-color: var(--color-fg-subtle);
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: 7px 7px;
+}
+::-webkit-scrollbar-button:hover {
+  background-color: var(--color-fg);
+}
+::-webkit-scrollbar-button:vertical:decrement {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M5 2.5 9 7.5H1z'/%3E%3C/svg%3E");
+}
+::-webkit-scrollbar-button:vertical:increment {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M5 7.5 1 2.5h8z'/%3E%3C/svg%3E");
+}
+::-webkit-scrollbar-button:horizontal:decrement {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M2.5 5 7.5 1v8z'/%3E%3C/svg%3E");
+}
+::-webkit-scrollbar-button:horizontal:increment {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M7.5 5 2.5 9V1z'/%3E%3C/svg%3E");
+}
+/* The corner between two bars, and the second button of a pair, must not render
+   as a floating square. */
+::-webkit-scrollbar-button:vertical:decrement:end,
+::-webkit-scrollbar-button:vertical:increment:start,
+::-webkit-scrollbar-button:horizontal:decrement:end,
+::-webkit-scrollbar-button:horizontal:increment:start,
+::-webkit-scrollbar-corner {
+  display: none;
   background: transparent;
 }
 

@@ -13,7 +13,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { clsx } from "clsx";
-import { FileAudio, Settings, Sparkles, TriangleAlert } from "lucide-react";
+import { Settings, Sparkles, TriangleAlert } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -37,6 +37,7 @@ import { Button, FOCUS } from "./components/Button";
 import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { CopyButton } from "./components/CopyButton";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { RecordTransport } from "./components/RecordTransport";
@@ -980,29 +981,43 @@ function AppShell({
                         </Button>
                       ))}
                     </div>
-                    <Button
-                      size="xs"
-                      variant="secondary"
-                      onClick={() =>
-                        selectedId &&
-                        api.retranscribe(selectedId).then((m) => loadMeeting(m.id))
-                      }
-                    >
-                      <FileAudio size={16} /> {t("action.retranscribe")}
-                    </Button>
                   </div>
                 </div>
 
-                <Tabs
-                  idPrefix="content"
-                  className="mx-auto w-full max-w-pane px-6"
-                  value={tab}
-                  onChange={setTab}
-                  items={[
-                    { id: "transcript", label: t("tab.transcript") },
-                    { id: "summary", label: t("tab.summary") },
-                  ]}
-                />
+                {/* The copy control rides the tab rule rather than the pane:
+                    the transcript scrolls and a button inside it would leave
+                    with the rows. `relative` + absolute keeps `Tabs` owning its
+                    own width, which its roving keyboard nav measures. */}
+                <div className="relative">
+                  <Tabs
+                    idPrefix="content"
+                    className="mx-auto w-full max-w-pane px-6"
+                    value={tab}
+                    onChange={setTab}
+                    items={[
+                      { id: "transcript", label: t("tab.transcript") },
+                      { id: "summary", label: t("tab.summary") },
+                    ]}
+                  />
+                  {tab === "transcript" && transcript.segments?.length ? (
+                    <div className="pointer-events-none absolute inset-y-0 right-0 mx-auto flex w-full max-w-pane items-center justify-end px-6">
+                      <CopyButton
+                        className="pointer-events-auto"
+                        label={t("tab.transcript")}
+                        text={transcript.segments
+                          .map(
+                            (s) =>
+                              `[${formatDuration(s.start_ms)}] ${
+                                s.speaker === "me"
+                                  ? t("speaker.me")
+                                  : t("speaker.others")
+                              }: ${s.text}`,
+                          )
+                          .join("\n")}
+                      />
+                    </div>
+                  ) : null}
+                </div>
 
                 {/* The scroll container is the tab panel: the two panes swap
                     inside it, so the id follows the selected tab rather than
@@ -1146,10 +1161,17 @@ function AppShell({
                                 boxing it is what makes the product's headline
                                 output read as a widget instead of as the
                                 answer. */}
-                            <section>
-                              <h2 className="mb-2 text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
-                                {t("section.summary")}
-                              </h2>
+                            <section className="group">
+                              <div className="mb-2 flex items-start justify-between gap-2">
+                                <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+                                  {t("section.summary")}
+                                </h2>
+                                <CopyButton
+                                  text={selected.summary || ""}
+                                  label={t("section.summary")}
+                                  className="-mt-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                                />
+                              </div>
                               <Markdown text={selected.summary || "—"} />
                             </section>
                             {/* The two lists become a right-hand rail and keep
@@ -1367,10 +1389,21 @@ function AppShell({
 
 function Section({ title, body }: { title: string; body: string }) {
   return (
-    <section className="rounded-lg border border-border bg-surface-2 p-4">
-      <h2 className="mb-2 text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
-        {title}
-      </h2>
+    // `group` so the copy button is quiet until the pointer is on the block it
+    // copies. A control that is always lit competes with the text it sits on;
+    // one that only exists on hover is unreachable — `focus-within` keeps it for
+    // the keyboard.
+    <section className="group rounded-lg border border-border bg-surface-2 p-4">
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+          {title}
+        </h2>
+        <CopyButton
+          text={body}
+          label={title}
+          className="-mr-1 -mt-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+        />
+      </div>
       {/* Not a `<pre>`. The summariser is asked for markdown, so the app's
           headline deliverable — the first thing read after a recording stops —
           was reaching the screen as literal `**` and `- `. */}
