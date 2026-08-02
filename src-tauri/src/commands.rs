@@ -10,6 +10,7 @@ use crate::domain::i18n::{catalog, t, Locale};
 use crate::domain::job::{
     MeetingEvent, MeetingPhase, MeetingProgress, MeetingRecord, MeetingStatus,
 };
+use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, SummaryVersion};
 use crate::domain::search::SearchHit;
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
 use crate::domain::shortcut::ShortcutStatus;
@@ -1171,6 +1172,153 @@ pub fn shortcut_status(status: State<'_, ShortcutStatus>) -> ShortcutStatus {
 /// Rename a meeting.
 ///
 /// The typed name goes through the same `parse_title` as the model's answer —
+/// Rebuild the insight set a meeting currently shows, so a refinement can be
+/// stored as a version without reparsing its markdown twice.
+fn current_insights(m: &MeetingRecord) -> MeetingInsights {
+    MeetingInsights {
+        summary: m.summary.clone().unwrap_or_default(),
+        key_points: bullets(m.key_points.as_deref()),
+        action_items: bullets(m.action_items.as_deref()),
+    }
+}
+
+fn bullets(text: Option<&str>) -> Vec<String> {
+    text.map(parse_refined_list).unwrap_or_default()
+}
+
+/// Every stored version of a meeting's insights, oldest first.
+///
+/// Backfills a baseline on first read for meetings summarised before versioning
+/// existed: without it their first improvement would be version 1 and the
+/// original would be the thing that vanished. A write on read, and idempotent —
+/// the next call finds the baseline already there.
+#[tauri::command]
+pub fn list_summary_versions(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<SummaryVersion>, String> {
+    let existing = state.db.list_summary_versions(&id)?;
+    if !existing.is_empty() {
+        return Ok(existing);
+    }
+    let meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    if meeting.summary.is_none() {
+        return Ok(existing);
+    }
+    state
+        .db
+        .push_summary_version(&id, "summarize", &current_insights(&meeting))?;
+    state.db.list_summary_versions(&id)
+}
+
+/// Ask the model to improve one section, keeping everything it replaces.
+#[tauri::command]
+pub async fn refine_summary_section(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    section: String,
+) -> Result<SummaryVersion, String> {
+    // From the WebView, so it is parsed rather than trusted: an unrecognised
+    // value picks no prompt and merges into nothing, and failing here says so.
+    let section = Section::parse(&section).ok_or_else(|| "unknown section".to_string())?;
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    if meeting.summary.is_none() {
+        return Err("summarize this meeting before improving it".into());
+    }
+    // The baseline has to exist before the improvement is written, or the
+    // original is what gets lost.
+    if state.db.list_summary_versions(&id)?.is_empty() {
+        state
+            .db
+            .push_summary_version(&id, "summarize", &current_insights(&meeting))?;
+    }
+
+    let settings = state.settings.lock().clone();
+    let current = match section {
+        Section::KeyPoints => meeting.key_points.clone().unwrap_or_default(),
+        Section::ActionItems => meeting.action_items.clone().unwrap_or_default(),
+    };
+    // The timestamped, speaker-labelled transcript rather than the flattened
+    // text the first pass used: the whole transcript already went in, so "more
+    // information" is the structure, not more of it.
+    let transcript = state
+        .live
+        .lock()
+        .get(&id)
+        .map(|t| t.timestamped_text())
+        .unwrap_or_else(|| meeting.transcript_text.clone());
+    let prompt = build_refine_prompt(section, &current, &transcript, settings.locale());
+    let messages = vec![ChatMessage {
+        role: "user".into(),
+        content: prompt,
+    }];
+    let (raw, cost) = state.llm.complete_for_refine(&settings, &messages).await?;
+    state.db.add_meeting_cost(&id, cost)?;
+
+    let improved = parse_refined_list(&raw);
+    if improved.is_empty() {
+        // A model that answered with prose has not produced a list. Writing it
+        // would replace good notes with a sentence about not improving them.
+        return Err("the model did not answer with a list".into());
+    }
+    let mut insights = current_insights(&meeting);
+    match section {
+        Section::KeyPoints => insights.key_points = improved,
+        Section::ActionItems => insights.action_items = improved,
+    }
+    let version = state
+        .db
+        .push_summary_version(&id, section.as_str(), &insights)?;
+    state.db.save_insights(&id, &insights)?;
+    meeting.summary = Some(insights.summary.clone());
+    meeting.key_points = Some(insights.key_points_text());
+    meeting.action_items = Some(insights.action_items_text());
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    state.db.upsert_meeting(&meeting)?;
+    Ok(version)
+}
+
+/// Put an earlier version back, as a new version.
+///
+/// Appended rather than rewound: history stays append-only, so restoring is
+/// itself undoable and nothing the user has seen ever disappears.
+#[tauri::command]
+pub fn restore_summary_version(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    version: i64,
+) -> Result<SummaryVersion, String> {
+    let wanted = state
+        .db
+        .list_summary_versions(&id)?
+        .into_iter()
+        .find(|v| v.version == version)
+        .ok_or_else(|| "version not found".to_string())?;
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    let insights = MeetingInsights {
+        summary: wanted.summary.clone(),
+        key_points: parse_refined_list(&wanted.key_points),
+        action_items: parse_refined_list(&wanted.action_items),
+    };
+    let created = state.db.push_summary_version(&id, "restore", &insights)?;
+    state.db.save_insights(&id, &insights)?;
+    meeting.summary = Some(insights.summary.clone());
+    meeting.key_points = Some(insights.key_points_text());
+    meeting.action_items = Some(insights.action_items_text());
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    state.db.upsert_meeting(&meeting)?;
+    Ok(created)
+}
+
 /// the WebView is the trust boundary, and a title reaches a filename, a PDF
 /// header and an FTS index. `upsert_meeting` re-indexes search in the same
 /// transaction, so the new name is findable immediately.

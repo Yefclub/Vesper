@@ -105,6 +105,45 @@ impl LlmService {
         }
     }
 
+    /// One completion, for a refinement.
+    ///
+    /// Its own entry point rather than reusing `chat`: chat builds a context out
+    /// of the meeting and its history, and a refinement already carries
+    /// everything it needs in one message. Never reasoning — the answer is a
+    /// bullet list, and on OpenRouter a thinking budget is billed.
+    pub async fn complete_for_refine(
+        &self,
+        settings: &AppSettings,
+        messages: &[ChatMessage],
+    ) -> Result<(String, Option<i64>), String> {
+        match settings.llm_provider {
+            LlmProvider::Local => {
+                let local = self.local.clone();
+                let model = settings.local_llm_model.clone();
+                let messages = messages.to_vec();
+                // No offline fallback here. The extractive path cannot reason,
+                // and it would replace good notes with keyword soup.
+                tokio::task::spawn_blocking(move || local.chat(&messages, "", &model))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map(|answer| (answer, None))
+            }
+            LlmProvider::OpenRouter => {
+                settings
+                    .require_openrouter_key()
+                    .map_err(|e| e.to_string())?;
+                self.remote
+                    .complete(
+                        settings.openrouter_api_key.as_deref().unwrap_or(""),
+                        &settings.openrouter_llm_model,
+                        messages,
+                        false,
+                    )
+                    .await
+            }
+        }
+    }
+
     pub async fn chat(
         &self,
         settings: &AppSettings,

@@ -38,6 +38,7 @@ import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CopyButton } from "./components/CopyButton";
+import { SummaryHistory } from "./components/SummaryHistory";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { RecordTransport } from "./components/RecordTransport";
@@ -144,6 +145,15 @@ function AppShell({
   /// Whether the meeting header's title is being edited. A generated title is a
   /// guess, and a guess the user cannot correct is worse than a date.
   const [renaming, setRenaming] = useState(false);
+  /// Which section is being improved, or null. One at a time: the two calls
+  /// would each read the meeting row and write a version from it, and the second
+  /// to land would carry a copy of the first section from before the first
+  /// finished.
+  const [improving, setImproving] = useState<
+    "key_points" | "action_items" | null
+  >(null);
+  /// Bumped whenever the version history changes, so an open panel refetches.
+  const [versionsKey, setVersionsKey] = useState(0);
   const confirmBeforeRecordingRef = useRef(settings.confirm_before_recording);
   confirmBeforeRecordingRef.current = settings.confirm_before_recording;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -221,6 +231,30 @@ function AppShell({
       setError(String(e));
     }
   }, []);
+
+  /// Ask the model to improve one section, keeping what it replaces.
+  ///
+  /// A refusal is surfaced rather than swallowed: the command rejects when the
+  /// model answers with prose instead of a list, and that is the case where the
+  /// meeting deliberately keeps what it had.
+  const improve = useCallback(
+    async (section: "key_points" | "action_items") => {
+      if (!selectedId || improving) return;
+      setImproving(section);
+      setError(null);
+      try {
+        await api.refineSummarySection(selectedId, section);
+        setVersionsKey((k) => k + 1);
+        await loadMeeting(selectedId);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setImproving(null);
+      }
+    },
+    [selectedId, improving, loadMeeting],
+  );
+
 
   // Device enumeration is allowed to fail — a machine with no capture device
   // still runs the app. Kept apart from the startup refresh so a rejection here
@@ -1226,8 +1260,26 @@ function AppShell({
                                 the box — that is what makes short lines
                                 scannable blocks rather than more prose. */}
                             <div className="space-y-6">
-                              <Section title={t("section.key_points")} body={selected.key_points || "—"} />
-                              <Section title={t("section.action_items")} body={selected.action_items || "—"} />
+                              <Section
+                                title={t("section.key_points")}
+                                body={selected.key_points || "—"}
+                                onImprove={() => improve("key_points")}
+                                improving={improving === "key_points"}
+                              />
+                              <Section
+                                title={t("section.action_items")}
+                                body={selected.action_items || "—"}
+                                onImprove={() => improve("action_items")}
+                                improving={improving === "action_items"}
+                              />
+                              <SummaryHistory
+                                meetingId={selected.id}
+                                reloadKey={versionsKey}
+                                onRestored={() => {
+                                  setVersionsKey((k) => k + 1);
+                                  void loadMeeting(selected.id);
+                                }}
+                              />
                             </div>
                           </div>
                         ) : (
@@ -1438,7 +1490,21 @@ function AppShell({
   );
 }
 
-function Section({ title, body }: { title: string; body: string }) {
+function Section({
+  title,
+  body,
+  onImprove,
+  improving,
+}: {
+  title: string;
+  body: string;
+  /// Absent on a section that cannot be improved. The model is asked to extend
+  /// one list at a time, so each section carries its own trigger rather than one
+  /// button improving all three.
+  onImprove?: () => void;
+  improving?: boolean;
+}) {
+  const { t } = useI18n();
   return (
     // `group` so the copy button is quiet until the pointer is on the block it
     // copies. A control that is always lit competes with the text it sits on;
@@ -1449,11 +1515,25 @@ function Section({ title, body }: { title: string; body: string }) {
         <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
           {title}
         </h2>
-        <CopyButton
-          text={body}
-          label={title}
-          className="-mr-1 -mt-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-        />
+        <div className="-mr-1 -mt-1 flex shrink-0 items-center gap-1">
+          {onImprove && (
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={onImprove}
+              disabled={improving}
+              className="opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+            >
+              <Sparkles size={14} />
+              {improving ? t("summary.improving") : t("summary.improve")}
+            </Button>
+          )}
+          <CopyButton
+            text={body}
+            label={title}
+            className="opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+          />
+        </div>
       </div>
       {/* Not a `<pre>`. The summariser is asked for markdown, so the app's
           headline deliverable — the first thing read after a recording stops —

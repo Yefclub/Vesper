@@ -1,4 +1,5 @@
 use crate::domain::job::{MeetingRecord, MeetingStatus};
+use crate::domain::refine::SummaryVersion;
 use crate::domain::search::SearchHit;
 use crate::domain::settings::AppSettings;
 use crate::domain::speaker::Speaker;
@@ -135,6 +136,22 @@ impl Database {
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
             );
+            -- Every version of a meeting's insights, append-only. A version is
+            -- the WHOLE set — summary, key points, action items — not a delta:
+            -- the three are read together, so restoring one has to yield a
+            -- coherent set without replaying a chain.
+            CREATE TABLE IF NOT EXISTS summary_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                origin TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                key_points TEXT NOT NULL,
+                action_items TEXT NOT NULL,
+                UNIQUE(meeting_id, version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_versions_meeting ON summary_versions(meeting_id);
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -337,6 +354,11 @@ impl Database {
         .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM chat_messages WHERE meeting_id=?1", params![id])
             .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM summary_versions WHERE meeting_id=?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM meetings WHERE id=?1", params![id])
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -405,6 +427,76 @@ impl Database {
             t.append(r.map_err(|e| e.to_string())?);
         }
         Ok(t)
+    }
+
+    /// Append the current insights as the next version of a meeting.
+    ///
+    /// Append-only: nothing here overwrites a version, and the meeting row is
+    /// always a mirror of the newest one, which is what leaves search, export and
+    /// the existing summary path untouched.
+    pub fn push_summary_version(
+        &self,
+        meeting_id: &str,
+        origin: &str,
+        insights: &MeetingInsights,
+    ) -> Result<SummaryVersion, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let next: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM summary_versions WHERE meeting_id = ?1",
+                params![meeting_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let (key_points, action_items) = (insights.key_points_text(), insights.action_items_text());
+        conn.execute(
+            "INSERT INTO summary_versions
+                (meeting_id, version, origin, created_at, summary, key_points, action_items)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                meeting_id,
+                next,
+                origin,
+                created_at,
+                insights.summary,
+                key_points,
+                action_items
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(SummaryVersion {
+            version: next,
+            origin: origin.to_string(),
+            created_at,
+            summary: insights.summary.clone(),
+            key_points,
+            action_items,
+        })
+    }
+
+    pub fn list_summary_versions(&self, meeting_id: &str) -> Result<Vec<SummaryVersion>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT version, origin, created_at, summary, key_points, action_items
+                 FROM summary_versions WHERE meeting_id = ?1 ORDER BY version ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![meeting_id], |r| {
+                Ok(SummaryVersion {
+                    version: r.get(0)?,
+                    origin: r.get(1)?,
+                    created_at: r.get(2)?,
+                    summary: r.get(3)?,
+                    key_points: r.get(4)?,
+                    action_items: r.get(5)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     pub fn save_insights(
@@ -903,6 +995,53 @@ mod tests {
             db.get_meeting("m1").unwrap().unwrap().cost_nano_usd,
             Some(1_000_000),
             "an upsert carrying a stale record must not roll a charge back"
+        );
+    }
+
+    /// History is append-only and numbered from one per meeting, and deleting the
+    /// meeting takes it with it.
+    #[test]
+    fn versions_accumulate_and_leave_with_the_meeting() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.upsert_meeting(&sample_meeting("m1", "One")).unwrap();
+        db.upsert_meeting(&sample_meeting("m2", "Two")).unwrap();
+
+        let first = MeetingInsights {
+            summary: "s1".into(),
+            key_points: vec!["a".into()],
+            action_items: vec![],
+        };
+        let second = MeetingInsights {
+            summary: "s1".into(),
+            key_points: vec!["a".into(), "b".into()],
+            action_items: vec![],
+        };
+        let v1 = db.push_summary_version("m1", "summarize", &first).unwrap();
+        let v2 = db
+            .push_summary_version("m1", "key_points", &second)
+            .unwrap();
+        assert_eq!((v1.version, v2.version), (1, 2));
+
+        // Numbering is per meeting, not global.
+        assert_eq!(
+            db.push_summary_version("m2", "summarize", &first)
+                .unwrap()
+                .version,
+            1
+        );
+
+        let all = db.list_summary_versions("m1").unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].key_points, "- a", "the first version is still there");
+        assert_eq!(all[1].origin, "key_points");
+
+        db.delete_meeting("m1").unwrap();
+        assert!(db.list_summary_versions("m1").unwrap().is_empty());
+        assert_eq!(
+            db.list_summary_versions("m2").unwrap().len(),
+            1,
+            "another meeting's history must survive"
         );
     }
 

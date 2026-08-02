@@ -178,6 +178,16 @@ export interface ShortcutStatus {
   reason_key?: string | null;
 }
 
+export interface SummaryVersion {
+  version: number;
+  /// `summarize`, `key_points`, `action_items` or `restore`.
+  origin: string;
+  created_at: string;
+  summary: string;
+  key_points: string;
+  action_items: string;
+}
+
 export interface OrModel {
   id: string;
   name: string;
@@ -227,6 +237,17 @@ export const api = {
   pauseRecording: () => invoke<RecorderStatus>("pause_recording"),
   resumeRecording: () => invoke<RecorderStatus>("resume_recording"),
   stopRecording: () => invoke<MeetingRecord>("stop_recording"),
+  /// Every stored version of a meeting's insights, oldest first. Backfills a
+  /// baseline for meetings summarised before versioning existed.
+  listSummaryVersions: (id: string) =>
+    invoke<SummaryVersion[]>("list_summary_versions", { id }),
+  /// Improve one section. Rejects if the model does not answer with a list —
+  /// the meeting keeps what it had rather than gaining a sentence about failure.
+  refineSummarySection: (id: string, section: "key_points" | "action_items") =>
+    invoke<SummaryVersion>("refine_summary_section", { id, section }),
+  /// Puts an earlier version back, as a new version. Nothing is rewound.
+  restoreSummaryVersion: (id: string, version: number) =>
+    invoke<SummaryVersion>("restore_summary_version", { id, version }),
   summarize: (id: string, template?: string) =>
     invoke<MeetingInsights>("summarize_meeting", { id, template }),
   importAudio: (path: string, title?: string) =>
