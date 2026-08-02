@@ -409,6 +409,12 @@ function AppShell({
       // release builds disable the accelerator, so it looks correct in
       // `tauri build` and misbehaves in `tauri dev`.
       e.preventDefault();
+      // Auto-repeat fires this dozens of times a second while the key is down,
+      // and `busy` covers the slower version of the same thing: a second press
+      // while the first start or stop is still in flight. Either one starts a
+      // recording and immediately stops it, with an error banner from whichever
+      // request lost.
+      if (e.repeat || busy) return;
       if (status?.recording) void handleStop();
       else requestStart();
     }
@@ -416,6 +422,7 @@ function AppShell({
     return () => window.removeEventListener("keydown", onKey);
   }, [
     status?.recording,
+    busy,
     confirmingRecord,
     pendingDelete,
     showSettings,
