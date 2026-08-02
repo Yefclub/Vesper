@@ -586,12 +586,15 @@ export function SettingsPanel({
                   onChange={(v) =>
                     setDraft((d) => ({ ...d, compute_backend: v }))
                   }
-                  options={[
-                    { value: "auto", label: t("backend.auto") },
-                    { value: "cuda", label: t("backend.cuda") },
-                    { value: "vulkan", label: t("backend.vulkan") },
-                    { value: "cpu", label: t("backend.cpu") },
-                  ]}
+                  options={backendOptions(
+                    caps,
+                    draft.compute_backend,
+                    t("backend.auto"),
+                    t("backend.cuda"),
+                    t("backend.vulkan"),
+                    t("backend.cpu"),
+                    t("backend.unavailable"),
+                  )}
                 />
                 {/* A text-side option whichever provider writes the summary. */}
                 <CheckBox
@@ -829,6 +832,34 @@ interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+}
+
+/** The backends this copy of the app can actually reach.
+ *
+ *  A build without CUDA resolves a stored `cuda` to the CPU, which is the right
+ *  answer and an invisible one: the panel would go on showing "NVIDIA (CUDA)"
+ *  while every model ran on the processor. Offering only what is reachable, and
+ *  keeping an unreachable stored value as a disabled entry that says so, is the
+ *  same treatment a model id gets when its weights are not on disk. */
+function backendOptions(
+  caps: CapabilityReport | null,
+  value: string,
+  auto: string,
+  cuda: string,
+  vulkan: string,
+  cpu: string,
+  unavailable: string,
+): SelectOption[] {
+  const options: SelectOption[] = [{ value: "auto", label: auto }];
+  // Before the probe answers, every option stands — a panel that briefly hides
+  // the user's own setting reads as having lost it.
+  if (!caps || caps.cuda_available) options.push({ value: "cuda", label: cuda });
+  if (!caps || caps.vulkan_available)
+    options.push({ value: "vulkan", label: vulkan });
+  options.push({ value: "cpu", label: cpu });
+  return options.some((o) => o.value === value)
+    ? options
+    : [{ value, label: `${value} — ${unavailable}`, disabled: true }, ...options];
 }
 
 /** A `<select>` whose value matches no option renders — and reports — the first
