@@ -78,6 +78,31 @@ export interface SearchHit {
   score: number;
 }
 
+/** Where a meeting is between Stop and its summary.
+ *
+ *  No percentage, deliberately: transcription is one blocking pass over the
+ *  whole buffer and the summary is one non-streamed request, so there is no
+ *  progress to report and a number would have to be invented. */
+export type MeetingPhase =
+  | "saving"
+  | "transcribing"
+  | "summarizing"
+  | "ready"
+  | "summary_failed";
+
+/** Payload of the `meeting://progress` event.
+ *
+ *  Optional by absence: the backend that emits it is a separate change, and
+ *  until it lands the event never fires and nothing renders. These names are
+ *  the entire contract between the two halves and nothing type-checks across
+ *  the WebView boundary — they must match the Rust `#[serde(rename_all =
+ *  "snake_case")]` variants exactly. */
+export interface MeetingProgress {
+  meeting_id: string;
+  phase: MeetingPhase;
+  error?: string | null;
+}
+
 export interface MeetingInsights {
   summary: string;
   key_points: string[];

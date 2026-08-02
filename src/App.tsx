@@ -20,6 +20,7 @@ import {
   AudioDevice,
   formatDuration,
   LiveTranscript,
+  MeetingProgress,
   MeetingRecord,
   ModelInfo,
   RecorderStatus,
@@ -35,6 +36,7 @@ import { Button, FOCUS } from "./components/Button";
 import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { RecordTransport } from "./components/RecordTransport";
 import { Sidebar } from "./components/Sidebar";
@@ -123,6 +125,11 @@ function AppShell({
   /// it — in which case the app names the key it listens for and claims nothing
   /// about the OS.
   const [shortcut, setShortcut] = useState<ShortcutStatus | null>(null);
+  /// The last phase the backend reported for a meeting being finished. `null`
+  /// until the first event, and permanently `null` on a build whose backend
+  /// does not emit them — in which case none of the UI below renders and Stop
+  /// behaves as it did.
+  const [progress, setProgress] = useState<MeetingProgress | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [confirmingRecord, setConfirmingRecord] = useState(false);
   const [skipRecordReminder, setSkipRecordReminder] = useState(false);
@@ -143,6 +150,21 @@ function AppShell({
     () => meetings.find((m) => m.id === selectedId) ?? null,
     [meetings, selectedId],
   );
+
+  /// The phase the header narrates, or `null` when there is nothing to say.
+  /// `ready` is the end of the walk and clears the state; `summary_failed` is
+  /// an outcome, and it belongs beside the button that retries it rather than
+  /// under a spinner that has stopped spinning.
+  const working =
+    progress && progress.phase !== "ready" && progress.phase !== "summary_failed"
+      ? progress.phase
+      : null;
+
+  /// Matched on the meeting, not just the phase: `meeting://progress` reports
+  /// the recording that just stopped, which is not necessarily the one on
+  /// screen by the time the user reads this.
+  const summaryFailed =
+    progress?.phase === "summary_failed" && progress.meeting_id === selectedId;
 
   const refreshGate = useCallback(async () => {
     try {
@@ -255,7 +277,9 @@ function AppShell({
       setStatus(await api.recorderStatus());
       await refreshMeetings();
       await loadMeeting(m.id);
-      setTab("summary");
+      // The tab switch moved onto the `summarizing` phase. This call only
+      // returns once every step has finished, so switching here landed the user
+      // on a finished answer rather than letting them watch it being written.
       await refreshGate();
     } catch (e) {
       setError(String(e));
@@ -321,6 +345,21 @@ function AppShell({
         }),
       );
       track(
+        await listen<MeetingProgress>("meeting://progress", (e) => {
+          const p = e.payload;
+          // `ready` is the end of the walk, not a step in it: the meeting is
+          // on screen by then and a spinner beside it would be a lie.
+          setProgress(p.phase === "ready" ? null : p);
+          // The sidebar already paints a dot for any status other than
+          // `ready`, so re-reading the list here lights it for free.
+          if (p.phase === "transcribing") void refreshMeetings();
+          // Here rather than in `handleStop`: the point is to watch the pane
+          // the answer lands in while it is being written, instead of being
+          // teleported to it once it is already done.
+          if (p.phase === "summarizing") setTab("summary");
+        }),
+      );
+      track(
         await listen("hotkey://toggle-record", async () => {
           try {
             const st = await api.recorderStatus();
@@ -336,7 +375,7 @@ function AppShell({
       live = false;
       unsubs.forEach((u) => u());
     };
-  }, [handleStop, requestStart]);
+  }, [handleStop, requestStart, refreshMeetings]);
 
   /// The in-app half of the record shortcut, and the half that actually works.
   ///
@@ -408,7 +447,9 @@ function AppShell({
   }, [query]);
 
   useEffect(() => {
-    if (!status?.recording) return;
+    // Paused means nothing is arriving — no samples, no lines, no clock. Asking
+    // twice a second anyway only re-sets the same values.
+    if (!status?.recording || status.paused) return;
     const id = window.setInterval(async () => {
       try {
         setStatus(await api.recorderStatus());
@@ -645,13 +686,18 @@ function AppShell({
           <span className="text-lg font-semibold text-fg">{t("app.name")}</span>
         </div>
 
-        {/* Centre column: the transport for a recording in progress. It used
-            to be a badge that only said "Recording" while Stop lived in the
-            dock — which is on the empty screen, and starting a recording
-            leaves that screen. The controls follow the state they control. */}
+        {/* Centre column: the transport for a recording in progress, and then
+            the phase of the work that follows it. It used to be a badge that
+            only said "Recording" while Stop lived in the dock — which is on the
+            empty screen, and starting a recording leaves that screen. The
+            controls follow the state they control.
+
+            Both in the same `AnimatePresence` with the same `fadeRise`, so Stop
+            hands the slot from one to the other in a single beat rather than
+            emptying the header for the several seconds the work takes. */}
         <div className="flex items-center justify-center">
           <AnimatePresence>
-            {status?.recording && (
+            {status?.recording ? (
               <motion.div key="transport" {...fadeRise}>
                 <RecordTransport
                   status={status}
@@ -660,7 +706,11 @@ function AppShell({
                   onPauseResume={handlePauseResume}
                 />
               </motion.div>
-            )}
+            ) : working ? (
+              <motion.div key="processing" {...fadeRise}>
+                <ProcessingStatus phase={working} />
+              </motion.div>
+            ) : null}
           </AnimatePresence>
         </div>
 
@@ -974,13 +1024,26 @@ function AppShell({
                             title={t("empty.summary")}
                             body={t("empty.summary_body")}
                             action={
-                              <Button
-                                size="md"
-                                onClick={() => handleSummarize("general")}
-                                disabled={busy}
-                              >
-                                <Sparkles size={16} /> {t("action.summarize")}
-                              </Button>
+                              <div>
+                                <Button
+                                  size="md"
+                                  onClick={() => handleSummarize("general")}
+                                  disabled={busy}
+                                >
+                                  <Sparkles size={16} /> {t("action.summarize")}
+                                </Button>
+                                {/* Beside the button that fixes it, not in the
+                                    global banner: the recording, the audio and
+                                    the transcript are all saved and correct,
+                                    and only this one step failed. A banner
+                                    across the top would report a lost
+                                    meeting. */}
+                                {summaryFailed && (
+                                  <p className="mt-3 text-xs text-danger">
+                                    {t("processing.summary_failed")}
+                                  </p>
+                                )}
+                              </div>
                             }
                           />
                         )}
