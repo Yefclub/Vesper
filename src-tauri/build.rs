@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     stage_ggml_backends();
+    repair_profile_libraries();
     find_libraries_beside_the_app();
     tauri_build::build()
 }
@@ -61,10 +62,7 @@ fn stage_ggml_backends() {
         };
         for entry in entries.flatten() {
             let from = entry.path();
-            let is_library = from
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| matches!(e, "dll" | "so" | "dylib"));
+            let is_library = is_shared_library(&from);
             if !is_library {
                 continue;
             }
@@ -100,6 +98,84 @@ fn stage_ggml_backends() {
         .expect("writing the backend manifest");
 }
 
+/// Whether a file is a shared library, versioned suffix and all.
+///
+/// `libllama.so.0` has an extension of `0`, so matching on the extension alone
+/// misses exactly the name a Linux binary records in its `DT_NEEDED` — which is
+/// the one that has to be present for the app to start.
+fn is_shared_library(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name.ends_with(".dll") || name.ends_with(".dylib") || name.contains(".so")
+}
+
+/// Replace the dangling symlinks the sys crate leaves in the profile directory.
+///
+/// llama.cpp sets `SOVERSION`, so CMake installs `libllama.so` as a symlink to
+/// `libllama.so.0`. llama-cpp-sys-2 hard-links the *symlink* into the profile
+/// directory and copies nothing else, which leaves two problems: the link
+/// dangles, because its target was never copied alongside it, and the name the
+/// binary actually asks for at load time is the SONAME — `libllama.so.0` — which
+/// is not there at all. A test binary linked this way cannot start.
+///
+/// It also makes the sys build script non-idempotent: `dst.exists()` follows the
+/// dangling link and answers false, so the next run tries to create it again and
+/// panics with `AlreadyExists`. That is what fails a Linux job the moment clippy
+/// and tests both run, because clippy's fingerprint differs and the build script
+/// executes twice.
+///
+/// Copying the resolved contents under every name fixes both: the loader finds
+/// the SONAME, and the sys script finds a real file and skips.
+fn repair_profile_libraries() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        return;
+    }
+    let Some(profile) = profile_dir() else {
+        return;
+    };
+    for source in library_dirs() {
+        let Ok(entries) = std::fs::read_dir(&source) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let from = entry.path();
+            if !is_shared_library(&from) {
+                continue;
+            }
+            // Beside the binaries and beside the test binaries: cargo runs tests
+            // out of `deps`, and that is a different directory to the loader.
+            for dir in [profile.clone(), profile.join("deps")] {
+                if !dir.is_dir() {
+                    continue;
+                }
+                let to = dir.join(entry.file_name());
+                // Removed first. `fs::copy` onto a dangling symlink writes
+                // through it, creating the file the link points at instead of
+                // replacing the link.
+                let _ = std::fs::remove_file(&to);
+                if let Err(e) = std::fs::copy(&from, &to) {
+                    println!(
+                        "cargo:warning=copying {} to {}: {e}",
+                        from.display(),
+                        to.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `<target>/<profile>`, derived from `OUT_DIR` so it follows `--target` and
+/// `CARGO_TARGET_DIR`.
+fn profile_dir() -> Option<PathBuf> {
+    let out_dir = std::env::var("OUT_DIR").ok()?;
+    PathBuf::from(out_dir)
+        .ancestors()
+        .nth(3)
+        .map(Path::to_path_buf)
+}
+
 /// The directories the sys crate left shared libraries in, named by cargo.
 ///
 /// Two of them, for two different reasons. `bin` holds llama and ggml
@@ -122,7 +198,12 @@ fn library_dirs() -> Vec<PathBuf> {
 
     let mut dirs = Vec::new();
     if let Ok(root) = std::env::var("DEP_LLAMA_ROOT") {
-        dirs.push(PathBuf::from(root).join("bin"));
+        let root = PathBuf::from(root);
+        // `bin` on Windows, `lib` everywhere else. Both are listed rather than
+        // chosen: the import libraries that share the Windows `lib` directory
+        // are not shared libraries, so they filter themselves out.
+        dirs.push(root.join("bin"));
+        dirs.push(root.join("lib"));
     }
     if let Ok(backends) = std::env::var("DEP_LLAMA_BACKENDS_DIR") {
         dirs.push(PathBuf::from(backends));
