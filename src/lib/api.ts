@@ -248,6 +248,11 @@ export const api = {
   /// Puts an earlier version back, as a new version. Nothing is rewound.
   restoreSummaryVersion: (id: string, version: number) =>
     invoke<SummaryVersion>("restore_summary_version", { id, version }),
+  /// The card asking to grow or shrink as the pointer arrives and leaves.
+  /// A no-op unless a recording is running and the main window is minimized —
+  /// the backend re-derives both rather than trusting a remembered flag.
+  setOverlayExpanded: (expanded: boolean) =>
+    invoke<void>("set_overlay_expanded", { expanded }),
   summarize: (id: string, template?: string) =>
     invoke<MeetingInsights>("summarize_meeting", { id, template }),
   importAudio: (path: string, title?: string) =>

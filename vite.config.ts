@@ -8,6 +8,16 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
   clearScreen: false,
+  build: {
+    rollupOptions: {
+      // Two windows, two documents. `main` must stay — Tauri loads the app from
+      // the dev server root and from `index.html` in the bundle.
+      input: {
+        main: "index.html",
+        overlay: "overlay.html",
+      },
+    },
+  },
   server: {
     port: 1420,
     strictPort: true,

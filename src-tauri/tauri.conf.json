@@ -21,7 +21,23 @@
         "resizable": true,
         "maximized": true,
         "fullscreen": false,
-        "backgroundColor": "#fbf9fc"
+        "backgroundColor": "#fbf9fc",
+        "label": "main"
+      },
+      {
+        "label": "overlay",
+        "url": "overlay.html",
+        "title": "Vesper",
+        "width": 14,
+        "height": 132,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "visible": false,
+        "focus": false
       }
     ],
     "security": {

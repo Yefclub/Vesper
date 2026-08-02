@@ -10,6 +10,7 @@ use crate::domain::i18n::{catalog, t, Locale};
 use crate::domain::job::{
     MeetingEvent, MeetingPhase, MeetingProgress, MeetingRecord, MeetingStatus,
 };
+use crate::domain::overlay::{dock_right_center, overlay_visible, COLLAPSED, EXPANDED};
 use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, SummaryVersion};
 use crate::domain::search::SearchHit;
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
@@ -32,7 +33,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 pub struct AppState {
@@ -484,7 +485,11 @@ pub fn start_recording(
     *state.active_meeting.lock() = Some(id);
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
-    spawn_live_stt_ticker(app, Arc::clone(&state));
+    spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
+    // A recording can be started by the tray or the accelerator while the window
+    // is already minimized, so the card has to be considered here and not only
+    // when the window is minimized.
+    sync_overlay(&app, &state, false);
     Ok(meeting)
 }
 
@@ -552,6 +557,9 @@ pub async fn stop_recording(
     // the generation makes it immediate, and makes a start that follows quickly
     // unambiguous about which ticker owns the microphone.
     state.live_stt_generation.fetch_add(1, Ordering::SeqCst);
+    // Before the tail transcription and the summary, which take seconds: the
+    // card must not sit there advertising a recording that has already stopped.
+    sync_overlay(&app, &state, false);
     let duration = state.recorder.elapsed_ms();
     // Take the tail here, synchronously, while this is still the only thing that
     // has touched the recorder since it stopped. Draining it later — after the
@@ -1172,6 +1180,68 @@ pub fn shortcut_status(status: State<'_, ShortcutStatus>) -> ShortcutStatus {
 /// Rename a meeting.
 ///
 /// The typed name goes through the same `parse_title` as the model's answer —
+/// Show, hide, move and size the minimized-recording card.
+///
+/// Both inputs are re-read here rather than remembered: a recording can stop
+/// while the window is minimized and the window can be restored while recording,
+/// and a flag toggled by whichever event fired last gets one of those wrong.
+fn sync_overlay(app: &AppHandle, state: &AppState, expanded: bool) {
+    let Some(overlay) = app.get_webview_window("overlay") else {
+        return;
+    };
+    let recording = state.recorder.is_recording();
+    let minimized = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_minimized().ok())
+        .unwrap_or(false);
+
+    if !overlay_visible(recording, minimized) {
+        let _ = overlay.hide();
+        return;
+    }
+
+    let size = if expanded { EXPANDED } else { COLLAPSED };
+    // The monitor the main window is on, not the primary: on a two-screen desk
+    // the card belongs beside the work, and the scale factor differs per display.
+    let monitor = app
+        .get_webview_window("main")
+        .and_then(|w| w.current_monitor().ok().flatten())
+        .or_else(|| overlay.primary_monitor().ok().flatten());
+    if let Some(m) = monitor {
+        let pos = m.position();
+        let msize = m.size();
+        let (x, y) = dock_right_center(
+            (pos.x, pos.y),
+            (msize.width, msize.height),
+            m.scale_factor(),
+            size,
+        );
+        let _ = overlay.set_size(tauri::LogicalSize::new(size.0, size.1));
+        let _ = overlay.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    let _ = overlay.show();
+}
+
+/// Re-derive the card's visibility after the main window moved or changed state.
+///
+/// Collapsed on purpose: the pointer is not over the card at the moment the
+/// window is minimized, and starting expanded would put a 340px panel on screen
+/// that nothing asked for.
+pub fn sync_overlay_for(app: &AppHandle, state: &AppState) {
+    sync_overlay(app, state, false);
+}
+
+/// The card asking to grow or shrink as the pointer arrives and leaves.
+#[tauri::command]
+pub fn set_overlay_expanded(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    expanded: bool,
+) -> Result<(), String> {
+    sync_overlay(&app, &state, expanded);
+    Ok(())
+}
+
 /// Rebuild the insight set a meeting currently shows, so a refinement can be
 /// stored as a version without reparsing its markdown twice.
 fn current_insights(m: &MeetingRecord) -> MeetingInsights {
