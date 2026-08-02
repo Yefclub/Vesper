@@ -40,6 +40,9 @@ interface Props {
   models: ModelInfo[];
   onClose: () => void;
   onSave: (s: AppSettings) => Promise<void>;
+  /// The theme is written by its own command, not by Save, so the shell has to
+  /// be told separately or its own toggle keeps showing the previous one.
+  onThemeChange: (theme: string) => void;
   onRefreshModels: () => Promise<void>;
 }
 
@@ -48,6 +51,7 @@ export function SettingsPanel({
   models,
   onClose,
   onSave,
+  onThemeChange,
   onRefreshModels,
 }: Props) {
   const { t, setLocale } = useI18n();
@@ -84,8 +88,9 @@ export function SettingsPanel({
   /// The theme is deliberately excluded. It applies the moment it is clicked —
   /// a theme you cannot see until you save is not a choice — so it can never be
   /// "unsaved" in the sense this footer means, and counting it would put a Save
-  /// button on screen for something already done. The unmount in the effect
-  /// above is what persists or reverts it.
+  /// button on screen for something already done. `set_theme` is what persists
+  /// it, at the moment it is clicked, and the backend ignores whatever theme a
+  /// whole-settings Save carries — so a stale draft here cannot undo one.
   const dirty = useMemo(() => {
     const strip = (v: AppSettings) => {
       const { theme: _theme, ...rest } = v;
@@ -665,7 +670,10 @@ export function SettingsPanel({
                 label={t("settings.theme")}
                 value={theme}
                 onChange={(v) => {
-                  const previous = draft.theme;
+                  // Normalised, not raw: `theme` is optional on the wire for a
+                  // backend that does not carry it yet, and `undefined` must not
+                  // be what the revert path puts back.
+                  const previous = draft.theme === "dark" ? "dark" : "light";
                   const next = v === "dark" ? "dark" : "light";
                   applyTheme(next);
                   setDraft((d) => ({ ...d, theme: next }));
@@ -674,8 +682,10 @@ export function SettingsPanel({
                   // deliberately outside `dirty`, so without this a theme picked
                   // here would be a preview that Save never offered to keep and
                   // the close handler then threw away.
+                  onThemeChange(next);
                   api.setTheme(next).catch(() => {
-                    applyTheme(previous === "dark" ? "dark" : "light");
+                    onThemeChange(previous);
+                    applyTheme(previous);
                     setDraft((d) => ({ ...d, theme: previous }));
                   });
                 }}

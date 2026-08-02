@@ -1396,6 +1396,9 @@ function AppShell({
             settings={settings}
             models={models}
             onClose={() => setShowSettings(false)}
+            onThemeChange={(theme) =>
+              setSettings((prev) => ({ ...prev, theme }))
+            }
             onSave={async (s) => {
               const next = await api.saveSettings(s);
               setSettings(next);

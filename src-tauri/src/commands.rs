@@ -161,12 +161,12 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
         )
     };
     settings.validate_models().map_err(|e| e.to_string())?;
-    // The WebView is the trust boundary, so "it comes from our own front end" is
-    // not a validation: a value outside this pair would be written to the row and
-    // handed back to the window on every boot.
-    if settings.theme != "light" && settings.theme != "dark" {
-        return Err("invalid theme: expected `light` or `dark`".into());
-    }
+    // The theme is not this command's to write. `set_theme` owns it, and the
+    // drawer's draft carries whatever the theme was when it opened — so a Save
+    // of some unrelated field would put that stale value back and silently undo
+    // a theme picked in between. One writer, and the incoming value is ignored
+    // rather than validated.
+    settings.theme = state.settings.lock().theme.clone();
     // Only an actual change counts as a pick: every save comes through here, and a
     // save that touched the microphone must not reshuffle the model list.
     if settings.openrouter_llm_model != previous_llm_model {
@@ -233,11 +233,6 @@ pub fn set_theme(state: State<'_, Arc<AppState>>, theme: String) -> Result<AppSe
     if theme != "light" && theme != "dark" {
         return Err("invalid theme: expected `light` or `dark`".into());
     }
-    let updated = {
-        let mut current = state.settings.lock();
-        current.theme = theme;
-        current.clone()
-    };
     // Whichever home is holding the key keeps holding it. Hardcoding `Keychain`
     // here would strip the key from the row on a machine whose keychain refused
     // to cooperate — the one place it is still stored — and a theme toggle would
@@ -247,8 +242,13 @@ pub fn set_theme(state: State<'_, Arc<AppState>>, theme: String) -> Result<AppSe
     } else {
         KeyHome::KeepInRow
     };
-    state.db.save_settings_with(&updated, home)?;
-    Ok(updated.public_view())
+    // The guard is held across the database write. Releasing it first left a
+    // window in which a concurrent save could land between the read and the
+    // write, and the loser's whole snapshot would overwrite the winner's row.
+    let mut current = state.settings.lock();
+    current.theme = theme;
+    state.db.save_settings_with(&current, home)?;
+    Ok(current.public_view())
 }
 
 #[tauri::command]
@@ -550,6 +550,13 @@ pub async fn stop_recording(
     // unambiguous about which ticker owns the microphone.
     state.live_stt_generation.fetch_add(1, Ordering::SeqCst);
     let duration = state.recorder.elapsed_ms();
+    // Take the tail here, synchronously, while this is still the only thing that
+    // has touched the recorder since it stopped. Draining it later — after the
+    // await for `stt_flight` — read whatever buffer existed by then, and a
+    // recording started in the meantime owns that buffer: its opening seconds
+    // were transcribed into the meeting that had just ended, and left as a hole
+    // in the one that had just begun.
+    let tail = state.recorder.drain_chunks();
     let mut meeting = state
         .db
         .get_meeting(&id)?
@@ -611,7 +618,7 @@ pub async fn stop_recording(
         // everything spoken between that drain and the stop is still sitting in
         // the buffer. Skipping it — which is what happened whenever any live
         // segment existed — silently dropped the end of every meeting.
-        let (mic, sys, sr) = state.recorder.drain_chunks();
+        let (mic, sys, sr) = tail;
         if !mic.is_empty() || !sys.is_empty() {
             let tail_ms = duration
                 .saturating_sub((mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64);
