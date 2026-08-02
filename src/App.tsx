@@ -13,7 +13,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { clsx } from "clsx";
-import { Settings, Sparkles, TriangleAlert } from "lucide-react";
+import { Moon, Settings, Sparkles, Sun, TriangleAlert } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -789,7 +789,28 @@ function AppShell({
           </AnimatePresence>
         </div>
 
-        <div className="flex items-center justify-end gap-3">
+        <div className="flex items-center justify-end gap-1">
+          {/* The theme is one click from anywhere, not four (gear → Appearance →
+              pick → close). It applies immediately and writes straight through
+              to settings, because there is no draft out here to be dirty and
+              nothing to save. `theme` is read off the row rather than off the
+              DOM so the button and the stored value cannot disagree. */}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => {
+              const next = settings.theme === "dark" ? "light" : "dark";
+              applyTheme(next);
+              const updated = { ...settings, theme: next };
+              setSettings(updated);
+              onSettingsChange(updated);
+              api.saveSettings(updated).catch((e) => setError(String(e)));
+            }}
+            title={t(settings.theme === "dark" ? "theme.light" : "theme.dark")}
+            aria-label={t(settings.theme === "dark" ? "theme.light" : "theme.dark")}
+          >
+            {settings.theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+          </Button>
           <Button
             variant="ghost"
             size="icon"

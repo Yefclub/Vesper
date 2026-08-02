@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -83,6 +84,21 @@ export function SettingsPanel({
   /// the effect ran.
   const themeOnOpen = useRef<Theme>(currentTheme());
   const themeSaved = useRef(false);
+
+  /// Whether anything is waiting to be saved.
+  ///
+  /// The theme is deliberately excluded. It applies the moment it is clicked —
+  /// a theme you cannot see until you save is not a choice — so it can never be
+  /// "unsaved" in the sense this footer means, and counting it would put a Save
+  /// button on screen for something already done. The unmount in the effect
+  /// above is what persists or reverts it.
+  const dirty = useMemo(() => {
+    const strip = (v: AppSettings) => {
+      const { theme: _theme, ...rest } = v;
+      return rest;
+    };
+    return JSON.stringify(strip(draft)) !== JSON.stringify(strip(settings));
+  }, [draft, settings]);
 
   useEffect(() => {
     api.listDevices().then(setDevices).catch(() => setDevices([]));
@@ -704,7 +720,22 @@ export function SettingsPanel({
               </span>
             )}
           </div>
-          <Button size="md" onClick={save} disabled={saving}>
+          {dirty && (
+            <Button
+              size="md"
+              variant="secondary"
+              onClick={() => setDraft({ ...settings })}
+              disabled={saving}
+            >
+              {t("action.discard")}
+            </Button>
+          )}
+          <Button
+            size="md"
+            onClick={save}
+            disabled={saving || !dirty}
+            className={dirty ? undefined : "invisible"}
+          >
             {t("settings.save")}
           </Button>
         </div>
