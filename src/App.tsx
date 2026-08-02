@@ -877,7 +877,13 @@ function AppShell({
         {/* Transparent to presses, and its contents are not: the column is
             empty except while recording, and an empty column swallowing the
             middle of the titlebar is the same bug as the identity block. */}
-        <div className="pointer-events-none flex items-center justify-center [&>*]:pointer-events-auto">
+        {/* No `[&>*]` opt-in here, unlike the actions column. Its children are
+            readouts wrapped around a couple of buttons, and making the wrapper
+            answer presses only moves the problem up a level: the wrapper
+            becomes the target and the header still refuses it. The transport
+            re-enables its own buttons instead, which works through an
+            ancestor that does not answer. */}
+        <div className="pointer-events-none flex items-center justify-center">
           <AnimatePresence>
             {status?.recording ? (
               <motion.div key="transport" {...fadeRise}>
@@ -889,13 +895,7 @@ function AppShell({
                 />
               </motion.div>
             ) : working ? (
-              <motion.div
-                key="processing"
-                // No pointer opt-in: it is a label, and a label that eats
-                // presses is a strip of titlebar that cannot be dragged.
-                className="pointer-events-none"
-                {...fadeRise}
-              >
+              <motion.div key="processing" {...fadeRise}>
                 <ProcessingStatus phase={working} />
               </motion.div>
             ) : null}
