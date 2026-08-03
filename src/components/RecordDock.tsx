@@ -6,7 +6,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
-import { Check, Mic, MonitorSpeaker, Settings } from "lucide-react";
+import { Check, Mic, MonitorSpeaker, Pause, Play, Settings, Square } from "lucide-react";
 import { clsx } from "clsx";
 import { AudioDevice, StartGate } from "../lib/api";
 import { useI18n } from "../lib/i18n";
@@ -29,6 +29,12 @@ interface Props {
   micDeviceId?: string | null;
   systemDeviceId?: string | null;
   onStart: () => void;
+  /// Present while a recording is running. The dock keeps its place and its
+  /// centre control changes hands — the button the user pressed to start is
+  /// where they will look to stop.
+  recording?: { paused: boolean } | null;
+  onStop?: () => void;
+  onPauseResume?: () => void;
   onOpenSettings: () => void;
   onPickDevice: (kind: DeviceKind, id: string | null) => void;
 }
@@ -91,6 +97,9 @@ export function RecordDock({
   onStart,
   onOpenSettings,
   onPickDevice,
+  recording,
+  onStop,
+  onPauseResume,
 }: Props) {
   const { t } = useI18n();
   // Hover and focus are tracked apart: moving the mouse away while a control
@@ -257,15 +266,47 @@ export function RecordDock({
         </motion.div>
 
         {/* 4px of shell around a 36px control: 12px outer radius minus the 4px
-            inset is exactly the 8px the button inside carries. */}
-        <Button
-          size="md"
-          data-testid="btn-record"
-          disabled={busy || blocked}
-          onClick={onStart}
-        >
-          <Mic size={16} aria-hidden /> {t("record.start")}
-        </Button>
+            inset is exactly the 8px the button inside carries.
+
+            While a recording runs the same slot holds pause and stop. The
+            header shows the transport too, and both are wanted: the header is
+            where the elapsed time and the meters live, and this is where the
+            hand already is — it is the button that started the recording. */}
+        {recording ? (
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              size="md"
+              data-testid="btn-dock-pause"
+              disabled={busy}
+              onClick={onPauseResume}
+            >
+              {recording.paused ? (
+                <Play size={16} aria-hidden />
+              ) : (
+                <Pause size={16} aria-hidden />
+              )}
+              {t(recording.paused ? "record.resume" : "record.pause")}
+            </Button>
+            <Button
+              size="md"
+              data-testid="btn-dock-stop"
+              disabled={busy}
+              onClick={onStop}
+            >
+              <Square size={14} aria-hidden /> {t("record.stop")}
+            </Button>
+          </div>
+        ) : (
+          <Button
+            size="md"
+            data-testid="btn-record"
+            disabled={busy || blocked}
+            onClick={onStart}
+          >
+            <Mic size={16} aria-hidden /> {t("record.start")}
+          </Button>
+        )}
 
         {/* The counterweight carries the gear now instead of being an empty box
             for nothing. Same width, same variant, right-aligned. */}
