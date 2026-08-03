@@ -25,6 +25,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # CMake 4 retired `CMP0194`, and without that policy set it refuses the
+      # configure step with "MSVC is not an assembler for language ASM". The
+      # runner ships 4.4; the version the Vulkan jobs happen to get is 3.31,
+      # which is why only this job hits it. Pinned rather than worked around,
+      # because the alternative is passing a policy default through a build
+      # script that does not forward CMake arguments.
+      - name: CMake 3.31
+        shell: pwsh
+        run: |
+          pip install "cmake==3.31.6" --quiet
+          cmake --version
       - name: LLVM binutils on PATH
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
