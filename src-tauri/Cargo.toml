@@ -112,6 +112,11 @@ printpdf = "0.7"
 docx-rs = "0.4"
 dirs = "6"
 sha2 = "0.10"
+# Already in the tree through docx-rs; named here to unpack the optional CUDA
+# backend, which is the only zip this app opens. `default-features = false`
+# plus `deflate`: the pack is deflate, and the other codecs are parsers this
+# has no reason to expose.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

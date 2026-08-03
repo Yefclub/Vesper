@@ -60,6 +60,10 @@ fn load_ggml_backends() {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    // A backend the user downloaded, before anything else. It is not beside the
+    // executable and ggml will never find it on its own.
+    load_downloaded_backend();
+
     // ggml scans the executable's own directory by itself. Loading that same
     // directory again registers every backend twice, and a device listed twice
     // is a card that gets asked to hold half a model each time.
@@ -77,6 +81,42 @@ fn load_ggml_backends() {
         Some(dir) => load_backends_from_path(&dir),
         None => tracing::warn!("no ggml backend directory found; local models will not load"),
     }
+}
+
+/// Register the CUDA pack, if the user asked for it and it unpacked.
+///
+/// Two steps, and the second is the one that is easy to miss. `ggml-cuda.dll`
+/// imports `cudart` and `cublas` at *load* time, and Windows resolves those
+/// from the executable's directory, the system directories and `PATH` — never
+/// from the directory of the library doing the importing. Without the first
+/// step the file loads and immediately fails, which looks exactly like the
+/// machine not having a GPU.
+///
+/// Prepending to the process's own `PATH` rather than calling
+/// `SetDllDirectory`: it is inherited by everything ggml opens afterwards, and
+/// it does not disturb the default search order for anything else.
+fn load_downloaded_backend() {
+    use llama_cpp_2::llama_backend::load_backends_from_path;
+
+    let dir = crate::paths::backends_dir().join("cuda-backend");
+    if !dir.join("ggml-cuda.dll").is_file() {
+        return;
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        let mut entries = vec![dir.clone()];
+        entries.extend(std::env::split_paths(&path));
+        match std::env::join_paths(entries) {
+            // SAFETY: called once, from inside the `OnceLock` that guards the
+            // backend, before any thread can be looking at the environment.
+            Ok(joined) => unsafe { std::env::set_var("PATH", joined) },
+            Err(e) => {
+                tracing::warn!("could not put the CUDA pack on PATH: {e}");
+                return;
+            }
+        }
+    }
+    tracing::info!("loading the downloaded CUDA backend from {}", dir.display());
+    load_backends_from_path(&dir);
 }
 
 /// Whether a directory holds ggml's loadable backends.

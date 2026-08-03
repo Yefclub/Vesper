@@ -165,19 +165,40 @@ pub fn list_models() -> Vec<ModelInfo> {
             2_104_932_768u64,
             "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
         ),
+        (
+            "cuda-backend",
+            "backend",
+            "CUDA (NVIDIA) — aceleração opcional",
+            // Built by `.github/workflows/cuda-pack.yml` and published on its
+            // own tag. Pinned to a release rather than to `latest`, so the file
+            // this digest describes is the file that gets downloaded.
+            "https://github.com/Yefclub/Vesper/releases/download/cuda-pack-v5/vesper-cuda.zip",
+            667_162_994u64,
+            "c16afa409170e902548d03a7517b9bf1d9aaabb05e55ed494e51db42087a3f2c",
+        ),
     ];
     catalog
         .into_iter()
+        // The CUDA pack is built on Windows and carries `.dll`s. Offering it
+        // anywhere else is offering a download that cannot be used.
+        .filter(|(_, kind, ..)| *kind != "backend" || cfg!(windows))
         .map(|(id, kind, label, url, size, sha256)| {
             let path = model_artifact_path(id, kind);
             let present = path.is_file()
                 && std::fs::metadata(&path)
                     .map(|m| m.len() > 1_000_000)
                     .unwrap_or(false);
-            let ready = std::fs::read_to_string(artifact_marker_path(&path))
+            let verified = std::fs::read_to_string(artifact_marker_path(&path))
                 .map(|recorded| recorded.trim().eq_ignore_ascii_case(sha256))
                 .unwrap_or(false)
                 && present;
+            // A verified archive is not a usable backend. What the loader needs
+            // is the libraries beside it, so for a pack `ready` means unpacked.
+            let ready = if kind == "backend" {
+                verified && backend_is_unpacked(&path)
+            } else {
+                verified
+            };
             ModelInfo {
                 id: id.into(),
                 kind: kind.into(),
@@ -261,12 +282,63 @@ fn write_artifact_marker(artifact: &Path, sha256: &str) -> Result<(), String> {
 }
 
 fn model_artifact_path(id: &str, kind: &str) -> PathBuf {
+    // A compute backend is not a model and does not belong under `models`: it
+    // is a set of libraries the loader opens, and the download machinery is the
+    // only thing the two have in common.
+    if kind == "backend" {
+        return crate::paths::backends_dir().join(id).join("pack.zip");
+    }
     let name = if kind == "stt" {
         "model.bin"
     } else {
         "model.gguf"
     };
     models_dir().join(id).join(name)
+}
+
+/// Whether a downloaded pack has been unpacked beside its archive.
+///
+/// Probing for the library the loader will ask for, not for a marker file: an
+/// interrupted extraction leaves a directory that exists and is useless.
+pub fn backend_is_unpacked(archive: &Path) -> bool {
+    archive
+        .parent()
+        .map(|dir| dir.join("ggml-cuda.dll").is_file())
+        .unwrap_or(false)
+}
+
+/// Unpack a verified backend archive beside itself.
+///
+/// Only after the digest matched — this writes executable code onto the user's
+/// machine, and a zip is a container that can name any path it likes. Entries
+/// are taken by file name alone, so an archive carrying `..\..\system32\x.dll`
+/// lands as `x.dll` in the backend directory and nowhere else.
+fn unpack_backend(archive: &Path) -> Result<(), String> {
+    let dir = archive
+        .parent()
+        .ok_or_else(|| "backend archive has no directory".to_string())?;
+    let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("opening the pack: {e}"))?;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("reading the pack: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(name) = entry
+            .enclosed_name()
+            .and_then(|p| p.file_name().map(|n| n.to_owned()))
+        else {
+            continue;
+        };
+        let dest = dir.join(name);
+        let mut out =
+            std::fs::File::create(&dest).map_err(|e| format!("writing {}: {e}", dest.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("writing {}: {e}", dest.display()))?;
+    }
+    Ok(())
 }
 
 /// Download a model with streaming progress callbacks.
@@ -310,6 +382,16 @@ where
         if let Ok(existing) = sha256_file(&dest) {
             if existing.eq_ignore_ascii_case(&info.sha256) {
                 write_artifact_marker(&dest, &info.sha256)?;
+                if info.kind == "backend" && !backend_is_unpacked(&dest) {
+                    on_progress(DownloadProgress::phase(
+                        model_id,
+                        "extracting",
+                        0,
+                        info.size_hint_bytes,
+                        false,
+                    ));
+                    unpack_backend(&dest)?;
+                }
                 on_progress(DownloadProgress::phase(
                     model_id,
                     "done",
@@ -427,6 +509,19 @@ where
         ));
     }
     write_artifact_marker(&dest, &info.sha256)?;
+
+    // After the marker, so the archive is on record as verified before anything
+    // is written out of it. `verify_transfer` has already matched the digest.
+    if info.kind == "backend" {
+        on_progress(DownloadProgress::phase(
+            model_id,
+            "extracting",
+            final_len,
+            Some(final_len),
+            false,
+        ));
+        unpack_backend(&dest)?;
+    }
 
     on_progress(DownloadProgress::phase(
         model_id,

@@ -259,6 +259,9 @@ export function SettingsPanel({
   // The dropdown is an inventory, the catalog below is a shop. `ready` and not
   // `present`: a downloaded-but-unverified model is refused by the same gate
   // that refuses a missing one, so offering it is the same dead end.
+  /// The optional compute backend, which is a download like any other but is
+  /// not a model and must not appear in either model picker.
+  const cudaPack = models.find((m) => m.kind === "backend");
   const readyStt = models.filter((m) => m.kind === "stt" && m.ready);
   const readyLlm = models.filter((m) => m.kind === "llm" && m.ready);
   // A download that was started and never finished. "No model installed yet" is
@@ -605,6 +608,32 @@ export function SettingsPanel({
                   }
                 />
               </section>
+
+              {/* Only where there is an NVIDIA card the current build cannot
+                  reach. `cuda_device_name` comes from `nvidia-smi`, which
+                  answers "there is one" even when this binary has no CUDA
+                  backend — which is exactly the machine this offer is for.
+                  Hidden once it is installed: the row would then be an
+                  invitation to download something already downloaded. */}
+              {cudaPack && caps?.cuda_device_name && !cudaPack.ready && (
+                <div className="rounded-md border border-border bg-surface-2 p-3">
+                  <div className="mb-1 text-sm font-medium text-fg">
+                    {t("cuda.title")}
+                  </div>
+                  <p className="mb-2 text-xs leading-relaxed text-fg-muted">
+                    {t("cuda.body").replace(
+                      "{gpu}",
+                      caps.cuda_device_name ?? "",
+                    )}
+                  </p>
+                  <ModelRow
+                    model={cudaPack}
+                    progress={progress?.model_id === cudaPack.id ? progress : null}
+                    busy={progress !== null && progress.error == null}
+                    onDownload={download}
+                  />
+                </div>
+              )}
 
               {caps && (
                 <div className="rounded-md border border-border bg-surface-2 p-3 text-xs text-fg-muted">
