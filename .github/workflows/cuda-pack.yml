@@ -25,17 +25,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # CMake 4 retired `CMP0194`, and without that policy set it refuses the
-      # configure step with "MSVC is not an assembler for language ASM". The
-      # runner ships 4.4; the version the Vulkan jobs happen to get is 3.31,
-      # which is why only this job hits it. Pinned rather than worked around,
-      # because the alternative is passing a policy default through a build
-      # script that does not forward CMake arguments.
-      - name: CMake 3.31
+      # Ninja, the same generator the Vulkan jobs use, and for a reason that
+      # turns out not to be about Vulkan at all: with the Visual Studio
+      # generator this configure step dies on "Policy CMP0194 is not set: MSVC
+      # is not an assembler for language ASM", which CMake 4 retired. Pinning
+      # CMake back to 3.31 only traded that for a generator it does not know —
+      # the runner's toolchain is newer than 3.31 has heard of.
+      - name: Ninja generator
         shell: pwsh
         run: |
-          pip install "cmake==3.31.6" --quiet
-          cmake --version
+          choco install ninja -y --no-progress
+          Add-Content -Path $env:GITHUB_ENV -Value 'CMAKE_GENERATOR=Ninja'
       - name: LLVM binutils on PATH
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
