@@ -23,14 +23,14 @@ jobs:
             args: --target x86_64-pc-windows-msvc --features gpu-vulkan
           - platform: macos-latest
             args: --target aarch64-apple-darwin
-          # 22.04, not `latest`. `ubuntu-latest` is 24.04 and its AppImage
-          # bundling fails inside linuxdeploy in under a second, saying only
-          # "failed to run linuxdeploy" — deb and rpm bundle fine right before
-          # it. Tauri's own guidance is to build AppImages on 22.04, and the
-          # older image pays a second dividend for a desktop app: the binary
-          # links against an older glibc, so it runs on more distributions than
-          # one built on 24.04 would.
-          - platform: ubuntu-22.04
+          # Back on `latest`. 22.04 was tried to get the AppImage bundling
+          # working and cost more than it bought: `libspa` — the PipeWire
+          # binding, which the audio capture needs — does not compile against
+          # jammy's pipewire, failing with seven type errors before the bundler
+          # is even reached. 24.04 builds the application fine; only the
+          # AppImage step there is unhappy, and that is a bundler problem to
+          # solve on its own terms rather than by moving the whole toolchain.
+          - platform: ubuntu-latest
             args: --target x86_64-unknown-linux-gnu --features gpu-vulkan --verbose
     runs-on: ${{ matrix.platform }}
     steps:
@@ -41,7 +41,7 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux deps
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev libpipewire-0.3-dev libclang-dev cmake pkg-config
@@ -50,7 +50,7 @@ jobs:
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
       - name: Vulkan SDK (Linux)
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-latest'
         run: |
           # The codename comes from the runner rather than being written here.
           # It used to say `noble`, and the moment the Linux leg moved to 22.04
