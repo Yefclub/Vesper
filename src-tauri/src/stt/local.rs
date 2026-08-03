@@ -175,28 +175,115 @@ fn num_cpus_soft() -> i32 {
 }
 
 /// Linear resample i16 PCM → 16 kHz f32 mono in [-1, 1].
+/// Band-limited, because the alternative folds half the spectrum onto the words.
+///
+/// Live capture never reaches here — the audio thread asks the device for 16 kHz
+/// mono and gets it — but an imported file arrives at its own rate, and 44.1 or
+/// 48 kHz is the normal case. Dropping to 16 kHz by picking values between the
+/// samples, which is what this used to do, has no low-pass in front of it: every
+/// frequency above 8 kHz reflects back into the band as a tone that was never
+/// spoken. Whisper was trained on properly resampled audio, and sibilants land
+/// exactly where the reflections do.
+///
+/// `rubato` was already in the tree — the capture layer resamples with it — so
+/// this costs a line in the manifest and nothing in the bundle.
 pub fn resample_to_16k_f32(pcm: &[i16], sample_rate: u32) -> Vec<f32> {
+    use rubato::audioadapter_buffers::direct::InterleavedSlice;
+    use rubato::audioadapter_buffers::owned::InterleavedOwned;
+    use rubato::{Fft, FixedSync, Resampler};
+
     if pcm.is_empty() {
         return Vec::new();
     }
-    let sr = sample_rate.max(1) as f64;
-    let target = 16_000f64;
-    if (sr - target).abs() < 1.0 {
-        return pcm.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
+    let mono: Vec<f32> = pcm.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
+    let sr = sample_rate.max(1) as usize;
+    if sr == 16_000 {
+        return mono;
     }
-    let ratio = target / sr;
-    let out_len = ((pcm.len() as f64) * ratio).round().max(1.0) as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for i in 0..out_len {
-        let src = i as f64 / ratio;
-        let i0 = src.floor() as usize;
-        let i1 = (i0 + 1).min(pcm.len() - 1);
-        let frac = (src - i0 as f64) as f32;
-        let a = pcm[i0] as f32 / i16::MAX as f32;
-        let b = pcm[i1] as f32 / i16::MAX as f32;
-        out.push(a * (1.0 - frac) + b * frac);
+
+    let mut resampler = Fft::<f32>::new(sr, 16_000, 1024, 2, 1, FixedSync::Input)
+        .expect("a non-zero source rate and a 16 kHz target are always valid");
+
+    let Ok(input) = InterleavedSlice::new(&mono[..], 1, mono.len()) else {
+        return mono;
+    };
+    let mut output =
+        InterleavedOwned::<f32>::new(0.0, 1, resampler.process_all_needed_output_len(mono.len()));
+    match resampler.process_all_into_buffer(&input, &mut output, mono.len(), None) {
+        // `process_all_into_buffer` already trims the filter's own delay, so the
+        // written length is the audio and nothing else.
+        Ok((_, written)) => output.take_data().into_iter().take(written).collect(),
+        Err(e) => {
+            // Returning the unresampled audio would hand whisper the wrong rate
+            // and produce a transcript of a recording played at the wrong speed.
+            tracing::warn!("resampling failed: {e}");
+            Vec::new()
+        }
     }
-    out
+}
+
+#[cfg(test)]
+mod resampling {
+    use super::*;
+
+    fn tone(sample_rate: u32, hz: f32, seconds: f32) -> Vec<i16> {
+        let n = (sample_rate as f32 * seconds) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                ((t * hz * std::f32::consts::TAU).sin() * 0.5 * i16::MAX as f32) as i16
+            })
+            .collect()
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    /// A 12 kHz tone cannot exist at 16 kHz — it is above the Nyquist limit — so
+    /// resampling has to throw it away. Picking values between samples instead
+    /// reflects it down to 4 kHz at nearly full strength, which is a whistle
+    /// over every word of an imported recording.
+    #[test]
+    fn a_tone_above_the_limit_is_removed_rather_than_reflected() {
+        let out = resample_to_16k_f32(&tone(48_000, 12_000.0, 0.5), 48_000);
+        assert!(
+            rms(&out) < 0.05,
+            "expected the tone to be filtered out, got RMS {}",
+            rms(&out)
+        );
+    }
+
+    /// And a tone that does fit has to survive, or the filter is simply eating
+    /// the audio.
+    #[test]
+    fn a_tone_below_the_limit_survives() {
+        let out = resample_to_16k_f32(&tone(48_000, 1_000.0, 0.5), 48_000);
+        assert!(
+            rms(&out) > 0.2,
+            "expected the tone to come through, got RMS {}",
+            rms(&out)
+        );
+    }
+
+    /// Length follows the ratio: three times the rate in, a third of the samples
+    /// out. A drift here shows up as a transcript whose timestamps slide.
+    #[test]
+    fn the_output_length_follows_the_ratio() {
+        let out = resample_to_16k_f32(&tone(48_000, 440.0, 1.0), 48_000);
+        assert_eq!(out.len(), 16_000);
+    }
+
+    /// Already at the target rate, nothing is done to it.
+    #[test]
+    fn audio_already_at_16k_is_passed_through() {
+        let input = tone(16_000, 440.0, 0.25);
+        let out = resample_to_16k_f32(&input, 16_000);
+        assert_eq!(out.len(), input.len());
+    }
 }
 
 #[cfg(test)]

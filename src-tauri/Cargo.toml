@@ -69,6 +69,11 @@ chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Dual-channel: mic + OS system loopback (WASAPI / CoreAudio taps / PipeWire)
 flexaudio = "0.2"
+# Already in the tree —  resamples the capture with it — and named
+# here so the import path can use it too. A file arrives at its own rate, and
+# dropping to 16 kHz without a low-pass reflects everything above 8 kHz back
+# onto the speech.
+rubato = "3.0"
 cpal = "0.15"
 hound = "3.5"
 # Multi-format decode (wav/mp3/m4a/ogg/flac; webm best-effort)
