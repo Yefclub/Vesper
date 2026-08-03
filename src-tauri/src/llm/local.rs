@@ -584,13 +584,19 @@ mod gpu_bench {
     #[test]
     #[ignore]
     fn generates_on_every_backend() {
-        let model = dirs::data_dir()
-            .unwrap()
-            .join("Vesper")
-            .join("models")
-            .join("qwen2.5-0.5b")
-            .join("model.gguf");
-        assert!(model.is_file(), "qwen2.5-0.5b is not downloaded");
+        // `VESPER_BENCH_MODEL` points it at any GGUF, which is how one model's
+        // behaviour on a backend can be told apart from the backend's own.
+        let model = std::env::var("VESPER_BENCH_MODEL")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                dirs::data_dir()
+                    .unwrap()
+                    .join("Vesper")
+                    .join("models")
+                    .join("qwen2.5-0.5b")
+                    .join("model.gguf")
+            });
+        assert!(model.is_file(), "no weights at {}", model.display());
 
         println!("devices: {:#?}", gpu_devices());
         println!("support: {:?}", probe_support());
