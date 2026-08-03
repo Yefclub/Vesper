@@ -65,19 +65,19 @@ pub fn recommend_from_probe(probe: &CapabilityProbe) -> CapabilityReport {
             "{} MB of video memory — large local models will fit.",
             vram_mb
         ));
-        ("whisper-large-v3-turbo", "qwen2.5-3b")
+        ("whisper-large-v3-turbo", "gemma3-4b")
     } else if gpu && vram_mb >= 5_000 {
         notes.push(format!(
             "{} MB of video memory — mid-sized models fit.",
             vram_mb
         ));
-        ("whisper-small", "qwen2.5-1.5b")
+        ("whisper-small", "llama32-3b")
     } else if gpu {
         notes.push(format!(
             "{} MB of video memory — small models only, but on the GPU.",
             vram_mb
         ));
-        ("whisper-base", "qwen2.5-1.5b")
+        ("whisper-base", "llama32-1b")
     } else if cores >= 8 {
         notes.push("No usable GPU — running on the CPU, which has cores to spare.".into());
         ("whisper-base", "qwen2.5-0.5b")
@@ -251,7 +251,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(r.recommended_stt_model, "whisper-large-v3-turbo");
-        assert_eq!(r.recommended_llm_model, "qwen2.5-3b");
+        assert_eq!(r.recommended_llm_model, "gemma3-4b");
         assert_eq!(r.vram_mb, 24 * 1024);
         assert_eq!(r.cuda_device_name.as_deref(), Some("RTX 4090"));
     }
@@ -266,7 +266,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(r.recommended_stt_model, "whisper-small");
-        assert_eq!(r.recommended_llm_model, "qwen2.5-1.5b");
+        assert_eq!(r.recommended_llm_model, "llama32-3b");
         assert_eq!(r.recommended_backend, "auto");
     }
 

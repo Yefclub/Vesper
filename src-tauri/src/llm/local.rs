@@ -592,7 +592,16 @@ pub fn run_llama(
 
     // Deterministic on purpose. A summary the user re-runs should not come back
     // different, and greedy also keeps a seed out of the equation for tests.
-    let mut sampler = LlamaSampler::greedy();
+    //
+    // Greedy alone loops, though, and a small model loops hardest: the 0.5B
+    // produced "instale o clode Cote usando o clode Cote" and kept going. The
+    // penalty in front of it looks back over the last 64 tokens and taxes
+    // repeats — enough to break a cycle, gentle enough that a meeting which
+    // genuinely mentions one topic throughout can still say so.
+    let mut sampler = LlamaSampler::chain_simple([
+        LlamaSampler::penalties(64, 1.1, 0.0, 0.0),
+        LlamaSampler::greedy(),
+    ]);
 
     // Bytes, decoded once at the end. A multi-byte character can span two tokens,
     // so decoding each piece on its own turns every accented word in a Portuguese
@@ -669,7 +678,11 @@ mod gpu_bench {
             std::env::var("VESPER_BENCH_BACKENDS").unwrap_or_else(|_| "cpu,vulkan,cuda".into());
         for backend in only.split(',') {
             let started = std::time::Instant::now();
-            match run_llama(&model, &prompt, 256, backend) {
+            let budget = std::env::var("VESPER_BENCH_TOKENS")
+                .ok()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(256);
+            match run_llama(&model, &prompt, budget, backend) {
                 Ok(text) => println!(
                     "{backend:>7}: {:>8.2?}  {:?}",
                     started.elapsed(),
@@ -694,7 +707,7 @@ mod tests {
                 "Me: we need to ship auth. Others: agreed. TODO write tests.",
                 SummaryTemplate::General,
                 Locale::En,
-                "qwen2.5-1.5b",
+                "llama32-1b",
                 "cpu",
                 false,
             )
@@ -711,7 +724,7 @@ mod tests {
                 "hi",
                 SummaryTemplate::General,
                 Locale::En,
-                "qwen2.5-1.5b",
+                "llama32-1b",
                 "cpu",
                 false,
             )

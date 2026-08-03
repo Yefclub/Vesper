@@ -149,21 +149,48 @@ pub fn list_models() -> Vec<ModelInfo> {
             491_400_032u64,
             "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
         ),
+        // The ladder above 0.5B is Llama 3.2 and Gemma 3, and it got there by
+        // measurement rather than by release date. Summarising the same real
+        // Portuguese transcript with the same prompt this app sends, on one
+        // RTX 4070:
+        //
+        // | model            | size   | CUDA  | prose      |
+        // |------------------|--------|-------|------------|
+        // | Qwen2.5 0.5B     | 469 MB | 1.22s | Portuguese |
+        // | Llama 3.2 1B     | 807 MB | 2.38s | Portuguese |
+        // | Qwen2.5 1.5B     | 1.1 GB | 2.95s | **English**|
+        // | Llama 3.2 3B     | 2.0 GB | 4.32s | Portuguese |
+        // | Gemma 3 4B       | 2.5 GB | 6.40s | Portuguese |
+        //
+        // The prompt says "write all prose in Brazilian Portuguese"; Qwen2.5
+        // 1.5B answered in English anyway, and it was the model recommended to
+        // most machines with a GPU. Llama 3.2 1B replaces it at a third less
+        // weight and half a second less time. Sampling is greedy, so these runs
+        // reproduce, but they are one transcript — the ranking is evidence, not
+        // proof.
         (
-            "qwen2.5-1.5b",
+            "llama32-1b",
             "llm",
-            "Qwen2.5 1.5B Instruct Q4_K_M (local LLM)",
-            "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-            1_117_320_736u64,
-            "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+            "Llama 3.2 1B Instruct Q4_K_M (local LLM)",
+            "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+            807_694_464u64,
+            "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
         ),
         (
-            "qwen2.5-3b",
+            "llama32-3b",
             "llm",
-            "Qwen2.5 3B Instruct Q4_K_M (local LLM)",
-            "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
-            2_104_932_768u64,
-            "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+            "Llama 3.2 3B Instruct Q4_K_M (local LLM)",
+            "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+            2_019_377_696u64,
+            "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+        ),
+        (
+            "gemma3-4b",
+            "llm",
+            "Gemma 3 4B Instruct Q4_K_M (local LLM)",
+            "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+            2_489_894_016u64,
+            "04a43a22e8d2003deda5acc262f68ec1005fa76c735a9962a8c77042a74a7d19",
         ),
         (
             "cuda-backend",

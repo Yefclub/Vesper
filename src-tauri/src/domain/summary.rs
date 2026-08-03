@@ -95,6 +95,65 @@ pub fn split_thinking(raw: &str) -> (Option<String>, String) {
     }
 }
 
+/// Which section a line opens, if it opens one.
+///
+/// The prompt asks for the three headings in English and most models comply,
+/// but the better a model writes the target language the likelier it is to
+/// translate them too: Gemma 3 4B produced the best Portuguese prose in the
+/// bench and titled it `## Resumo`. Matching English only, the whole answer
+/// fell into the summary and the other two sections came back empty — the best
+/// output scored worst. So the headings are read in both shipped languages.
+///
+/// Bold (`**Resumo**`) and trailing colons appear about as often as plain ones,
+/// and cost a line each to accept.
+fn section_of(line: &str) -> Option<Section> {
+    let hashed = line.starts_with('#');
+    let label = line
+        .trim_start_matches('#')
+        .trim()
+        .trim_start_matches("**")
+        .trim_end_matches("**")
+        .trim_end_matches(':')
+        .trim()
+        .to_lowercase();
+
+    // A bare word only opens a section when it is the whole line. Without that,
+    // a summary whose first sentence starts "Resumo da reunião…" would be eaten
+    // as a heading.
+    let opens = |names: &[&str]| {
+        names.iter().any(|n| {
+            if hashed {
+                label.starts_with(n)
+            } else {
+                label == *n
+            }
+        })
+    };
+
+    if opens(&["summary", "resumo"]) {
+        return Some(Section::Summary);
+    }
+    if opens(&[
+        "key points",
+        "key point",
+        "pontos-chave",
+        "pontos chave",
+        "pontos principais",
+    ]) {
+        return Some(Section::KeyPoints);
+    }
+    if opens(&[
+        "action items",
+        "action item",
+        "itens de ação",
+        "ações",
+        "próximos passos",
+    ]) {
+        return Some(Section::ActionItems);
+    }
+    None
+}
+
 impl MeetingInsights {
     pub fn from_model_text(raw: &str) -> Self {
         let mut summary = String::new();
@@ -104,17 +163,8 @@ impl MeetingInsights {
 
         for line in raw.lines() {
             let trimmed = line.trim();
-            let lower = trimmed.to_ascii_lowercase();
-            if lower.starts_with("## summary") || lower == "summary:" || lower == "summary" {
-                section = Section::Summary;
-                continue;
-            }
-            if lower.starts_with("## key") || lower.starts_with("key points") {
-                section = Section::KeyPoints;
-                continue;
-            }
-            if lower.starts_with("## action") || lower.starts_with("action items") {
-                section = Section::ActionItems;
+            if let Some(heading) = section_of(trimmed) {
+                section = heading;
                 continue;
             }
             if trimmed.is_empty() {
@@ -321,6 +371,33 @@ We discussed the roadmap.
             assert!(p.contains("## Action items"));
             assert!(p.contains("Keep the three headings exactly as written, in English"));
         }
+    }
+
+    /// Gemma 3 4B's real shape: it translates the headings it was told to keep.
+    #[test]
+    fn portuguese_headings_still_find_their_sections() {
+        let raw = "## Resumo
+Fechamos o escopo.
+
+**Pontos-chave**
+- Instalador trava
+
+## Ações:
+- Assinar o build";
+        let i = MeetingInsights::from_model_text(raw);
+        assert_eq!(i.summary, "Fechamos o escopo.");
+        assert_eq!(i.key_points, vec!["Instalador trava"]);
+        assert_eq!(i.action_items, vec!["Assinar o build"]);
+    }
+
+    /// Prose that merely opens with the word must not be mistaken for a heading.
+    #[test]
+    fn a_sentence_starting_with_resumo_is_not_a_heading() {
+        let i = MeetingInsights::from_model_text(
+            "## Resumo
+Resumo da reunião: escopo fechado.",
+        );
+        assert_eq!(i.summary, "Resumo da reunião: escopo fechado.");
     }
 
     #[test]
