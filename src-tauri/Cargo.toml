@@ -37,10 +37,25 @@ default = []
 #   llama's side.
 gpu = ["gpu-vulkan"]
 
-# Buildable anywhere a Vulkan SDK is installed, which includes this project's
-# own development machine — so this is the combination that gets exercised
-# rather than only compiled.
-gpu-vulkan = ["whisper-rs/vulkan", "llama-cpp-2/vulkan"]
+# Vulkan for whisper, and deliberately not for llama.
+#
+# Both crates vendor their own ggml, and a process where both initialise Vulkan
+# dies with an access violation while loading tensors. Measured rather than
+# guessed: the same build with `whisper-rs/vulkan` removed offloads all 25
+# layers and generates fine, and putting it back crashes again. Two models and
+# two quantisations behave identically, so it is the pair of backends, not the
+# weights.
+#
+# Whisper is the one that gets it because transcription is the work this
+# application actually does — it runs for the length of the meeting, while
+# summarising happens once at the end. llama reaches a GPU through the optional
+# CUDA pack, which is a separate ggml loaded at runtime and does not collide;
+# without that it runs on the processor, where the same prompt costs 1.34s
+# against Vulkan's 1.11s. Seventeen per cent was never the reason to want this.
+#
+# Not compiling it also removes llama's Vulkan shader generation from the
+# build, which was the slowest step in it.
+gpu-vulkan = ["whisper-rs/vulkan"]
 
 # Needs the CUDA toolkit at build time (nvcc). Kept apart from `gpu-vulkan` so a
 # machine with only the driver can still build every other combination.

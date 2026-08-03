@@ -99,21 +99,25 @@ pub fn resolve_backend(preference: &str, support: BackendSupport) -> ComputeBack
 
 /// What llama can reach, which is not what whisper can reach.
 ///
-/// Vulkan is struck out. Offloading these weights to it crashes the process:
-/// llama.cpp reports `token_embd.weight (q5_0) cannot be used with preferred
-/// buffer type Vulkan_Host, using CPU instead` and then dies with an access
-/// violation while loading tensors. Reproduced on an RTX 4070 with the
-/// catalog's default model, with and without the CUDA backend also registered,
-/// so it is neither this machine's driver alone nor an interaction between the
-/// two backends.
+/// Vulkan is struck out, and the manifest already declines to compile it for
+/// llama — this is the belt to that pair of braces, and the place the reason
+/// is written down.
 ///
-/// That leaves CUDA — which does work, and is where llama's GPU advantage was
-/// always going to come from — or the processor. A summary that takes longer
-/// is a worse product; a summary that takes the window down with it is not a
-/// product at all.
+/// whisper-rs-sys and llama-cpp-sys-2 each vendor their own ggml. A process
+/// where both of them initialise Vulkan dies with an access violation while
+/// loading tensors. Measured rather than guessed: removing `whisper-rs/vulkan`
+/// from the same build makes llama offload all its layers and generate
+/// normally, and putting it back crashes again. Two models and two
+/// quantisations behave identically, so it is the pair of backends and not the
+/// weights — and the warning that looks like a clue,
+/// `token_embd.weight (q5_0) cannot be used with preferred buffer type`, is
+/// printed by the working CUDA path too.
 ///
-/// Whisper is unaffected and keeps Vulkan: transcription runs on it on the same
-/// machine and the same driver.
+/// Whisper is the one that keeps Vulkan, because transcription is the work
+/// this application actually does: it runs for the length of the meeting,
+/// while summarising happens once at the end. llama reaches a GPU through the
+/// optional CUDA pack, which is a separate ggml loaded at runtime and does not
+/// collide.
 pub fn resolve_llm_backend(preference: &str, support: BackendSupport) -> ComputeBackend {
     let no_vulkan = BackendSupport {
         vulkan_built: false,
