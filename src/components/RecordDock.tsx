@@ -163,7 +163,7 @@ export function RecordDock({
             it describes is disabled, and a disabled control takes neither focus nor
             a tooltip, so hover would hide this from keyboard and touch entirely. */}
         <AnimatePresence>
-          {blocked && gateReason && (
+          {blocked && gateReason && !recording && (
             <motion.div
               data-testid="record-gate"
               initial={{ opacity: 0, y: 4, scale: 0.98 }}
@@ -238,10 +238,15 @@ export function RecordDock({
             clip has to lift while a list is open or it would cut the popover
             off at the cell's edge — safe, because a list can only be opened
             from an already-expanded dock, where nothing overflows. */}
+        {/* Gone while recording. `start_recording` copies both device ids into
+            the streams, so picking another one here would write a setting and
+            change nothing about the capture that is running — a control that
+            answers and does nothing is worse than no control. */}
         <motion.div
           variants={side}
           className={clsx(
             "relative flex shrink-0 items-center gap-1 pr-2",
+            recording && "hidden",
             menu === null ? "overflow-hidden" : "overflow-visible",
           )}
         >
@@ -312,7 +317,10 @@ export function RecordDock({
             for nothing. Same width, same variant, right-aligned. */}
         <motion.div
           variants={side}
-          className="flex shrink-0 items-center justify-end overflow-hidden pl-2"
+          className={clsx(
+            "flex shrink-0 items-center justify-end overflow-hidden pl-2",
+            recording && "hidden",
+          )}
         >
           <Button
             variant="ghost"

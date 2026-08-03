@@ -999,7 +999,11 @@ function AppShell({
           animation belongs to the card and there is nothing here that squeezes
           a list of meetings into a narrower box while the user reads it. */}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <div className="absolute inset-y-0 left-0 w-72">
+        {/* `inert` while covered. The card hides it from the eye, and without
+            this the search field, the import button and every meeting row stay
+            in the tab order — reachable, actionable, and with the focus ring
+            drawn behind the card where nobody can see it. */}
+        <div className="absolute inset-y-0 left-0 w-72" inert={!sidebarOpen}>
           <Sidebar
           meetings={meetings}
           selectedId={selectedId}
@@ -1523,12 +1527,13 @@ function AppShell({
                 offers to start a second recording on top of the one the header
                 is already showing.
 
-                A running recording keeps it: the control does not vanish at the
-                moment it becomes most useful, it changes into pause and stop.
-                Nothing selects a meeting until the recording is stopped, so
-                `!selected` still holds throughout. */}
+                A running recording keeps it, whatever is selected: `handleStart`
+                opens the new meeting straight away, so `!selected` stops being
+                true the instant recording begins — which is precisely when the
+                control has to still be there. It changes into pause and stop
+                instead of vanishing. */}
             <AnimatePresence>
-              {!selected && (
+              {(!selected || status?.recording) && (
                 <RecordDock
                   key="dock"
                   gate={gate}
