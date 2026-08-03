@@ -91,7 +91,7 @@ whisper-rs = "0.16"
 # on both. Shared libraries give each its own copy. `dynamic-backends` rides
 # along because it is only meaningful with shared libraries, and it is what lets
 # one binary pick Vulkan or AVX-512 on the machine it lands on.
-llama-cpp-2 = { version = "0.1.150", default-features = false, features = ["dynamic-link", "dynamic-backends"] }
+llama-cpp-2 = { version = "0.1.153", default-features = false, features = ["dynamic-link", "dynamic-backends"] }
 # Never named in the code. It is here so cargo hands `DEP_LLAMA_ROOT` and
 # `DEP_LLAMA_BACKENDS_DIR` to this crate's build script: `links` metadata only
 # reaches a *direct* dependent, and those two variables are the only pointers
@@ -100,7 +100,7 @@ llama-cpp-2 = { version = "0.1.150", default-features = false, features = ["dyna
 # same profile can defeat, and guessing wrong stages a mismatched `llama.dll`
 # next to the executable. Unified with the copy llama-cpp-2 already builds, so
 # it costs nothing.
-llama-cpp-sys-2 = { version = "0.1.150", default-features = false }
+llama-cpp-sys-2 = { version = "0.1.153", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "blocking", "stream"] }
 # `net` is for the loopback server in the resume test; reqwest already pulls it in
 # transitively, so it costs nothing in the bundle.
