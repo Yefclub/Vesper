@@ -52,8 +52,14 @@ jobs:
       - name: Vulkan SDK (Linux)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
+          # The codename comes from the runner rather than being written here.
+          # It used to say `noble`, and the moment the Linux leg moved to 22.04
+          # apt started offering packages built against glibc 2.38 to an image
+          # carrying 2.35 — sixteen unmet dependencies and "held broken
+          # packages", none of which mentioned Vulkan.
+          CODENAME=$(lsb_release -cs)
           wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
+          sudo wget -qO "/etc/apt/sources.list.d/lunarg-vulkan-$CODENAME.list" "https://packages.lunarg.com/vulkan/lunarg-vulkan-$CODENAME.list"
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
       - name: Vulkan SDK (Windows)
