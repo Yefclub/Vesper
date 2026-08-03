@@ -120,6 +120,11 @@ pub fn resolve_stt_backend(preference: &str, support: BackendSupport) -> Compute
 ///
 /// A `cfg!` and not a probe: the features are decided when the binary is made,
 /// and a build without them cannot use the hardware however present it is.
+///
+/// It is the floor, not the whole answer. CUDA can arrive as a downloaded
+/// backend module long after the binary was built, so the caller raises
+/// `cuda_built` when ggml reports a CUDA device — a device only appears once
+/// its backend has registered.
 pub fn built_backends() -> (bool, bool) {
     (cfg!(feature = "gpu-cuda"), cfg!(feature = "gpu-vulkan"))
 }
@@ -235,6 +240,22 @@ mod tests {
         );
         assert_eq!(resolve_stt_backend("cpu", nvidia()), ComputeBackend::Cpu);
         assert_eq!(resolve_stt_backend("auto", headless()), ComputeBackend::Cpu);
+    }
+
+    /// The shape a downloaded backend makes: nothing CUDA was compiled in, and
+    /// a CUDA device is there anyway because the pack registered it. Reading
+    /// the compile-time flag alone told such a machine its own card was
+    /// unreachable and quietly left it on Vulkan.
+    #[test]
+    fn a_backend_that_arrived_after_the_build_is_still_a_backend() {
+        let downloaded = BackendSupport {
+            cuda_built: true,
+            vulkan_built: true,
+            cuda_present: true,
+            vulkan_present: true,
+        };
+        assert_eq!(resolve_backend("cuda", downloaded), ComputeBackend::Cuda);
+        assert_eq!(resolve_backend("auto", downloaded), ComputeBackend::Cuda);
     }
 
     /// A value nobody recognises degrades to the automatic answer. Settings are

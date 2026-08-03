@@ -166,7 +166,16 @@ pub(crate) fn probe_support() -> BackendSupport {
         }
         for device in llama_cpp_2::list_llama_ggml_backend_devices() {
             match device.backend.as_str() {
-                "CUDA" => support.cuda_present = true,
+                // A CUDA device in this list means the CUDA backend registered,
+                // and it registers whether it was compiled into the binary or
+                // downloaded afterwards. `built_backends` cannot know about the
+                // second — it reads compile-time flags — so a machine that
+                // fetched the pack would have been told its own GPU was
+                // unreachable and quietly kept using Vulkan.
+                "CUDA" => {
+                    support.cuda_present = true;
+                    support.cuda_built = true;
+                }
                 "Vulkan" => support.vulkan_present = true,
                 _ => {}
             }
