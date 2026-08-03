@@ -148,6 +148,9 @@ function AppShell({
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [updateNote, setUpdateNote] = useState<string | null>(null);
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  /// Whether the bytes are already on disk, which is what turns the offer from
+  /// "install" — a download the user waits through — into "restart".
+  const [updateReady, setUpdateReady] = useState(false);
   const [gate, setGate] = useState<StartGate>({ allowed: false });
   /// What the backend says about the global accelerator. `null` until it
   /// answers, and permanently `null` on a build whose backend does not report
@@ -374,11 +377,24 @@ function AppShell({
         setError(String(e));
       }
       try {
-        // Only ever offered, never applied on its own: installing and relaunching
-        // without asking can throw away a recording in progress, and silently
-        // swapping the binary of a privacy tool is not ours to decide.
+        // Offered, never applied on its own: installing relaunches the app, and
+        // relaunching can throw away a recording in progress. Deciding that for
+        // someone is not ours to do.
+        //
+        // The bytes, though, are fetched now. Downloading on the click meant
+        // the user decided to update and then waited on a progress bar that
+        // does not exist; doing it here makes the button instant. Failure is
+        // silent on purpose — the update is still offered, and the click falls
+        // back to downloading then.
         const update = await check();
-        if (update) setPendingUpdate(update);
+        if (!update) return;
+        setPendingUpdate(update);
+        try {
+          await update.download();
+          setUpdateReady(true);
+        } catch {
+          /* offered anyway; the click will fetch it */
+        }
       } catch {
         /* no release endpoint yet */
       }
@@ -1016,12 +1032,22 @@ function AppShell({
                 <Button
                   size="xs"
                   data-testid="update-install"
+                  // Installing relaunches the app, and a relaunch during a
+                  // recording loses the audio that has not been written yet.
+                  // The offer stays on screen; it just cannot be taken until
+                  // the recording is over.
+                  disabled={status?.recording}
+                  title={status?.recording ? t("update.busy") : undefined}
                   onClick={async () => {
                     const update = pendingUpdate;
                     setPendingUpdate(null);
                     try {
                       setUpdateNote(t("update.installing"));
-                      await update.downloadAndInstall();
+                      // `install` alone when the bytes are already here, which
+                      // is the usual case — `downloadAndInstall` would fetch
+                      // them a second time.
+                      if (updateReady) await update.install();
+                      else await update.downloadAndInstall();
                       setUpdateNote(t("update.relaunching"));
                       await relaunch();
                     } catch (e) {
@@ -1033,7 +1059,7 @@ function AppShell({
                     }
                   }}
                 >
-                  {t("update.install")}
+                  {updateReady ? t("update.restart") : t("update.install")}
                 </Button>
                 <Button variant="link" onClick={() => setPendingUpdate(null)}>
                   {t("update.later")}
