@@ -166,10 +166,13 @@ function AppShell({
   /// does not emit them — in which case none of the UI below renders and Stop
   /// behaves as it did.
   const [progress, setProgress] = useState<MeetingProgress | null>(null);
-  // Not `busy`: that one is also raised by starting, stopping and importing,
-  // and it would put the summary pane to work over a recording that has not
-  // been transcribed yet.
-  const [summarizing, setSummarizing] = useState(false);
+  // The meeting being summarised, not a flag. Not `busy` either: that one is
+  // also raised by starting, stopping and importing, and it would put the
+  // summary pane to work over a recording that has not been transcribed yet.
+  // An id rather than a boolean because the sidebar stays live while the model
+  // writes — select another meeting mid-summary and a flag would claim that one
+  // was being worked on too.
+  const [summarizingId, setSummarizingId] = useState<string | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [confirmingRecord, setConfirmingRecord] = useState(false);
   const [skipRecordReminder, setSkipRecordReminder] = useState(false);
@@ -665,7 +668,7 @@ function AppShell({
   async function handleSummarize(template = "general") {
     if (!selectedId) return;
     setBusy(true);
-    setSummarizing(true);
+    setSummarizingId(selectedId);
     // Before the await, not after it. The pane that is about to be written is
     // the one worth watching while it is written — switching to it once the
     // answer is already there is a teleport, and it left the working state
@@ -679,7 +682,7 @@ function AppShell({
       setError(String(e));
     } finally {
       setBusy(false);
-      setSummarizing(false);
+      setSummarizingId(null);
     }
   }
 
@@ -1445,7 +1448,9 @@ function AppShell({
                               />
                             </div>
                           </div>
-                        ) : summarizing || progress?.phase === "summarizing" ? (
+                        ) : summarizingId === selected.id ||
+                          (progress?.phase === "summarizing" &&
+                            progress.meeting_id === selected.id) ? (
                           <SummaryWorking />
                         ) : (
                           // Three cards each holding one em-dash and nothing to
