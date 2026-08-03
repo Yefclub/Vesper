@@ -599,11 +599,17 @@ pub fn run_llama(
     //
     // Greedy alone loops, though, and a small model loops hardest: the 0.5B
     // produced "instale o clode Cote usando o clode Cote" and kept going. The
-    // penalty in front of it looks back over the last 64 tokens and taxes
-    // repeats — enough to break a cycle, gentle enough that a meeting which
-    // genuinely mentions one topic throughout can still say so.
+    // penalty in front of it taxes repeats within its window.
+    //
+    // The window is 256 and that number is measured, not picked. At 64 — long
+    // enough to cover a repeated phrase, not a repeated bullet — the same model
+    // wrote one key point ten times over a real transcript, because by the time
+    // it came round again the earlier copy had left the window. Pushing further
+    // the other way costs accuracy instead of buying anything: at 512 with a
+    // frequency penalty it misspelled the subject, dropped a heading level and
+    // invented two numbers that appear in no transcript.
     let mut sampler = LlamaSampler::chain_simple([
-        LlamaSampler::penalties(64, 1.1, 0.0, 0.0),
+        LlamaSampler::penalties(256, 1.1, 0.0, 0.0),
         LlamaSampler::greedy(),
     ]);
 
@@ -688,9 +694,10 @@ mod gpu_bench {
                 .unwrap_or(256);
             match run_llama(&model, &prompt, budget, backend) {
                 Ok(text) => println!(
-                    "{backend:>7}: {:>8.2?}  {:?}",
-                    started.elapsed(),
-                    text.chars().take(320).collect::<String>()
+                    "{backend:>7}: {:>8.2?}
+{text}
+--- end ---",
+                    started.elapsed()
                 ),
                 Err(e) => println!("{backend:>7}: failed — {e}"),
             }
