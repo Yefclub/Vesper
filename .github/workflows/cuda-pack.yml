@@ -8,15 +8,16 @@ name: cuda-pack
 # model on Vulkan. This produces the pack the app offers to download when it
 # finds an NVIDIA GPU, the same way it offers to download model weights.
 #
-# By hand only. Building it costs a CUDA toolkit install on the runner and
-# fifteen minutes, and it changes only when llama.cpp does.
+# Fired by pushing a `cuda-pack-*` tag, not by hand from the Actions tab.
+# `workflow_dispatch` only works for a workflow already on the default branch,
+# and the default branch of a public repository should show what has been
+# released rather than what is being built. A push event runs the workflow as
+# it exists at the pushed ref, so a tag on a working branch is enough.
+#
+# The pattern cannot collide with the release workflow, which watches `v*`.
 on:
-  workflow_dispatch:
-    inputs:
-      cuda:
-        description: "CUDA toolkit version to build against"
-        required: true
-        default: "12.6.0"
+  push:
+    tags: ["cuda-pack-*"]
 
 jobs:
   pack:
@@ -36,7 +37,7 @@ jobs:
       - name: CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.24
         with:
-          cuda: ${{ inputs.cuda }}
+          cuda: "12.6.0"
           method: network
           # nvcc and the headers are what the build needs; the rest of the
           # toolkit is several more gigabytes of things it does not.
