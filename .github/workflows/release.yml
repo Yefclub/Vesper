@@ -102,6 +102,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # linuxdeploy is itself an AppImage, and an AppImage mounts itself
+          # through FUSE. `ubuntu-latest` is 24.04 now and carries no libfuse2,
+          # so it died within a second of starting with nothing but "failed to
+          # run linuxdeploy". This makes it unpack instead of mount, which needs
+          # no package and no root.
+          APPIMAGE_EXTRACT_AND_RUN: 1
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: Vesper ${{ github.event.inputs.tag || github.ref_name }}

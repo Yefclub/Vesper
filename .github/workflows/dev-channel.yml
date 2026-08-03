@@ -98,7 +98,13 @@ jobs:
                       a[k] = v
 
           merge(base, over)
-          base["version"] = f'{base["version"]}-dev.{os.environ["GITHUB_RUN_NUMBER"]}'
+          # Numeric-only, because the MSI bundler refuses anything else:
+          # `0.1.0-dev.1` fails with "pre-release identifier must be
+          # numeric-only". `0.1.0-1` still sorts below `0.1.0` and above
+          # `0.1.0-1`'s predecessors, which is all the updater needs — and the
+          # build says which channel it is through the product name and its own
+          # identifier, not through the version string.
+          base["version"] = f'{base["version"]}-{os.environ["GITHUB_RUN_NUMBER"]}'
           json.dump(base, io.open("src-tauri/tauri.conf.json", "w", encoding="utf-8"), indent=2)
           print("version:", base["version"], "identifier:", base["identifier"])
           PY
@@ -114,6 +120,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # linuxdeploy is itself an AppImage, and an AppImage mounts itself
+          # through FUSE. `ubuntu-latest` is 24.04 now and carries no libfuse2,
+          # so it died within a second of starting with nothing but "failed to
+          # run linuxdeploy". This makes it unpack instead of mount, which needs
+          # no package and no root.
+          APPIMAGE_EXTRACT_AND_RUN: 1
         with:
           tagName: dev-channel
           releaseName: "Vesper Dev (${{ github.ref_name }})"
