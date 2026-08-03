@@ -10,7 +10,7 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::TokenToStringError;
 use parking_lot::Mutex;
@@ -433,6 +433,27 @@ impl Default for LocalLlm {
     }
 }
 
+/// Put the prompt in the model's own chat format, if it has one.
+///
+/// GGUF weights carry the template they were tuned with. Applying it is the
+/// difference between an instruction obeyed and an instruction guessed at.
+///
+/// Falls back to the bare prompt when a model ships no template — a base model
+/// has none, and for those the raw text is exactly right.
+fn chat_wrap(model: &LlamaModel, prompt: &str) -> String {
+    let Ok(template) = model.chat_template(None) else {
+        return prompt.to_string();
+    };
+    let Ok(message) = LlamaChatMessage::new("user".to_string(), prompt.to_string()) else {
+        return prompt.to_string();
+    };
+    // `true` adds the assistant header, so generation starts where the answer
+    // goes rather than continuing the user's turn.
+    model
+        .apply_chat_template(&template, &[message], true)
+        .unwrap_or_else(|_| prompt.to_string())
+}
+
 /// The bytes of one token, whatever its length.
 ///
 /// `token_to_piece_bytes` writes into a buffer the caller sizes and returns an
@@ -500,8 +521,14 @@ pub fn run_llama(
     }
     let model = &cache.as_ref().expect("just loaded").1;
 
+    // Wrapped in whatever the weights were tuned to expect. An instruction-tuned
+    // model is trained on its own chat markup — `<|im_start|>user` and the rest —
+    // and handing it bare text is asking it to guess. The 0.5B answered by
+    // echoing the transcript back; a 1.7B answered by narrating its own
+    // reasoning. Neither is a summary, and neither is the model's fault.
+    let wrapped = chat_wrap(model, prompt);
     let tokens = model
-        .str_to_token(prompt, AddBos::Always)
+        .str_to_token(&wrapped, AddBos::Always)
         .map_err(|e| format!("llama tokenize: {e}"))?;
 
     // Sized to this call, and never past what the weights were trained for: a
@@ -601,24 +628,31 @@ mod gpu_bench {
         println!("devices: {:#?}", gpu_devices());
         println!("support: {:?}", probe_support());
 
-        let transcript = "Me: we need to decide the release scope today. \
-             Others: the installer is the blocker, everything else is done. \
-             Me: what is left on it. Others: signing and the update feed. \
-             Me: then let us cut the version once those two land."
-            .repeat(12);
-        let prompt = format!(
-            "Summarise the following meeting in three bullet points.\n\n{transcript}\n\nSummary:"
+        // A real transcript when one is named, so the comparison is against the
+        // Portuguese this application actually produces rather than English
+        // written to flatter the model.
+        let transcript = match std::env::var("VESPER_BENCH_PROMPT") {
+            Ok(path) => std::fs::read_to_string(path).expect("prompt file"),
+            Err(_) => "Me: we need to decide the release scope. Others: the                  installer is the blocker. Me: what is left. Others: signing."
+                .repeat(12),
+        };
+        // The application's own prompt, in the language it summarises in. A
+        // hand-written English instruction measures a different product.
+        let prompt = crate::domain::summary::build_summary_prompt(
+            SummaryTemplate::General,
+            &transcript,
+            Locale::PtBr,
         );
 
         let only =
             std::env::var("VESPER_BENCH_BACKENDS").unwrap_or_else(|_| "cpu,vulkan,cuda".into());
         for backend in only.split(',') {
             let started = std::time::Instant::now();
-            match run_llama(&model, &prompt, 64, backend) {
+            match run_llama(&model, &prompt, 256, backend) {
                 Ok(text) => println!(
                     "{backend:>7}: {:>8.2?}  {:?}",
                     started.elapsed(),
-                    text.chars().take(80).collect::<String>()
+                    text.chars().take(320).collect::<String>()
                 ),
                 Err(e) => println!("{backend:>7}: failed — {e}"),
             }
