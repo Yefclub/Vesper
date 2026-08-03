@@ -149,35 +149,90 @@ pub fn list_models() -> Vec<ModelInfo> {
             491_400_032u64,
             "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
         ),
+        // The ladder above 0.5B is Llama 3.2 and Gemma 3, and it got there by
+        // measurement rather than by release date. Summarising the same real
+        // Portuguese transcript with the same prompt this app sends, on one
+        // RTX 4070:
+        //
+        // | model            | size   | CUDA  | prose      |
+        // |------------------|--------|-------|------------|
+        // | Qwen2.5 0.5B     | 469 MB | 1.22s | Portuguese |
+        // | Llama 3.2 1B     | 807 MB | 2.38s | Portuguese |
+        // | Qwen2.5 1.5B     | 1.1 GB | 2.95s | **English**|
+        // | Llama 3.2 3B     | 2.0 GB | 4.32s | Portuguese |
+        // | Gemma 3 4B       | 2.5 GB | 6.40s | Portuguese |
+        //
+        // The prompt says "write all prose in Brazilian Portuguese"; Qwen2.5
+        // 1.5B answered in English anyway, and it was the model recommended to
+        // most machines with a GPU. Llama 3.2 1B replaces it at a third less
+        // weight and half a second less time. Sampling is greedy, so these runs
+        // reproduce, but they are one transcript — the ranking is evidence, not
+        // proof.
         (
-            "qwen2.5-1.5b",
+            "llama32-1b",
             "llm",
-            "Qwen2.5 1.5B Instruct Q4_K_M (local LLM)",
-            "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-            1_117_320_736u64,
-            "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+            "Llama 3.2 1B Instruct Q4_K_M (local LLM)",
+            "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+            807_694_464u64,
+            "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
         ),
         (
-            "qwen2.5-3b",
+            "llama32-3b",
             "llm",
-            "Qwen2.5 3B Instruct Q4_K_M (local LLM)",
-            "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
-            2_104_932_768u64,
-            "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+            "Llama 3.2 3B Instruct Q4_K_M (local LLM)",
+            "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+            2_019_377_696u64,
+            "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+        ),
+        (
+            "gemma3-4b",
+            "llm",
+            "Gemma 3 4B Instruct Q4_K_M (local LLM)",
+            "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+            2_489_894_016u64,
+            "04a43a22e8d2003deda5acc262f68ec1005fa76c735a9962a8c77042a74a7d19",
+        ),
+        (
+            "cuda-backend",
+            "backend",
+            "CUDA (NVIDIA) — aceleração opcional",
+            // Built by `.github/workflows/cuda-pack.yml` and published on its
+            // own tag. Pinned to a release rather than to `latest`, so the file
+            // this digest describes is the file that gets downloaded.
+            "https://github.com/Yefclub/Vesper/releases/download/cuda-pack-v5/vesper-cuda.zip",
+            667_162_994u64,
+            "c16afa409170e902548d03a7517b9bf1d9aaabb05e55ed494e51db42087a3f2c",
         ),
     ];
     catalog
         .into_iter()
+        // The CUDA pack is built on Windows and carries `.dll`s. Offering it
+        // anywhere else is offering a download that cannot be used.
+        .filter(|(_, kind, ..)| *kind != "backend" || cfg!(windows))
         .map(|(id, kind, label, url, size, sha256)| {
             let path = model_artifact_path(id, kind);
-            let present = path.is_file()
-                && std::fs::metadata(&path)
-                    .map(|m| m.len() > 1_000_000)
-                    .unwrap_or(false);
-            let ready = std::fs::read_to_string(artifact_marker_path(&path))
+            // For a pack, "present" is the unpacked libraries: the archive is
+            // deleted once it has been read, so asking whether it is still
+            // there would report a working backend as missing.
+            let present = if kind == "backend" {
+                backend_is_unpacked(&path)
+            } else {
+                path.is_file()
+                    && std::fs::metadata(&path)
+                        .map(|m| m.len() > 1_000_000)
+                        .unwrap_or(false)
+            };
+            let verified = std::fs::read_to_string(artifact_marker_path(&path))
                 .map(|recorded| recorded.trim().eq_ignore_ascii_case(sha256))
                 .unwrap_or(false)
                 && present;
+            // A verified archive is not a usable backend. What the loader needs
+            // is the libraries beside it, so for a pack `ready` means unpacked.
+            let ready = if kind == "backend" {
+                verified && backend_is_unpacked(&path)
+            } else {
+                verified
+            };
             ModelInfo {
                 id: id.into(),
                 kind: kind.into(),
@@ -261,12 +316,82 @@ fn write_artifact_marker(artifact: &Path, sha256: &str) -> Result<(), String> {
 }
 
 fn model_artifact_path(id: &str, kind: &str) -> PathBuf {
+    // A compute backend is not a model and does not belong under `models`: it
+    // is a set of libraries the loader opens, and the download machinery is the
+    // only thing the two have in common.
+    if kind == "backend" {
+        return crate::paths::backends_dir().join(id).join("pack.zip");
+    }
     let name = if kind == "stt" {
         "model.bin"
     } else {
         "model.gguf"
     };
     models_dir().join(id).join(name)
+}
+
+/// Whether a downloaded pack has been unpacked beside its archive.
+///
+/// Probing for the library the loader will ask for, not for a marker file: an
+/// interrupted extraction leaves a directory that exists and is useless.
+pub fn backend_is_unpacked(archive: &Path) -> bool {
+    archive
+        .parent()
+        .map(|dir| dir.join(UNPACK_MARKER).is_file())
+        .unwrap_or(false)
+}
+
+/// Written last, once every entry in the pack is on disk.
+///
+/// Asking whether `ggml-cuda.dll` exists answered the wrong question: an
+/// extraction stopped halfway — a full disk, an antivirus taking the file
+/// mid-write — leaves that name behind as a truncated file, and the pack then
+/// reports itself ready. Nothing would re-extract it, and the loader would be
+/// handed a partial DLL. The marker only appears after the last write, so a
+/// broken unpack stays not-ready and the next attempt redoes it.
+pub const UNPACK_MARKER: &str = "PACK.ok";
+
+/// Unpack a verified backend archive beside itself.
+///
+/// Only after the digest matched — this writes executable code onto the user's
+/// machine, and a zip is a container that can name any path it likes. Entries
+/// are taken by file name alone, so an archive carrying `..\..\system32\x.dll`
+/// lands as `x.dll` in the backend directory and nowhere else.
+fn unpack_backend(archive: &Path) -> Result<(), String> {
+    let dir = archive
+        .parent()
+        .ok_or_else(|| "backend archive has no directory".to_string())?;
+    let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("opening the pack: {e}"))?;
+    // Before the first write, not after the last failure: a newer pack
+    // extracted over a working one would otherwise be vouched for by the
+    // previous install's marker if it broke halfway.
+    let marker = dir.join(UNPACK_MARKER);
+    if marker.exists() {
+        std::fs::remove_file(&marker).map_err(|e| format!("clearing the pack marker: {e}"))?;
+    }
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("reading the pack: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(name) = entry
+            .enclosed_name()
+            .and_then(|p| p.file_name().map(|n| n.to_owned()))
+        else {
+            continue;
+        };
+        let dest = dir.join(name);
+        let mut out =
+            std::fs::File::create(&dest).map_err(|e| format!("writing {}: {e}", dest.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("writing {}: {e}", dest.display()))?;
+    }
+    std::fs::write(dir.join(UNPACK_MARKER), "")
+        .map_err(|e| format!("marking the pack complete: {e}"))?;
+    Ok(())
 }
 
 /// Download a model with streaming progress callbacks.
@@ -310,6 +435,16 @@ where
         if let Ok(existing) = sha256_file(&dest) {
             if existing.eq_ignore_ascii_case(&info.sha256) {
                 write_artifact_marker(&dest, &info.sha256)?;
+                if info.kind == "backend" && !backend_is_unpacked(&dest) {
+                    on_progress(DownloadProgress::phase(
+                        model_id,
+                        "extracting",
+                        0,
+                        info.size_hint_bytes,
+                        false,
+                    ));
+                    unpack_backend(&dest)?;
+                }
                 on_progress(DownloadProgress::phase(
                     model_id,
                     "done",
@@ -427,6 +562,24 @@ where
         ));
     }
     write_artifact_marker(&dest, &info.sha256)?;
+
+    // After the marker, so the archive is on record as verified before anything
+    // is written out of it. `verify_transfer` has already matched the digest.
+    if info.kind == "backend" {
+        on_progress(DownloadProgress::phase(
+            model_id,
+            "extracting",
+            final_len,
+            Some(final_len),
+            false,
+        ));
+        unpack_backend(&dest)?;
+        // The archive has done its job. Keeping it doubles what the pack costs
+        // on disk — 637 MB of container beside the 637 MB it contained — and
+        // nothing reads it again: the marker records the digest and the
+        // libraries beside it are what the loader opens.
+        let _ = std::fs::remove_file(&dest);
+    }
 
     on_progress(DownloadProgress::phase(
         model_id,
@@ -784,6 +937,25 @@ mod tests {
     /// they could rewrite the marker too. It exists to stop artifacts of unknown
     /// provenance, including everything downloaded before checksums existed, from
     /// being handed to a C++ parser.
+    /// The defect this marker exists for: an extraction that died after writing
+    /// the library it is asked about. Checking for the library answered yes,
+    /// nothing re-extracted the pack, and the loader was handed a partial DLL.
+    #[test]
+    fn a_pack_missing_its_marker_is_not_unpacked() {
+        let dir = tempdir().unwrap();
+        let archive = dir.path().join("vesper-cuda.zip");
+        std::fs::write(dir.path().join("ggml-cuda.dll"), b"half a library").unwrap();
+        assert!(!backend_is_unpacked(&archive));
+    }
+
+    #[test]
+    fn a_pack_that_finished_unpacking_is_unpacked() {
+        let dir = tempdir().unwrap();
+        let archive = dir.path().join("vesper-cuda.zip");
+        std::fs::write(dir.path().join(UNPACK_MARKER), b"").unwrap();
+        assert!(backend_is_unpacked(&archive));
+    }
+
     #[test]
     fn an_unverified_artifact_is_never_ready() {
         let dir = tempdir().unwrap();

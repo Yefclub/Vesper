@@ -97,6 +97,36 @@ pub fn resolve_backend(preference: &str, support: BackendSupport) -> ComputeBack
     }
 }
 
+/// What llama can reach, which is not what whisper can reach.
+///
+/// Vulkan is struck out, and the manifest already declines to compile it for
+/// llama — this is the belt to that pair of braces, and the place the reason
+/// is written down.
+///
+/// whisper-rs-sys and llama-cpp-sys-2 each vendor their own ggml. A process
+/// where both of them initialise Vulkan dies with an access violation while
+/// loading tensors. Measured rather than guessed: removing `whisper-rs/vulkan`
+/// from the same build makes llama offload all its layers and generate
+/// normally, and putting it back crashes again. Two models and two
+/// quantisations behave identically, so it is the pair of backends and not the
+/// weights — and the warning that looks like a clue,
+/// `token_embd.weight (q5_0) cannot be used with preferred buffer type`, is
+/// printed by the working CUDA path too.
+///
+/// Whisper is the one that keeps Vulkan, because transcription is the work
+/// this application actually does: it runs for the length of the meeting,
+/// while summarising happens once at the end. llama reaches a GPU through the
+/// optional CUDA pack, which is a separate ggml loaded at runtime and does not
+/// collide.
+pub fn resolve_llm_backend(preference: &str, support: BackendSupport) -> ComputeBackend {
+    let no_vulkan = BackendSupport {
+        vulkan_built: false,
+        vulkan_present: false,
+        ..support
+    };
+    resolve_backend(preference, no_vulkan)
+}
+
 /// What whisper can reach, which is not what llama can reach.
 ///
 /// `whisper-rs-sys` links CUDA as a load-time import and offers no dynamic
@@ -120,6 +150,11 @@ pub fn resolve_stt_backend(preference: &str, support: BackendSupport) -> Compute
 ///
 /// A `cfg!` and not a probe: the features are decided when the binary is made,
 /// and a build without them cannot use the hardware however present it is.
+///
+/// It is the floor, not the whole answer. CUDA can arrive as a downloaded
+/// backend module long after the binary was built, so the caller raises
+/// `cuda_built` when ggml reports a CUDA device — a device only appears once
+/// its backend has registered.
 pub fn built_backends() -> (bool, bool) {
     (cfg!(feature = "gpu-cuda"), cfg!(feature = "gpu-vulkan"))
 }
@@ -221,6 +256,21 @@ mod tests {
         assert_eq!(resolve_backend("vulkan", driver_only), ComputeBackend::Cpu);
     }
 
+    /// llama never gets Vulkan: offloading to it crashes the process on the
+    /// catalog's default model. CUDA works, so an NVIDIA machine still gets a
+    /// GPU; everything else falls to the processor.
+    #[test]
+    fn llama_uses_cuda_or_the_cpu_and_never_vulkan() {
+        assert_eq!(resolve_llm_backend("auto", nvidia()), ComputeBackend::Cuda);
+        assert_eq!(
+            resolve_llm_backend("vulkan", nvidia()),
+            ComputeBackend::Cuda
+        );
+        assert_eq!(resolve_llm_backend("auto", amd()), ComputeBackend::Cpu);
+        assert_eq!(resolve_llm_backend("vulkan", amd()), ComputeBackend::Cpu);
+        assert_eq!(resolve_llm_backend("cpu", nvidia()), ComputeBackend::Cpu);
+    }
+
     /// Whisper never gets CUDA, because a whisper built with it will not start
     /// on a machine that has no NVIDIA runtime.
     #[test]
@@ -235,6 +285,22 @@ mod tests {
         );
         assert_eq!(resolve_stt_backend("cpu", nvidia()), ComputeBackend::Cpu);
         assert_eq!(resolve_stt_backend("auto", headless()), ComputeBackend::Cpu);
+    }
+
+    /// The shape a downloaded backend makes: nothing CUDA was compiled in, and
+    /// a CUDA device is there anyway because the pack registered it. Reading
+    /// the compile-time flag alone told such a machine its own card was
+    /// unreachable and quietly left it on Vulkan.
+    #[test]
+    fn a_backend_that_arrived_after_the_build_is_still_a_backend() {
+        let downloaded = BackendSupport {
+            cuda_built: true,
+            vulkan_built: true,
+            cuda_present: true,
+            vulkan_present: true,
+        };
+        assert_eq!(resolve_backend("cuda", downloaded), ComputeBackend::Cuda);
+        assert_eq!(resolve_backend("auto", downloaded), ComputeBackend::Cuda);
     }
 
     /// A value nobody recognises degrades to the automatic answer. Settings are

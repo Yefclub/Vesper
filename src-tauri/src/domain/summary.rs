@@ -55,6 +55,116 @@ pub struct MeetingInsights {
     pub action_items: Vec<String>,
 }
 
+/// Split a reasoning model's thinking from its answer.
+///
+/// Qwen3 and its kind write their working inside `<think>…</think>` before
+/// answering. Fed straight to the parser that reads headings, that working
+/// becomes the summary — the user gets a paragraph of the model talking to
+/// itself where the meeting should be.
+///
+/// Returns `(thinking, answer)`. A model that does not think returns the whole
+/// text as the answer, which is every model in the catalog today.
+pub fn split_thinking(raw: &str) -> (Option<String>, String) {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+
+    let Some(start) = raw.find(OPEN) else {
+        return (None, raw.to_string());
+    };
+    match raw[start..].find(CLOSE) {
+        Some(offset) => {
+            let inner = &raw[start + OPEN.len()..start + offset];
+            let mut answer = String::from(&raw[..start]);
+            answer.push_str(&raw[start + offset + CLOSE.len()..]);
+            let thinking = inner.trim().to_string();
+            (
+                (!thinking.is_empty()).then_some(thinking),
+                answer.trim().to_string(),
+            )
+        }
+        // Thinking that ran out of budget before closing. Everything after the
+        // tag is working, not answer — returning it as the summary would be
+        // worse than returning nothing.
+        None => {
+            let thinking = raw[start + OPEN.len()..].trim().to_string();
+            (
+                (!thinking.is_empty()).then_some(thinking),
+                raw[..start].trim().to_string(),
+            )
+        }
+    }
+}
+
+/// Which section a line opens, if it opens one.
+///
+/// The prompt asks for the three headings in English and most models comply,
+/// but the better a model writes the target language the likelier it is to
+/// translate them too: Gemma 3 4B produced the best Portuguese prose in the
+/// bench and titled it `## Resumo`. Matching English only, the whole answer
+/// fell into the summary and the other two sections came back empty — the best
+/// output scored worst. So the headings are read in both shipped languages.
+///
+/// Bold (`**Resumo**`) and trailing colons appear about as often as plain ones,
+/// and cost a line each to accept.
+fn section_of(line: &str) -> Option<Section> {
+    let hashed = line.starts_with('#');
+    // Looped, because the decoration nests in either order: `**Key points:**`
+    // puts the colon inside the bold and `**Key points**:` puts it outside.
+    // One pass in a fixed order strips whichever came first and then stalls on
+    // the other, leaving a label that matches nothing — and a heading that
+    // matches nothing silently pours its section into the previous one.
+    let mut label = line.trim_start_matches('#').trim().to_string();
+    loop {
+        let stripped = label
+            .trim()
+            .trim_start_matches("**")
+            .trim_end_matches("**")
+            .trim_end_matches(':')
+            .trim();
+        if stripped.len() == label.len() {
+            break;
+        }
+        label = stripped.to_string();
+    }
+    let label = label.to_lowercase();
+
+    // A bare word only opens a section when it is the whole line. Without that,
+    // a summary whose first sentence starts "Resumo da reunião…" would be eaten
+    // as a heading.
+    let opens = |names: &[&str]| {
+        names.iter().any(|n| {
+            if hashed {
+                label.starts_with(n)
+            } else {
+                label == *n
+            }
+        })
+    };
+
+    if opens(&["summary", "resumo"]) {
+        return Some(Section::Summary);
+    }
+    if opens(&[
+        "key points",
+        "key point",
+        "pontos-chave",
+        "pontos chave",
+        "pontos principais",
+    ]) {
+        return Some(Section::KeyPoints);
+    }
+    if opens(&[
+        "action items",
+        "action item",
+        "itens de ação",
+        "ações",
+        "próximos passos",
+    ]) {
+        return Some(Section::ActionItems);
+    }
+    None
+}
+
 impl MeetingInsights {
     pub fn from_model_text(raw: &str) -> Self {
         let mut summary = String::new();
@@ -64,17 +174,8 @@ impl MeetingInsights {
 
         for line in raw.lines() {
             let trimmed = line.trim();
-            let lower = trimmed.to_ascii_lowercase();
-            if lower.starts_with("## summary") || lower == "summary:" || lower == "summary" {
-                section = Section::Summary;
-                continue;
-            }
-            if lower.starts_with("## key") || lower.starts_with("key points") {
-                section = Section::KeyPoints;
-                continue;
-            }
-            if lower.starts_with("## action") || lower.starts_with("action items") {
-                section = Section::ActionItems;
+            if let Some(heading) = section_of(trimmed) {
+                section = heading;
                 continue;
             }
             if trimmed.is_empty() {
@@ -209,6 +310,35 @@ pub fn extractive_summary(transcript: &str, max_sentences: usize) -> MeetingInsi
 }
 
 #[cfg(test)]
+mod thinking {
+    use super::*;
+
+    #[test]
+    fn a_model_that_does_not_think_is_untouched() {
+        let (thinking, answer) = split_thinking("## Resumo\nDecidimos o escopo.");
+        assert!(thinking.is_none());
+        assert_eq!(answer, "## Resumo\nDecidimos o escopo.");
+    }
+
+    #[test]
+    fn thinking_is_lifted_out_of_the_answer() {
+        let (thinking, answer) =
+            split_thinking("<think>Preciso listar os pontos.</think>\n## Resumo\nEscopo fechado.");
+        assert_eq!(thinking.as_deref(), Some("Preciso listar os pontos."));
+        assert_eq!(answer, "## Resumo\nEscopo fechado.");
+    }
+
+    /// A budget that ran out mid-thought leaves no closing tag. Handing the
+    /// remainder over as the summary would show the user the model muttering.
+    #[test]
+    fn unfinished_thinking_does_not_become_the_summary() {
+        let (thinking, answer) = split_thinking("<think>Primeiro eu preciso");
+        assert_eq!(thinking.as_deref(), Some("Primeiro eu preciso"));
+        assert!(answer.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -252,6 +382,53 @@ We discussed the roadmap.
             assert!(p.contains("## Action items"));
             assert!(p.contains("Keep the three headings exactly as written, in English"));
         }
+    }
+
+    /// Bold and a colon nest in either order, and both orders occur.
+    #[test]
+    fn a_heading_survives_its_decoration() {
+        for heading in [
+            "**Pontos-chave:**",
+            "**Pontos-chave**:",
+            "## **Key points**",
+            "Key points:",
+        ] {
+            let raw = format!(
+                "## Resumo
+x
+{heading}
+- um ponto"
+            );
+            let i = MeetingInsights::from_model_text(&raw);
+            assert_eq!(i.key_points, vec!["um ponto"], "failed on {heading}");
+        }
+    }
+
+    /// Gemma 3 4B's real shape: it translates the headings it was told to keep.
+    #[test]
+    fn portuguese_headings_still_find_their_sections() {
+        let raw = "## Resumo
+Fechamos o escopo.
+
+**Pontos-chave**
+- Instalador trava
+
+## Ações:
+- Assinar o build";
+        let i = MeetingInsights::from_model_text(raw);
+        assert_eq!(i.summary, "Fechamos o escopo.");
+        assert_eq!(i.key_points, vec!["Instalador trava"]);
+        assert_eq!(i.action_items, vec!["Assinar o build"]);
+    }
+
+    /// Prose that merely opens with the word must not be mistaken for a heading.
+    #[test]
+    fn a_sentence_starting_with_resumo_is_not_a_heading() {
+        let i = MeetingInsights::from_model_text(
+            "## Resumo
+Resumo da reunião: escopo fechado.",
+        );
+        assert_eq!(i.summary, "Resumo da reunião: escopo fechado.");
     }
 
     #[test]

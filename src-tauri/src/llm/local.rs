@@ -2,7 +2,7 @@
 //! When GGUF weights exist, runs real generation. Without weights, returns a clear error
 //! for summarize/chat cloud-less paths (callers may fall back intentionally).
 
-use crate::domain::backend::{built_backends, resolve_backend, BackendSupport, ComputeBackend};
+use crate::domain::backend::{built_backends, resolve_llm_backend, BackendSupport, ComputeBackend};
 use crate::domain::chat::{offline_answer, ChatMessage};
 use crate::domain::i18n::Locale;
 use crate::domain::summary::{extractive_summary, MeetingInsights, SummaryTemplate};
@@ -10,7 +10,7 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::TokenToStringError;
 use parking_lot::Mutex;
@@ -60,6 +60,10 @@ fn load_ggml_backends() {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    // A backend the user downloaded, before anything else. It is not beside the
+    // executable and ggml will never find it on its own.
+    load_downloaded_backend();
+
     // ggml scans the executable's own directory by itself. Loading that same
     // directory again registers every backend twice, and a device listed twice
     // is a card that gets asked to hold half a model each time.
@@ -77,6 +81,46 @@ fn load_ggml_backends() {
         Some(dir) => load_backends_from_path(&dir),
         None => tracing::warn!("no ggml backend directory found; local models will not load"),
     }
+}
+
+/// Register the CUDA pack, if the user asked for it and it unpacked.
+///
+/// Two steps, and the second is the one that is easy to miss. `ggml-cuda.dll`
+/// imports `cudart` and `cublas` at *load* time, and Windows resolves those
+/// from the executable's directory, the system directories and `PATH` — never
+/// from the directory of the library doing the importing. Without the first
+/// step the file loads and immediately fails, which looks exactly like the
+/// machine not having a GPU.
+///
+/// Prepending to the process's own `PATH` rather than calling
+/// `SetDllDirectory`: it is inherited by everything ggml opens afterwards, and
+/// it does not disturb the default search order for anything else.
+fn load_downloaded_backend() {
+    use llama_cpp_2::llama_backend::load_backends_from_path;
+
+    let dir = crate::paths::backends_dir().join("cuda-backend");
+    // The marker, not the library: an extraction that stopped after writing
+    // `ggml-cuda.dll` leaves a truncated file behind, and handing that to ggml
+    // is worse than having no CUDA at all. The catalog refuses such a pack for
+    // the same reason, and the two must not disagree.
+    if !dir.join(crate::models::UNPACK_MARKER).is_file() {
+        return;
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        let mut entries = vec![dir.clone()];
+        entries.extend(std::env::split_paths(&path));
+        match std::env::join_paths(entries) {
+            // SAFETY: called once, from inside the `OnceLock` that guards the
+            // backend, before any thread can be looking at the environment.
+            Ok(joined) => unsafe { std::env::set_var("PATH", joined) },
+            Err(e) => {
+                tracing::warn!("could not put the CUDA pack on PATH: {e}");
+                return;
+            }
+        }
+    }
+    tracing::info!("loading the downloaded CUDA backend from {}", dir.display());
+    load_backends_from_path(&dir);
 }
 
 /// Whether a directory holds ggml's loadable backends.
@@ -126,7 +170,16 @@ pub(crate) fn probe_support() -> BackendSupport {
         }
         for device in llama_cpp_2::list_llama_ggml_backend_devices() {
             match device.backend.as_str() {
-                "CUDA" => support.cuda_present = true,
+                // A CUDA device in this list means the CUDA backend registered,
+                // and it registers whether it was compiled into the binary or
+                // downloaded afterwards. `built_backends` cannot know about the
+                // second — it reads compile-time flags — so a machine that
+                // fetched the pack would have been told its own GPU was
+                // unreachable and quietly kept using Vulkan.
+                "CUDA" => {
+                    support.cuda_present = true;
+                    support.cuda_built = true;
+                }
                 "Vulkan" => support.vulkan_present = true,
                 _ => {}
             }
@@ -312,11 +365,27 @@ impl LocalLlm {
         locale: Locale,
         model_id: &str,
         backend_preference: &str,
+        reasoning: bool,
     ) -> Result<MeetingInsights, String> {
         if self.is_ready(model_id) {
-            let prompt = crate::domain::summary::build_summary_prompt(template, transcript, locale);
+            let mut prompt =
+                crate::domain::summary::build_summary_prompt(template, transcript, locale);
+            if !reasoning {
+                // Qwen3's own switch, and inert for a model that has no such
+                // mode. Thinking is not free: it is spent out of the same token
+                // budget the answer comes from, so a summary that must not
+                // think is also a summary that arrives sooner.
+                prompt.push_str("\n/no_think");
+            }
             let raw = run_llama(&self.model_file(model_id), &prompt, 512, backend_preference)?;
-            return Ok(MeetingInsights::from_model_text(&raw));
+            // The working never reaches the parser. It reads headings, and a
+            // model talking to itself has none — the summary would become a
+            // paragraph of deliberation.
+            let (thinking, answer) = crate::domain::summary::split_thinking(&raw);
+            if let Some(thinking) = thinking {
+                tracing::info!("the model reasoned for {} characters", thinking.len());
+            }
+            return Ok(MeetingInsights::from_model_text(&answer));
         }
         if self.soft_fallback {
             return Ok(extractive_summary(transcript, 4));
@@ -343,7 +412,11 @@ impl LocalLlm {
                 "local LLM model `{model_id}` is not installed — download GGUF weights from Settings"
             ));
         }
-        run_llama(&self.model_file(model_id), prompt, 32, backend_preference)
+        let raw = run_llama(&self.model_file(model_id), prompt, 32, backend_preference)?;
+        // A title has thirty-two tokens to exist in. A model that spends them
+        // thinking returns nothing usable, so the working is dropped and the
+        // caller keeps the date label.
+        Ok(crate::domain::summary::split_thinking(&raw).1)
     }
 
     pub fn chat(
@@ -367,7 +440,8 @@ impl LocalLlm {
                 .map(|m| m.content.as_str())
                 .unwrap_or("You are Vesper, a private meeting assistant.");
             let prompt = format!("{system}\n\nUser: {question}\nAssistant:");
-            return run_llama(&self.model_file(model_id), &prompt, 384, backend_preference);
+            let raw = run_llama(&self.model_file(model_id), &prompt, 384, backend_preference)?;
+            return Ok(crate::domain::summary::split_thinking(&raw).1);
         }
         if self.soft_fallback {
             return Ok(offline_answer(transcript, question));
@@ -382,6 +456,27 @@ impl Default for LocalLlm {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Put the prompt in the model's own chat format, if it has one.
+///
+/// GGUF weights carry the template they were tuned with. Applying it is the
+/// difference between an instruction obeyed and an instruction guessed at.
+///
+/// Falls back to the bare prompt when a model ships no template — a base model
+/// has none, and for those the raw text is exactly right.
+fn chat_wrap(model: &LlamaModel, prompt: &str) -> String {
+    let Ok(template) = model.chat_template(None) else {
+        return prompt.to_string();
+    };
+    let Ok(message) = LlamaChatMessage::new("user".to_string(), prompt.to_string()) else {
+        return prompt.to_string();
+    };
+    // `true` adds the assistant header, so generation starts where the answer
+    // goes rather than continuing the user's turn.
+    model
+        .apply_chat_template(&template, &[message], true)
+        .unwrap_or_else(|_| prompt.to_string())
 }
 
 /// The bytes of one token, whatever its length.
@@ -424,7 +519,7 @@ pub fn run_llama(
     }
 
     let backend = backend()?;
-    let chosen = resolve_backend(backend_preference, probe_support());
+    let chosen = resolve_llm_backend(backend_preference, probe_support());
     // The backend belongs in the key: the same weights resident on the GPU and
     // resident on the CPU are two different objects, so changing the setting
     // has to reload rather than keep serving the old one.
@@ -451,8 +546,14 @@ pub fn run_llama(
     }
     let model = &cache.as_ref().expect("just loaded").1;
 
+    // Wrapped in whatever the weights were tuned to expect. An instruction-tuned
+    // model is trained on its own chat markup — `<|im_start|>user` and the rest —
+    // and handing it bare text is asking it to guess. The 0.5B answered by
+    // echoing the transcript back; a 1.7B answered by narrating its own
+    // reasoning. Neither is a summary, and neither is the model's fault.
+    let wrapped = chat_wrap(model, prompt);
     let tokens = model
-        .str_to_token(prompt, AddBos::Always)
+        .str_to_token(&wrapped, AddBos::Always)
         .map_err(|e| format!("llama tokenize: {e}"))?;
 
     // Sized to this call, and never past what the weights were trained for: a
@@ -495,7 +596,22 @@ pub fn run_llama(
 
     // Deterministic on purpose. A summary the user re-runs should not come back
     // different, and greedy also keeps a seed out of the equation for tests.
-    let mut sampler = LlamaSampler::greedy();
+    //
+    // Greedy alone loops, though, and a small model loops hardest: the 0.5B
+    // produced "instale o clode Cote usando o clode Cote" and kept going. The
+    // penalty in front of it taxes repeats within its window.
+    //
+    // The window is 256 and that number is measured, not picked. At 64 — long
+    // enough to cover a repeated phrase, not a repeated bullet — the same model
+    // wrote one key point ten times over a real transcript, because by the time
+    // it came round again the earlier copy had left the window. Pushing further
+    // the other way costs accuracy instead of buying anything: at 512 with a
+    // frequency penalty it misspelled the subject, dropped a heading level and
+    // invented two numbers that appear in no transcript.
+    let mut sampler = LlamaSampler::chain_simple([
+        LlamaSampler::penalties(256, 1.1, 0.0, 0.0),
+        LlamaSampler::greedy(),
+    ]);
 
     // Bytes, decoded once at the end. A multi-byte character can span two tokens,
     // so decoding each piece on its own turns every accented word in a Portuguese
@@ -519,6 +635,77 @@ pub fn run_llama(
 }
 
 #[cfg(test)]
+mod gpu_bench {
+    use super::*;
+
+    /// Generate from the local model on each backend in turn, and print what
+    /// each one cost.
+    ///
+    /// Ignored: it needs downloaded weights, and CUDA needs the downloaded
+    /// pack, neither of which CI has. Run it by hand with
+    /// `cargo test --release --features gpu-vulkan -- --ignored --nocapture gpu_bench`.
+    ///
+    /// The prompt is long on purpose. CUDA's advantage over Vulkan is in
+    /// prompt processing, and a two-word prompt measures the part that is the
+    /// same on both.
+    #[test]
+    #[ignore]
+    fn generates_on_every_backend() {
+        // `VESPER_BENCH_MODEL` points it at any GGUF, which is how one model's
+        // behaviour on a backend can be told apart from the backend's own.
+        let model = std::env::var("VESPER_BENCH_MODEL")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                dirs::data_dir()
+                    .unwrap()
+                    .join("Vesper")
+                    .join("models")
+                    .join("qwen2.5-0.5b")
+                    .join("model.gguf")
+            });
+        assert!(model.is_file(), "no weights at {}", model.display());
+
+        println!("devices: {:#?}", gpu_devices());
+        println!("support: {:?}", probe_support());
+
+        // A real transcript when one is named, so the comparison is against the
+        // Portuguese this application actually produces rather than English
+        // written to flatter the model.
+        let transcript = match std::env::var("VESPER_BENCH_PROMPT") {
+            Ok(path) => std::fs::read_to_string(path).expect("prompt file"),
+            Err(_) => "Me: we need to decide the release scope. Others: the                  installer is the blocker. Me: what is left. Others: signing."
+                .repeat(12),
+        };
+        // The application's own prompt, in the language it summarises in. A
+        // hand-written English instruction measures a different product.
+        let prompt = crate::domain::summary::build_summary_prompt(
+            SummaryTemplate::General,
+            &transcript,
+            Locale::PtBr,
+        );
+
+        let only =
+            std::env::var("VESPER_BENCH_BACKENDS").unwrap_or_else(|_| "cpu,vulkan,cuda".into());
+        for backend in only.split(',') {
+            let started = std::time::Instant::now();
+            let budget = std::env::var("VESPER_BENCH_TOKENS")
+                .ok()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(256);
+            match run_llama(&model, &prompt, budget, backend) {
+                Ok(text) => println!(
+                    "{backend:>7}: {:>8.2?}
+{text}
+--- end ---",
+                    started.elapsed()
+                ),
+                Err(e) => println!("{backend:>7}: failed — {e}"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -531,8 +718,9 @@ mod tests {
                 "Me: we need to ship auth. Others: agreed. TODO write tests.",
                 SummaryTemplate::General,
                 Locale::En,
-                "qwen2.5-1.5b",
+                "llama32-1b",
                 "cpu",
+                false,
             )
             .unwrap();
         assert!(!i.summary.is_empty());
@@ -547,8 +735,9 @@ mod tests {
                 "hi",
                 SummaryTemplate::General,
                 Locale::En,
-                "qwen2.5-1.5b",
+                "llama32-1b",
                 "cpu",
+                false,
             )
             .unwrap_err();
         assert!(err.contains("not installed"));

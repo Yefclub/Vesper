@@ -166,6 +166,13 @@ function AppShell({
   /// does not emit them — in which case none of the UI below renders and Stop
   /// behaves as it did.
   const [progress, setProgress] = useState<MeetingProgress | null>(null);
+  // The meeting being summarised, not a flag. Not `busy` either: that one is
+  // also raised by starting, stopping and importing, and it would put the
+  // summary pane to work over a recording that has not been transcribed yet.
+  // An id rather than a boolean because the sidebar stays live while the model
+  // writes — select another meeting mid-summary and a flag would claim that one
+  // was being worked on too.
+  const [summarizingId, setSummarizingId] = useState<string | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [confirmingRecord, setConfirmingRecord] = useState(false);
   const [skipRecordReminder, setSkipRecordReminder] = useState(false);
@@ -661,14 +668,21 @@ function AppShell({
   async function handleSummarize(template = "general") {
     if (!selectedId) return;
     setBusy(true);
+    setSummarizingId(selectedId);
+    // Before the await, not after it. The pane that is about to be written is
+    // the one worth watching while it is written — switching to it once the
+    // answer is already there is a teleport, and it left the working state
+    // rendering on a tab nobody was looking at. The pipeline after a recording
+    // has always done it this way; the button was the odd one out.
+    setTab("summary");
     try {
       await api.summarize(selectedId, template);
       await loadMeeting(selectedId);
-      setTab("summary");
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
+      setSummarizingId(null);
     }
   }
 
@@ -1434,6 +1448,10 @@ function AppShell({
                               />
                             </div>
                           </div>
+                        ) : summarizingId === selected.id ||
+                          (progress?.phase === "summarizing" &&
+                            progress.meeting_id === selected.id) ? (
+                          <SummaryWorking />
                         ) : (
                           // Three cards each holding one em-dash and nothing to
                           // act on is an empty state. This renders it as one.
@@ -1713,6 +1731,52 @@ function Section({
 ///
 /// `action` is what makes these states empty rather than dead. Every screen in
 /// the app now names the way out of itself.
+/// What the summary pane shows while the model is writing.
+///
+/// It used to show the empty state with its button greyed out: a click that
+/// visibly did nothing for two seconds on a GPU, and closer to twenty on a
+/// CPU. The three rows name the three cards that are coming, in the words they
+/// will carry once they arrive, so the wait says what it is for.
+///
+/// No percentage. Generation reports no progress to report, and a bar that
+/// invents one is worse than a wait that is honest about being a wait.
+function SummaryWorking() {
+  const { t } = useI18n();
+  const sections = ["section.summary", "section.key_points", "section.action_items"];
+  return (
+    <div className="mx-auto max-w-md text-center">
+      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg bg-surface-2 text-fg-subtle">
+        {/* Opacity alone, which is also the reduced-motion fallback — under
+            `reducedMotion="user"` this keeps breathing instead of freezing
+            into a still frame that reads as a hang. */}
+        <motion.span
+          className="flex"
+          animate={{ opacity: [0.45, 1, 0.45] }}
+          transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+        >
+          <Sparkles size={22} />
+        </motion.span>
+      </div>
+      <h2 className="text-lg font-semibold">{t("summary.working")}</h2>
+      <p className="mt-2 text-base leading-relaxed text-fg-muted">{t("summary.working_body")}</p>
+      <ul className="mt-6 space-y-2 text-left">
+        {sections.map((key, i) => (
+          <li key={key} className="flex items-center gap-3 rounded-lg bg-surface-2 px-3 py-2">
+            <motion.span
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+              animate={{ opacity: [0.3, 1, 0.3] }}
+              transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut", delay: i * 0.2 }}
+            />
+            <span className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+              {t(key)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function Empty({
   icon,
   title,
