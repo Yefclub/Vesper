@@ -666,10 +666,15 @@ function AppShell({
     if (!selectedId) return;
     setBusy(true);
     setSummarizing(true);
+    // Before the await, not after it. The pane that is about to be written is
+    // the one worth watching while it is written — switching to it once the
+    // answer is already there is a teleport, and it left the working state
+    // rendering on a tab nobody was looking at. The pipeline after a recording
+    // has always done it this way; the button was the odd one out.
+    setTab("summary");
     try {
       await api.summarize(selectedId, template);
       await loadMeeting(selectedId);
-      setTab("summary");
     } catch (e) {
       setError(String(e));
     } finally {
