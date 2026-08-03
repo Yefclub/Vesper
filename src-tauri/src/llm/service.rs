@@ -34,8 +34,9 @@ impl LlmService {
                 let locale = settings.locale();
                 let model = settings.local_llm_model.clone();
                 let backend = settings.compute_backend.clone();
+                let reasoning = settings.reasoning_enabled;
                 tokio::task::spawn_blocking(move || {
-                    local.summarize(&transcript, template, locale, &model, &backend)
+                    local.summarize(&transcript, template, locale, &model, &backend, reasoning)
                 })
                 .await
                 .map_err(|e| e.to_string())?

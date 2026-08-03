@@ -361,11 +361,27 @@ impl LocalLlm {
         locale: Locale,
         model_id: &str,
         backend_preference: &str,
+        reasoning: bool,
     ) -> Result<MeetingInsights, String> {
         if self.is_ready(model_id) {
-            let prompt = crate::domain::summary::build_summary_prompt(template, transcript, locale);
+            let mut prompt =
+                crate::domain::summary::build_summary_prompt(template, transcript, locale);
+            if !reasoning {
+                // Qwen3's own switch, and inert for a model that has no such
+                // mode. Thinking is not free: it is spent out of the same token
+                // budget the answer comes from, so a summary that must not
+                // think is also a summary that arrives sooner.
+                prompt.push_str("\n/no_think");
+            }
             let raw = run_llama(&self.model_file(model_id), &prompt, 512, backend_preference)?;
-            return Ok(MeetingInsights::from_model_text(&raw));
+            // The working never reaches the parser. It reads headings, and a
+            // model talking to itself has none — the summary would become a
+            // paragraph of deliberation.
+            let (thinking, answer) = crate::domain::summary::split_thinking(&raw);
+            if let Some(thinking) = thinking {
+                tracing::info!("the model reasoned for {} characters", thinking.len());
+            }
+            return Ok(MeetingInsights::from_model_text(&answer));
         }
         if self.soft_fallback {
             return Ok(extractive_summary(transcript, 4));
@@ -392,7 +408,11 @@ impl LocalLlm {
                 "local LLM model `{model_id}` is not installed — download GGUF weights from Settings"
             ));
         }
-        run_llama(&self.model_file(model_id), prompt, 32, backend_preference)
+        let raw = run_llama(&self.model_file(model_id), prompt, 32, backend_preference)?;
+        // A title has thirty-two tokens to exist in. A model that spends them
+        // thinking returns nothing usable, so the working is dropped and the
+        // caller keeps the date label.
+        Ok(crate::domain::summary::split_thinking(&raw).1)
     }
 
     pub fn chat(
@@ -416,7 +436,8 @@ impl LocalLlm {
                 .map(|m| m.content.as_str())
                 .unwrap_or("You are Vesper, a private meeting assistant.");
             let prompt = format!("{system}\n\nUser: {question}\nAssistant:");
-            return run_llama(&self.model_file(model_id), &prompt, 384, backend_preference);
+            let raw = run_llama(&self.model_file(model_id), &prompt, 384, backend_preference)?;
+            return Ok(crate::domain::summary::split_thinking(&raw).1);
         }
         if self.soft_fallback {
             return Ok(offline_answer(transcript, question));
@@ -675,6 +696,7 @@ mod tests {
                 Locale::En,
                 "qwen2.5-1.5b",
                 "cpu",
+                false,
             )
             .unwrap();
         assert!(!i.summary.is_empty());
@@ -691,6 +713,7 @@ mod tests {
                 Locale::En,
                 "qwen2.5-1.5b",
                 "cpu",
+                false,
             )
             .unwrap_err();
         assert!(err.contains("not installed"));

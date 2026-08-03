@@ -55,6 +55,46 @@ pub struct MeetingInsights {
     pub action_items: Vec<String>,
 }
 
+/// Split a reasoning model's thinking from its answer.
+///
+/// Qwen3 and its kind write their working inside `<think>…</think>` before
+/// answering. Fed straight to the parser that reads headings, that working
+/// becomes the summary — the user gets a paragraph of the model talking to
+/// itself where the meeting should be.
+///
+/// Returns `(thinking, answer)`. A model that does not think returns the whole
+/// text as the answer, which is every model in the catalog today.
+pub fn split_thinking(raw: &str) -> (Option<String>, String) {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+
+    let Some(start) = raw.find(OPEN) else {
+        return (None, raw.to_string());
+    };
+    match raw[start..].find(CLOSE) {
+        Some(offset) => {
+            let inner = &raw[start + OPEN.len()..start + offset];
+            let mut answer = String::from(&raw[..start]);
+            answer.push_str(&raw[start + offset + CLOSE.len()..]);
+            let thinking = inner.trim().to_string();
+            (
+                (!thinking.is_empty()).then_some(thinking),
+                answer.trim().to_string(),
+            )
+        }
+        // Thinking that ran out of budget before closing. Everything after the
+        // tag is working, not answer — returning it as the summary would be
+        // worse than returning nothing.
+        None => {
+            let thinking = raw[start + OPEN.len()..].trim().to_string();
+            (
+                (!thinking.is_empty()).then_some(thinking),
+                raw[..start].trim().to_string(),
+            )
+        }
+    }
+}
+
 impl MeetingInsights {
     pub fn from_model_text(raw: &str) -> Self {
         let mut summary = String::new();
@@ -205,6 +245,35 @@ pub fn extractive_summary(transcript: &str, max_sentences: usize) -> MeetingInsi
         },
         key_points,
         action_items,
+    }
+}
+
+#[cfg(test)]
+mod thinking {
+    use super::*;
+
+    #[test]
+    fn a_model_that_does_not_think_is_untouched() {
+        let (thinking, answer) = split_thinking("## Resumo\nDecidimos o escopo.");
+        assert!(thinking.is_none());
+        assert_eq!(answer, "## Resumo\nDecidimos o escopo.");
+    }
+
+    #[test]
+    fn thinking_is_lifted_out_of_the_answer() {
+        let (thinking, answer) =
+            split_thinking("<think>Preciso listar os pontos.</think>\n## Resumo\nEscopo fechado.");
+        assert_eq!(thinking.as_deref(), Some("Preciso listar os pontos."));
+        assert_eq!(answer, "## Resumo\nEscopo fechado.");
+    }
+
+    /// A budget that ran out mid-thought leaves no closing tag. Handing the
+    /// remainder over as the summary would show the user the model muttering.
+    #[test]
+    fn unfinished_thinking_does_not_become_the_summary() {
+        let (thinking, answer) = split_thinking("<think>Primeiro eu preciso");
+        assert_eq!(thinking.as_deref(), Some("Primeiro eu preciso"));
+        assert!(answer.is_empty());
     }
 }
 
