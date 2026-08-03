@@ -21,7 +21,13 @@ on:
 
 jobs:
   pack:
-    runs-on: windows-latest
+    # Not `windows-latest`. That image carries Visual Studio 2026, and CUDA
+    # 12.6's nvcc refuses it outright — "unsupported Microsoft Visual Studio
+    # version" — because a CUDA release only accepts host compilers that
+    # existed when it shipped. The pack is a standalone artifact loaded through
+    # ggml's C backend interface, so the compiler that builds it does not have
+    # to match the one that builds the app.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
