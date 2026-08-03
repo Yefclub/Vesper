@@ -184,10 +184,17 @@ pub fn list_models() -> Vec<ModelInfo> {
         .filter(|(_, kind, ..)| *kind != "backend" || cfg!(windows))
         .map(|(id, kind, label, url, size, sha256)| {
             let path = model_artifact_path(id, kind);
-            let present = path.is_file()
-                && std::fs::metadata(&path)
-                    .map(|m| m.len() > 1_000_000)
-                    .unwrap_or(false);
+            // For a pack, "present" is the unpacked libraries: the archive is
+            // deleted once it has been read, so asking whether it is still
+            // there would report a working backend as missing.
+            let present = if kind == "backend" {
+                backend_is_unpacked(&path)
+            } else {
+                path.is_file()
+                    && std::fs::metadata(&path)
+                        .map(|m| m.len() > 1_000_000)
+                        .unwrap_or(false)
+            };
             let verified = std::fs::read_to_string(artifact_marker_path(&path))
                 .map(|recorded| recorded.trim().eq_ignore_ascii_case(sha256))
                 .unwrap_or(false)
@@ -521,6 +528,11 @@ where
             false,
         ));
         unpack_backend(&dest)?;
+        // The archive has done its job. Keeping it doubles what the pack costs
+        // on disk — 637 MB of container beside the 637 MB it contained — and
+        // nothing reads it again: the marker records the digest and the
+        // libraries beside it are what the loader opens.
+        let _ = std::fs::remove_file(&dest);
     }
 
     on_progress(DownloadProgress::phase(

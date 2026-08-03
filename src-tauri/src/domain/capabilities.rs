@@ -37,6 +37,15 @@ pub struct CapabilityProbe {
 /// back to system memory and run slower than they would have on the CPU alone.
 const USABLE_VRAM_MB: u64 = 3_000;
 
+/// The large tier, set below what an 8 GB card reports rather than at it.
+///
+/// Observed on one: through Vulkan the same RTX 4070 reports 7948 MB and
+/// through CUDA about 8188 MB. A boundary at 8000 therefore moved the machine
+/// between tiers depending on which backend happened to be loaded — the card
+/// did not change, the API asking did. Thresholds have to sit away from the
+/// sizes cards actually report, not on them.
+const LARGE_VRAM_MB: u64 = 7_000;
+
 /// Build a capability report + recommended local models from probe data.
 ///
 /// The ladder is set by what has to be resident at once — the weights plus the
@@ -51,7 +60,7 @@ pub fn recommend_from_probe(probe: &CapabilityProbe) -> CapabilityReport {
     let gpu = (probe.cuda_available || probe.vulkan_available) && vram_mb >= USABLE_VRAM_MB;
     let mut notes = Vec::new();
 
-    let (stt, llm) = if gpu && vram_mb >= 8_000 {
+    let (stt, llm) = if gpu && vram_mb >= LARGE_VRAM_MB {
         notes.push(format!(
             "{} MB of video memory — large local models will fit.",
             vram_mb
@@ -278,8 +287,13 @@ mod tests {
     /// The laptop this was written on reports an RTX 4070 with 7.8 GB beside an
     /// integrated Intel Arc claiming 18 GB — which is not memory the chip has,
     /// it is a slice of system RAM it may borrow. Sizing by the larger number
-    /// named the weaker device and pushed the recommendation two tiers past
-    /// what the real card can hold.
+    /// named the weaker device and reported eighteen gigabytes of video memory
+    /// that do not exist.
+    ///
+    /// The assertion is on the number carried through, not on the tier it lands
+    /// in: which models a given size deserves is the neighbouring test's
+    /// business, and tying both to one boundary made moving that boundary look
+    /// like breaking this.
     #[test]
     fn an_integrated_chip_does_not_outrank_the_real_card() {
         let r = recommend_from_probe(&CapabilityProbe {
@@ -289,8 +303,29 @@ mod tests {
             vram_bytes: 7948 * 1024 * 1024,
             ..Default::default()
         });
-        assert_eq!(r.recommended_stt_model, "whisper-small");
-        assert_eq!(r.recommended_llm_model, "qwen2.5-1.5b");
+        assert_eq!(r.vram_mb, 7948);
+        assert_eq!(
+            r.gpu_name.as_deref(),
+            Some("NVIDIA GeForce RTX 4070 Laptop GPU")
+        );
+    }
+
+    /// The same card seen through two APIs must land in the same tier. Vulkan
+    /// reports 7948 MB for an RTX 4070 and CUDA about 8188 MB; a boundary
+    /// between those two numbers moved the machine's recommendation when a
+    /// downloaded backend registered, which is a change nobody made.
+    #[test]
+    fn one_card_reported_two_ways_stays_in_one_tier() {
+        let tier = |mb: u64| {
+            recommend_from_probe(&CapabilityProbe {
+                cpu_cores: 22,
+                vulkan_available: true,
+                vram_bytes: mb * 1024 * 1024,
+                ..Default::default()
+            })
+            .recommended_llm_model
+        };
+        assert_eq!(tier(7_948), tier(8_188));
     }
 
     /// An integrated chip with a sliver of memory would run a large model
