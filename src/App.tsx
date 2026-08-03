@@ -14,7 +14,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { clsx } from "clsx";
-import { Moon, Settings, Sparkles, Sun, TriangleAlert } from "lucide-react";
+import { Moon, PanelLeftClose, PanelLeftOpen, Settings, Sparkles, Sun, TriangleAlert } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -32,7 +32,7 @@ import {
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
 import { formatMeetingDateTime } from "./lib/datetime";
 import { I18nProvider, useI18n } from "./lib/i18n";
-import { fadeRise, segmentArrive } from "./lib/motion";
+import { fadeRise, segmentArrive, transition } from "./lib/motion";
 import { applyTheme } from "./lib/theme";
 import { Button, FOCUS } from "./components/Button";
 import { Markdown } from "./components/Markdown";
@@ -70,6 +70,10 @@ async function dragWindow(stillPressed: () => boolean) {
   if (!stillPressed()) return;
   await win.startDragging();
 }
+
+/// The sidebar's width, in pixels. Named because two places have to agree on
+/// it: the backdrop that draws it and the card that slides exactly that far.
+const SIDEBAR_WIDTH = 288;
 
 export default function App() {
   const [bootLocale, setBootLocale] = useState("en");
@@ -191,6 +195,11 @@ function AppShell({
   const pressRef = useRef<{ x: number; y: number; started: boolean } | null>(
     null,
   );
+  /// Open by default: the list of meetings is the reason the window is this
+  /// wide. Not persisted — hiding it is a gesture for the current task, not a
+  /// preference, and a window that came back without its list would read as
+  /// having lost it.
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -869,9 +878,21 @@ function AppShell({
         // supply their own inset.
         className="grid h-12 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 pl-4 pr-0"
       >
-        {/* `pointer-events-none`: nothing here is clickable, and while it ate
+        {/* `pointer-events-none` on the block, and the toggle opts back in:
+            nothing else here is clickable, and while the whole block ate
             presses the left half of the titlebar could not be dragged. */}
-        <div className="pointer-events-none flex items-center gap-2">
+        <div className="pointer-events-none flex items-center gap-2 [&>button]:pointer-events-auto">
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid="btn-toggle-sidebar"
+            onClick={() => setSidebarOpen((v) => !v)}
+            title={t(sidebarOpen ? "sidebar.hide" : "sidebar.show")}
+            aria-label={t(sidebarOpen ? "sidebar.hide" : "sidebar.show")}
+            aria-expanded={sidebarOpen}
+          >
+            {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
+          </Button>
           {/* No radius: the asset is the mark alone now, not a rounded tile, so
               a corner clip would shave the artwork instead of a background. */}
           <img src={logo} alt="" className="h-8 w-8" />
@@ -973,8 +994,17 @@ function AppShell({
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <Sidebar
+      {/* The sidebar is the backdrop, not a panel that folds. It keeps its
+          place and its size, and the card slides across it — which is why the
+          animation belongs to the card and there is nothing here that squeezes
+          a list of meetings into a narrower box while the user reads it. */}
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        {/* `inert` while covered. The card hides it from the eye, and without
+            this the search field, the import button and every meeting row stay
+            in the tab order — reachable, actionable, and with the focus ring
+            drawn behind the card where nobody can see it. */}
+        <div className="absolute inset-y-0 left-0 w-72" inert={!sidebarOpen}>
+          <Sidebar
           meetings={meetings}
           selectedId={selectedId}
           query={query}
@@ -985,10 +1015,17 @@ function AppShell({
           onSelect={loadMeeting}
           onDelete={(id) => setPendingDelete(meetings.find((m) => m.id === id) ?? null)}
           onImport={handleImport}
-          onNew={startNewMeeting}
-        />
+            onNew={startNewMeeting}
+          />
+        </div>
 
-        <main className="flex min-w-0 flex-1 flex-col">
+        <motion.main
+          // `initial={false}` so the first paint is wherever the sidebar
+          // already is, rather than an animation nobody asked for on launch.
+          initial={false}
+          animate={{ marginLeft: sidebarOpen ? SIDEBAR_WIDTH : 0 }}
+          transition={transition.base}
+          className="relative z-10 flex min-w-0 flex-1 flex-col">
           {/* THE CARD. One JSX element and not a component, because it has
               exactly one consumer. `overflow-hidden` clips its own descendants
               into the 12px corners — the banners' full-bleed borders, the
@@ -1487,10 +1524,16 @@ function AppShell({
 
             {/* The empty screen only. With a meeting open the transcript and the
                 summary own this column, and a Record button hanging over them
-                offers to start a second recording on top of the one the header is
-                already showing. */}
+                offers to start a second recording on top of the one the header
+                is already showing.
+
+                A running recording keeps it, whatever is selected: `handleStart`
+                opens the new meeting straight away, so `!selected` stops being
+                true the instant recording begins — which is precisely when the
+                control has to still be there. It changes into pause and stop
+                instead of vanishing. */}
             <AnimatePresence>
-              {!selected && !status?.recording && (
+              {(!selected || status?.recording) && (
                 <RecordDock
                   key="dock"
                   gate={gate}
@@ -1501,11 +1544,16 @@ function AppShell({
                   onStart={requestStart}
                   onOpenSettings={() => setShowSettings(true)}
                   onPickDevice={handlePickDevice}
+                  recording={
+                    status?.recording ? { paused: !!status.paused } : null
+                  }
+                  onStop={handleStop}
+                  onPauseResume={handlePauseResume}
                 />
               )}
             </AnimatePresence>
           </div>
-        </main>
+        </motion.main>
       </div>
 
       <AnimatePresence>

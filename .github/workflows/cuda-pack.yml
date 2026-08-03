@@ -19,6 +19,9 @@ on:
   push:
     tags: ["cuda-pack-*"]
 
+permissions:
+  contents: write
+
 jobs:
   pack:
     # Not `windows-latest`. That image carries Visual Studio 2026, and CUDA
@@ -97,3 +100,19 @@ jobs:
           name: vesper-cuda
           path: ${{ runner.temp }}\vesper-cuda.zip
           compression-level: 0
+
+      # Published on the tag that fired the build, because the catalog has to
+      # name a URL that never moves. A workflow artifact cannot be it: they
+      # expire, and fetching one needs a token the application does not have.
+      #
+      # Marked as a prerelease so it does not read as a version of the product.
+      # It is a component the application downloads, and it carries its own tag.
+      - name: Publish the pack
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $zip = Get-Item "$env:RUNNER_TEMP\vesper-cuda.zip"
+          $sha = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          $notes = "CUDA backend for Vesper, downloaded by the application when it finds an NVIDIA GPU. Not part of the installer.`n`nsha256: $sha`nbytes: $($zip.Length)"
+          gh release create "$env:GITHUB_REF_NAME" $zip.FullName --title "CUDA backend ($env:GITHUB_REF_NAME)" --notes "$notes" --prerelease

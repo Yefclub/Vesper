@@ -74,6 +74,12 @@ export function RecordTransport({ status, busy, onStop, onPauseResume }: Props) 
         variant="ghost"
         size="icon"
         data-testid="btn-pause"
+        // Same condition as Stop beside it and as the dock's pause. Now that
+        // both transports are on screen at once, a pause that stays live while
+        // a stop is in flight lets one of them accept a press the other has
+        // already refused — and pausing a recording that is being written out
+        // is not a state anybody asked for.
+        disabled={busy}
         onClick={onPauseResume}
         title={pauseLabel}
         aria-label={pauseLabel}
