@@ -937,6 +937,25 @@ mod tests {
     /// they could rewrite the marker too. It exists to stop artifacts of unknown
     /// provenance, including everything downloaded before checksums existed, from
     /// being handed to a C++ parser.
+    /// The defect this marker exists for: an extraction that died after writing
+    /// the library it is asked about. Checking for the library answered yes,
+    /// nothing re-extracted the pack, and the loader was handed a partial DLL.
+    #[test]
+    fn a_pack_missing_its_marker_is_not_unpacked() {
+        let dir = tempdir().unwrap();
+        let archive = dir.path().join("vesper-cuda.zip");
+        std::fs::write(dir.path().join("ggml-cuda.dll"), b"half a library").unwrap();
+        assert!(!backend_is_unpacked(&archive));
+    }
+
+    #[test]
+    fn a_pack_that_finished_unpacking_is_unpacked() {
+        let dir = tempdir().unwrap();
+        let archive = dir.path().join("vesper-cuda.zip");
+        std::fs::write(dir.path().join(UNPACK_MARKER), b"").unwrap();
+        assert!(backend_is_unpacked(&archive));
+    }
+
     #[test]
     fn an_unverified_artifact_is_never_ready() {
         let dir = tempdir().unwrap();
