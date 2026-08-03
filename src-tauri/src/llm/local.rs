@@ -99,7 +99,11 @@ fn load_downloaded_backend() {
     use llama_cpp_2::llama_backend::load_backends_from_path;
 
     let dir = crate::paths::backends_dir().join("cuda-backend");
-    if !dir.join("ggml-cuda.dll").is_file() {
+    // The marker, not the library: an extraction that stopped after writing
+    // `ggml-cuda.dll` leaves a truncated file behind, and handing that to ggml
+    // is worse than having no CUDA at all. The catalog refuses such a pack for
+    // the same reason, and the two must not disagree.
+    if !dir.join(crate::models::UNPACK_MARKER).is_file() {
         return;
     }
     if let Some(path) = std::env::var_os("PATH") {

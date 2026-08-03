@@ -349,7 +349,7 @@ pub fn backend_is_unpacked(archive: &Path) -> bool {
 /// reports itself ready. Nothing would re-extract it, and the loader would be
 /// handed a partial DLL. The marker only appears after the last write, so a
 /// broken unpack stays not-ready and the next attempt redoes it.
-const UNPACK_MARKER: &str = "PACK.ok";
+pub const UNPACK_MARKER: &str = "PACK.ok";
 
 /// Unpack a verified backend archive beside itself.
 ///
@@ -363,6 +363,13 @@ fn unpack_backend(archive: &Path) -> Result<(), String> {
         .ok_or_else(|| "backend archive has no directory".to_string())?;
     let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("opening the pack: {e}"))?;
+    // Before the first write, not after the last failure: a newer pack
+    // extracted over a working one would otherwise be vouched for by the
+    // previous install's marker if it broke halfway.
+    let marker = dir.join(UNPACK_MARKER);
+    if marker.exists() {
+        std::fs::remove_file(&marker).map_err(|e| format!("clearing the pack marker: {e}"))?;
+    }
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
