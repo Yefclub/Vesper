@@ -337,9 +337,19 @@ fn model_artifact_path(id: &str, kind: &str) -> PathBuf {
 pub fn backend_is_unpacked(archive: &Path) -> bool {
     archive
         .parent()
-        .map(|dir| dir.join("ggml-cuda.dll").is_file())
+        .map(|dir| dir.join(UNPACK_MARKER).is_file())
         .unwrap_or(false)
 }
+
+/// Written last, once every entry in the pack is on disk.
+///
+/// Asking whether `ggml-cuda.dll` exists answered the wrong question: an
+/// extraction stopped halfway — a full disk, an antivirus taking the file
+/// mid-write — leaves that name behind as a truncated file, and the pack then
+/// reports itself ready. Nothing would re-extract it, and the loader would be
+/// handed a partial DLL. The marker only appears after the last write, so a
+/// broken unpack stays not-ready and the next attempt redoes it.
+const UNPACK_MARKER: &str = "PACK.ok";
 
 /// Unpack a verified backend archive beside itself.
 ///
@@ -372,6 +382,8 @@ fn unpack_backend(archive: &Path) -> Result<(), String> {
         std::io::copy(&mut entry, &mut out)
             .map_err(|e| format!("writing {}: {e}", dest.display()))?;
     }
+    std::fs::write(dir.join(UNPACK_MARKER), "")
+        .map_err(|e| format!("marking the pack complete: {e}"))?;
     Ok(())
 }
 

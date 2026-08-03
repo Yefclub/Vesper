@@ -136,6 +136,25 @@ impl AppSettings {
         Ok(())
     }
 
+    /// Repoint a stored model id that has left the catalog.
+    ///
+    /// Settings hold an id, and the catalog is what gives an id a digest. Drop
+    /// an id from the catalog and `catalog_sha256` returns `None`, so weights
+    /// already on disk stop verifying, the summary quietly falls back to the
+    /// extractive one, and the picker offers nothing that matches what is
+    /// stored. The replacement is named here instead, which lands the user on
+    /// a model the app can still describe and download.
+    pub fn migrate_model_ids(&mut self) {
+        let replacement = match self.local_llm_model.as_str() {
+            "qwen2.5-1.5b" => Some("llama32-1b"),
+            "qwen2.5-3b" => Some("llama32-3b"),
+            _ => None,
+        };
+        if let Some(id) = replacement {
+            self.local_llm_model = id.into();
+        }
+    }
+
     pub fn set_reasoning(&mut self, enabled: bool) {
         self.reasoning_enabled = enabled;
     }
@@ -205,6 +224,26 @@ mod tests {
         assert!(s.switch_stt(SttProvider::OpenRouter).is_ok());
         assert_eq!(s.stt_provider, SttProvider::OpenRouter);
         assert!(s.switch_stt(SttProvider::Local).is_ok());
+    }
+
+    #[test]
+    fn a_model_that_left_the_catalog_is_repointed() {
+        let mut s = AppSettings {
+            local_llm_model: "qwen2.5-3b".into(),
+            ..AppSettings::default()
+        };
+        s.migrate_model_ids();
+        assert_eq!(s.local_llm_model, "llama32-3b");
+    }
+
+    #[test]
+    fn a_model_still_in_the_catalog_is_left_alone() {
+        let mut s = AppSettings {
+            local_llm_model: "qwen2.5-0.5b".into(),
+            ..AppSettings::default()
+        };
+        s.migrate_model_ids();
+        assert_eq!(s.local_llm_model, "qwen2.5-0.5b");
     }
 
     #[test]

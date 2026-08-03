@@ -635,6 +635,18 @@ export function SettingsPanel({
                 </div>
               )}
 
+              {/* The offer disappearing was the only sign the download had
+                  worked, and it was the wrong one: ggml registers its backends
+                  once per process, before this screen ever opens, so a pack
+                  that arrives now is used from the next launch. Without this
+                  line the user pays for 600 MB, sees the row vanish, and
+                  summaries carry on running on the CPU with nothing said. */}
+              {cudaPack?.ready && caps?.cuda_device_name && (
+                <p className="rounded-md border border-border bg-surface-2 p-3 text-xs leading-relaxed text-fg-muted">
+                  {t("cuda.installed")}
+                </p>
+              )}
+
               {caps && (
                 <div className="rounded-md border border-border bg-surface-2 p-3 text-xs text-fg-muted">
                   <div className="mb-1 font-medium text-fg">

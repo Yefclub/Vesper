@@ -108,14 +108,25 @@ pub fn split_thinking(raw: &str) -> (Option<String>, String) {
 /// and cost a line each to accept.
 fn section_of(line: &str) -> Option<Section> {
     let hashed = line.starts_with('#');
-    let label = line
-        .trim_start_matches('#')
-        .trim()
-        .trim_start_matches("**")
-        .trim_end_matches("**")
-        .trim_end_matches(':')
-        .trim()
-        .to_lowercase();
+    // Looped, because the decoration nests in either order: `**Key points:**`
+    // puts the colon inside the bold and `**Key points**:` puts it outside.
+    // One pass in a fixed order strips whichever came first and then stalls on
+    // the other, leaving a label that matches nothing — and a heading that
+    // matches nothing silently pours its section into the previous one.
+    let mut label = line.trim_start_matches('#').trim().to_string();
+    loop {
+        let stripped = label
+            .trim()
+            .trim_start_matches("**")
+            .trim_end_matches("**")
+            .trim_end_matches(':')
+            .trim();
+        if stripped.len() == label.len() {
+            break;
+        }
+        label = stripped.to_string();
+    }
+    let label = label.to_lowercase();
 
     // A bare word only opens a section when it is the whole line. Without that,
     // a summary whose first sentence starts "Resumo da reunião…" would be eaten
@@ -370,6 +381,26 @@ We discussed the roadmap.
             assert!(p.contains("## Key points"));
             assert!(p.contains("## Action items"));
             assert!(p.contains("Keep the three headings exactly as written, in English"));
+        }
+    }
+
+    /// Bold and a colon nest in either order, and both orders occur.
+    #[test]
+    fn a_heading_survives_its_decoration() {
+        for heading in [
+            "**Pontos-chave:**",
+            "**Pontos-chave**:",
+            "## **Key points**",
+            "Key points:",
+        ] {
+            let raw = format!(
+                "## Resumo
+x
+{heading}
+- um ponto"
+            );
+            let i = MeetingInsights::from_model_text(&raw);
+            assert_eq!(i.key_points, vec!["um ponto"], "failed on {heading}");
         }
     }
 
