@@ -29,7 +29,14 @@ jobs:
           # does not carry yet. Apple builds stay on the CPU.
           - platform: macos-latest
             args: --target aarch64-apple-darwin
-          - platform: ubuntu-latest
+          # 22.04, not `latest`. `ubuntu-latest` is 24.04 and its AppImage
+          # bundling fails inside linuxdeploy in under a second, saying only
+          # "failed to run linuxdeploy" — deb and rpm bundle fine right before
+          # it. Tauri's own guidance is to build AppImages on 22.04, and the
+          # older image pays a second dividend for a desktop app: the binary
+          # links against an older glibc, so it runs on more distributions than
+          # one built on 24.04 would.
+          - platform: ubuntu-22.04
             args: --target x86_64-unknown-linux-gnu --features gpu-vulkan
     runs-on: ${{ matrix.platform }}
     steps:
@@ -42,7 +49,7 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux deps
-        if: matrix.platform == 'ubuntu-latest'
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev libpipewire-0.3-dev libclang-dev cmake pkg-config
@@ -55,7 +62,7 @@ jobs:
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
       - name: Vulkan SDK (Linux)
-        if: matrix.platform == 'ubuntu-latest'
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
           wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
           sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
@@ -103,10 +110,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # linuxdeploy is itself an AppImage, and an AppImage mounts itself
-          # through FUSE. `ubuntu-latest` is 24.04 now and carries no libfuse2,
-          # so it died within a second of starting with nothing but "failed to
-          # run linuxdeploy". This makes it unpack instead of mount, which needs
-          # no package and no root.
+          # through FUSE. This makes it unpack instead of mount, which needs no
+          # package and no root. It was not enough on its own — see the runner
+          # pinned below — but it is still what lets the tool run at all once
+          # the rest of the toolchain is in place.
           APPIMAGE_EXTRACT_AND_RUN: 1
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
