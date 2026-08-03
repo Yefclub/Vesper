@@ -97,6 +97,32 @@ pub fn resolve_backend(preference: &str, support: BackendSupport) -> ComputeBack
     }
 }
 
+/// What llama can reach, which is not what whisper can reach.
+///
+/// Vulkan is struck out. Offloading these weights to it crashes the process:
+/// llama.cpp reports `token_embd.weight (q5_0) cannot be used with preferred
+/// buffer type Vulkan_Host, using CPU instead` and then dies with an access
+/// violation while loading tensors. Reproduced on an RTX 4070 with the
+/// catalog's default model, with and without the CUDA backend also registered,
+/// so it is neither this machine's driver alone nor an interaction between the
+/// two backends.
+///
+/// That leaves CUDA — which does work, and is where llama's GPU advantage was
+/// always going to come from — or the processor. A summary that takes longer
+/// is a worse product; a summary that takes the window down with it is not a
+/// product at all.
+///
+/// Whisper is unaffected and keeps Vulkan: transcription runs on it on the same
+/// machine and the same driver.
+pub fn resolve_llm_backend(preference: &str, support: BackendSupport) -> ComputeBackend {
+    let no_vulkan = BackendSupport {
+        vulkan_built: false,
+        vulkan_present: false,
+        ..support
+    };
+    resolve_backend(preference, no_vulkan)
+}
+
 /// What whisper can reach, which is not what llama can reach.
 ///
 /// `whisper-rs-sys` links CUDA as a load-time import and offers no dynamic
@@ -224,6 +250,21 @@ mod tests {
         assert_eq!(resolve_backend("auto", driver_only), ComputeBackend::Cpu);
         assert_eq!(resolve_backend("cuda", driver_only), ComputeBackend::Cpu);
         assert_eq!(resolve_backend("vulkan", driver_only), ComputeBackend::Cpu);
+    }
+
+    /// llama never gets Vulkan: offloading to it crashes the process on the
+    /// catalog's default model. CUDA works, so an NVIDIA machine still gets a
+    /// GPU; everything else falls to the processor.
+    #[test]
+    fn llama_uses_cuda_or_the_cpu_and_never_vulkan() {
+        assert_eq!(resolve_llm_backend("auto", nvidia()), ComputeBackend::Cuda);
+        assert_eq!(
+            resolve_llm_backend("vulkan", nvidia()),
+            ComputeBackend::Cuda
+        );
+        assert_eq!(resolve_llm_backend("auto", amd()), ComputeBackend::Cpu);
+        assert_eq!(resolve_llm_backend("vulkan", amd()), ComputeBackend::Cpu);
+        assert_eq!(resolve_llm_backend("cpu", nvidia()), ComputeBackend::Cpu);
     }
 
     /// Whisper never gets CUDA, because a whisper built with it will not start

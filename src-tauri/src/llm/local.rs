@@ -2,7 +2,7 @@
 //! When GGUF weights exist, runs real generation. Without weights, returns a clear error
 //! for summarize/chat cloud-less paths (callers may fall back intentionally).
 
-use crate::domain::backend::{built_backends, resolve_backend, BackendSupport, ComputeBackend};
+use crate::domain::backend::{built_backends, resolve_llm_backend, BackendSupport, ComputeBackend};
 use crate::domain::chat::{offline_answer, ChatMessage};
 use crate::domain::i18n::Locale;
 use crate::domain::summary::{extractive_summary, MeetingInsights, SummaryTemplate};
@@ -473,7 +473,7 @@ pub fn run_llama(
     }
 
     let backend = backend()?;
-    let chosen = resolve_backend(backend_preference, probe_support());
+    let chosen = resolve_llm_backend(backend_preference, probe_support());
     // The backend belongs in the key: the same weights resident on the GPU and
     // resident on the CPU are two different objects, so changing the setting
     // has to reload rather than keep serving the old one.
@@ -565,6 +565,59 @@ pub fn run_llama(
             .map_err(|e| format!("llama decode: {e}"))?;
     }
     Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
+#[cfg(test)]
+mod gpu_bench {
+    use super::*;
+
+    /// Generate from the local model on each backend in turn, and print what
+    /// each one cost.
+    ///
+    /// Ignored: it needs downloaded weights, and CUDA needs the downloaded
+    /// pack, neither of which CI has. Run it by hand with
+    /// `cargo test --release --features gpu-vulkan -- --ignored --nocapture gpu_bench`.
+    ///
+    /// The prompt is long on purpose. CUDA's advantage over Vulkan is in
+    /// prompt processing, and a two-word prompt measures the part that is the
+    /// same on both.
+    #[test]
+    #[ignore]
+    fn generates_on_every_backend() {
+        let model = dirs::data_dir()
+            .unwrap()
+            .join("Vesper")
+            .join("models")
+            .join("qwen2.5-0.5b")
+            .join("model.gguf");
+        assert!(model.is_file(), "qwen2.5-0.5b is not downloaded");
+
+        println!("devices: {:#?}", gpu_devices());
+        println!("support: {:?}", probe_support());
+
+        let transcript = "Me: we need to decide the release scope today. \
+             Others: the installer is the blocker, everything else is done. \
+             Me: what is left on it. Others: signing and the update feed. \
+             Me: then let us cut the version once those two land."
+            .repeat(12);
+        let prompt = format!(
+            "Summarise the following meeting in three bullet points.\n\n{transcript}\n\nSummary:"
+        );
+
+        let only =
+            std::env::var("VESPER_BENCH_BACKENDS").unwrap_or_else(|_| "cpu,vulkan,cuda".into());
+        for backend in only.split(',') {
+            let started = std::time::Instant::now();
+            match run_llama(&model, &prompt, 64, backend) {
+                Ok(text) => println!(
+                    "{backend:>7}: {:>8.2?}  {:?}",
+                    started.elapsed(),
+                    text.chars().take(80).collect::<String>()
+                ),
+                Err(e) => println!("{backend:>7}: failed — {e}"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
