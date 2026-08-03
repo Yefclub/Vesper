@@ -135,10 +135,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # linuxdeploy is itself an AppImage, and an AppImage mounts itself
           # through FUSE. This makes it unpack instead of mount, which needs no
-          # package and no root. It was not enough on its own — see the runner
-          # pinned below — but it is still what lets the tool run at all once
-          # the rest of the toolchain is in place.
+          # package and no root.
           APPIMAGE_EXTRACT_AND_RUN: 1
+          # Where our own shared libraries are. `dynamic-link` is mandatory —
+          # two vendored copies of ggml collide at link time otherwise — so the
+          # binary depends on libllama.so.0, libwhisper.so and the ggml
+          # backends, and those live in a resource directory rather than on any
+          # system path. linuxdeploy walks the ELF's dependencies and refuses to
+          # continue when one cannot be resolved:
+          #
+          #   ERROR: Could not find dependency: libllama.so.0
+          #   ERROR: Failed to deploy dependencies for existing files
+          #
+          # Naming the directory here lets it find them and copy them into the
+          # AppDir, which is where they have to end up anyway.
+          LD_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/gpu-backends
         with:
           tagName: dev-channel
           releaseName: "Vesper Dev (${{ github.ref_name }})"
