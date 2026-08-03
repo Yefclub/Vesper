@@ -29,10 +29,14 @@ export function RecordTransport({ status, busy, onStop, onPauseResume }: Props) 
   const pauseLabel = paused ? t("record.resume") : t("record.pause");
 
   return (
+    // The badge, the clock and the meter are readouts, not controls, and this
+    // sits in the titlebar: anything here that answers a press is a piece of
+    // window the user cannot drag from. They are transparent, the buttons
+    // below opt back in.
     <div
       data-testid="recording-badge"
       role="status"
-      className="flex items-center gap-3"
+      className="pointer-events-none flex items-center gap-3 [&_button]:pointer-events-auto"
     >
       {/* Live and paused are two states, not one word swapped: a filled dot
           pulsing in danger against a hollow, static one in muted. Before this

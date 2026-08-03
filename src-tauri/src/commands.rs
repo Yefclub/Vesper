@@ -392,9 +392,18 @@ pub fn translate_key(locale: String, key: String) -> String {
     t(Locale::from_code(&locale), &key)
 }
 
+/// Async and off the runtime, because probing costs seconds.
+///
+/// A non-async `#[tauri::command]` runs on the main thread, and this one asks
+/// `nvidia-smi` for a name, opens ggml's backend libraries and enumerates every
+/// Vulkan device on the machine. On a laptop with two GPUs that is long enough
+/// to freeze the window while Settings is opening — which is exactly when it is
+/// called.
 #[tauri::command]
-pub fn get_capabilities() -> CapabilityReport {
-    detect_capabilities()
+pub async fn get_capabilities() -> Result<CapabilityReport, String> {
+    tokio::task::spawn_blocking(detect_capabilities)
+        .await
+        .map_err(|e| format!("capability probe failed: {e}"))
 }
 
 #[tauri::command]

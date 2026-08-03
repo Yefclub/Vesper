@@ -35,9 +35,11 @@ Offline fallbacks keep summarize/chat usable without downloaded weights.
 
 The `compute_backend` setting (`auto` · `cuda` · `vulkan` · `cpu`) is resolved
 in `domain::backend` against two separate facts: what the binary was compiled
-with, and what ggml reports the machine has. An explicit choice that cannot be
-honoured falls to the CPU rather than to the other GPU — a silent substitution
-is indistinguishable from the setting working.
+with, and what ggml reports the machine has. Only `cpu` pins the processor: a
+GPU that was asked for and cannot be reached falls through to the best one that
+can, because the setting names a way to the card rather than an end in itself.
+The log line and the settings panel both say what it resolved to, so the
+substitution is not silent.
 
 The two engines do not reach the GPU the same way:
 

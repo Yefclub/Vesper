@@ -8,6 +8,7 @@ import {
   type UIEvent,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -49,6 +50,26 @@ import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
 
 type Tab = "transcript" | "summary";
+
+/** Move the window, restoring it first if it is maximised.
+ *
+ *  Tauri's own drag region calls `startDragging` and stops there, which a
+ *  maximised window ignores — so the titlebar felt dead in the state the app
+ *  starts in. Windows restores the window and hands it to the cursor, and that
+ *  is the behaviour to match rather than invent around. */
+async function dragWindow(stillPressed: () => boolean) {
+  const win = getCurrentWindow();
+  // Each step is a round trip to the backend, and the button can come up
+  // during any of them. Without these checks a flick — four pixels and
+  // release — unmaximised the window and then handed it to the OS move loop
+  // with nothing held down, so it followed the cursor until the next click.
+  if (await win.isMaximized()) {
+    if (!stillPressed()) return;
+    await win.unmaximize();
+  }
+  if (!stillPressed()) return;
+  await win.startDragging();
+}
 
 export default function App() {
   const [bootLocale, setBootLocale] = useState("en");
@@ -127,6 +148,9 @@ function AppShell({
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [updateNote, setUpdateNote] = useState<string | null>(null);
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  /// Whether the bytes are already on disk, which is what turns the offer from
+  /// "install" — a download the user waits through — into "restart".
+  const [updateReady, setUpdateReady] = useState(false);
   const [gate, setGate] = useState<StartGate>({ allowed: false });
   /// What the backend says about the global accelerator. `null` until it
   /// answers, and permanently `null` on a build whose backend does not report
@@ -162,6 +186,11 @@ function AppShell({
   /// component owns the meetings, the transcript and the recorder status — a
   /// state write here would re-render the whole shell per frame.
   const pinnedRef = useRef(true);
+  /// Where the titlebar was pressed, until the pointer moves far enough for it
+  /// to be a drag rather than a click.
+  const pressRef = useRef<{ x: number; y: number; started: boolean } | null>(
+    null,
+  );
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -348,11 +377,24 @@ function AppShell({
         setError(String(e));
       }
       try {
-        // Only ever offered, never applied on its own: installing and relaunching
-        // without asking can throw away a recording in progress, and silently
-        // swapping the binary of a privacy tool is not ours to decide.
+        // Offered, never applied on its own: installing relaunches the app, and
+        // relaunching can throw away a recording in progress. Deciding that for
+        // someone is not ours to do.
+        //
+        // The bytes, though, are fetched now. Downloading on the click meant
+        // the user decided to update and then waited on a progress bar that
+        // does not exist; doing it here makes the button instant. Failure is
+        // silent on purpose — the update is still offered, and the click falls
+        // back to downloading then.
         const update = await check();
-        if (update) setPendingUpdate(update);
+        if (!update) return;
+        setPendingUpdate(update);
+        try {
+          await update.download();
+          setUpdateReady(true);
+        } catch {
+          /* offered anyway; the click will fetch it */
+        }
       } catch {
         /* no release endpoint yet */
       }
@@ -754,10 +796,20 @@ function AppShell({
           around the card below is the separation, and a hairline 8px from the
           card's own border is two hard divides in a row.
 
-          `data-tauri-drag-region` goes on this element and on no child: Tauri's
-          handler tests `event.target`, so a click on a button inside is not a
-          drag, and its built-in double-click-to-maximise is the Windows
-          behaviour to inherit rather than reimplement.
+          Dragging is handled here rather than by `data-tauri-drag-region`,
+          for two reasons the attribute cannot cover.
+
+          Its handler tests `event.target`, and the three grid columns below
+          are block elements that cover the whole bar — so every press landed
+          on a column, never on the header, and the only draggable pixels in
+          the window were the 16px gaps between them. The columns that hold
+          nothing to click are `pointer-events-none` now, which is what lets a
+          press reach this element at all.
+
+          And the window opens maximised. Tauri's drag region calls
+          `startDragging` and nothing else, which a maximised window ignores;
+          Windows restores the window and takes it with the cursor. That takes
+          an `unmaximize` first, which means owning the press.
 
           48px, not 56: the row has to fit an `h-8` control with 8px of
           clearance, and 48 plus the card's 8px gutter is the same chrome
@@ -773,13 +825,53 @@ function AppShell({
           lands in the centre column, and it must not be able to grow the
           header. */}
       <header
-        data-tauri-drag-region
+        onPointerDown={(e) => {
+          // Left button only, and only on the bar itself — a press that landed
+          // on a control is that control's.
+          if (e.button !== 0 || e.target !== e.currentTarget) return;
+          // Captured, so the release comes back here even if the pointer has
+          // left the bar by then. Without it a press that ended over the
+          // content below left the press recorded, and the next ordinary move
+          // across the titlebar started a drag with no button held.
+          e.currentTarget.setPointerCapture(e.pointerId);
+          pressRef.current = { x: e.clientX, y: e.clientY, started: false };
+        }}
+        onPointerMove={(e) => {
+          const press = pressRef.current;
+          if (!press || press.started) return;
+          // Four pixels, because a press that never moves is a click. Starting
+          // the drag on pointerdown enters the OS move loop immediately, and
+          // that loop swallows the second click of a double-click — which is
+          // how maximise-by-double-click went missing.
+          if (Math.abs(e.clientX - press.x) < 4 && Math.abs(e.clientY - press.y) < 4) {
+            return;
+          }
+          press.started = true;
+          // The identity of the press is the cancellation token: a release
+          // clears the ref, and the two awaits below check it before acting.
+          void dragWindow(() => pressRef.current === press);
+        }}
+        onPointerUp={() => {
+          pressRef.current = null;
+        }}
+        onPointerCancel={() => {
+          pressRef.current = null;
+        }}
+        onLostPointerCapture={() => {
+          pressRef.current = null;
+        }}
+        onDoubleClick={(e) => {
+          if (e.target !== e.currentTarget) return;
+          void getCurrentWindow().toggleMaximize();
+        }}
         // `pr-0` now: the window controls run to the window's own edge, the way
         // every other application on the platform draws them. The 46px targets
         // supply their own inset.
         className="grid h-12 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 pl-4 pr-0"
       >
-        <div className="flex items-center gap-2">
+        {/* `pointer-events-none`: nothing here is clickable, and while it ate
+            presses the left half of the titlebar could not be dragged. */}
+        <div className="pointer-events-none flex items-center gap-2">
           {/* No radius: the asset is the mark alone now, not a rounded tile, so
               a corner clip would shave the artwork instead of a background. */}
           <img src={logo} alt="" className="h-8 w-8" />
@@ -798,7 +890,16 @@ function AppShell({
             Both in the same `AnimatePresence` with the same `fadeRise`, so Stop
             hands the slot from one to the other in a single beat rather than
             emptying the header for the several seconds the work takes. */}
-        <div className="flex items-center justify-center">
+        {/* Transparent to presses, and its contents are not: the column is
+            empty except while recording, and an empty column swallowing the
+            middle of the titlebar is the same bug as the identity block. */}
+        {/* No `[&>*]` opt-in here, unlike the actions column. Its children are
+            readouts wrapped around a couple of buttons, and making the wrapper
+            answer presses only moves the problem up a level: the wrapper
+            becomes the target and the header still refuses it. The transport
+            re-enables its own buttons instead, which works through an
+            ancestor that does not answer. */}
+        <div className="pointer-events-none flex items-center justify-center">
           <AnimatePresence>
             {status?.recording ? (
               <motion.div key="transport" {...fadeRise}>
@@ -817,7 +918,11 @@ function AppShell({
           </AnimatePresence>
         </div>
 
-        <div className="flex items-center justify-end gap-1">
+        {/* Same treatment as the other two columns, and for the same reason:
+            this one is a full grid track with three controls at its end, so
+            every pixel to their left was a place the window could not be
+            dragged from. The buttons opt back in. */}
+        <div className="pointer-events-none flex items-center justify-end gap-1 [&>*]:pointer-events-auto">
           {/* The theme is one click from anywhere, not four (gear → Appearance →
               pick → close). It applies immediately and writes straight through
               to settings, because there is no draft out here to be dirty and
@@ -927,12 +1032,22 @@ function AppShell({
                 <Button
                   size="xs"
                   data-testid="update-install"
+                  // Installing relaunches the app, and a relaunch during a
+                  // recording loses the audio that has not been written yet.
+                  // The offer stays on screen; it just cannot be taken until
+                  // the recording is over.
+                  disabled={status?.recording}
+                  title={status?.recording ? t("update.busy") : undefined}
                   onClick={async () => {
                     const update = pendingUpdate;
                     setPendingUpdate(null);
                     try {
                       setUpdateNote(t("update.installing"));
-                      await update.downloadAndInstall();
+                      // `install` alone when the bytes are already here, which
+                      // is the usual case — `downloadAndInstall` would fetch
+                      // them a second time.
+                      if (updateReady) await update.install();
+                      else await update.downloadAndInstall();
                       setUpdateNote(t("update.relaunching"));
                       await relaunch();
                     } catch (e) {
@@ -944,7 +1059,7 @@ function AppShell({
                     }
                   }}
                 >
-                  {t("update.install")}
+                  {updateReady ? t("update.restart") : t("update.install")}
                 </Button>
                 <Button variant="link" onClick={() => setPendingUpdate(null)}>
                   {t("update.later")}

@@ -200,6 +200,58 @@ pub fn resample_to_16k_f32(pcm: &[i16], sample_rate: u32) -> Vec<f32> {
 }
 
 #[cfg(test)]
+mod gpu_bench {
+    use super::*;
+
+    /// Transcribe a real recording on the GPU and on the CPU, and print both.
+    ///
+    /// Ignored: it needs downloaded weights and a recording, neither of which
+    /// CI has. Run it by hand with
+    /// `cargo test --release --features gpu-vulkan -- --ignored --nocapture gpu_bench`.
+    #[test]
+    #[ignore]
+    fn transcribes_on_both_backends() {
+        let data = dirs::data_dir().unwrap().join("Vesper");
+        let model = data.join("models").join("whisper-tiny").join("model.bin");
+        assert!(model.is_file(), "whisper-tiny is not downloaded");
+
+        let wav = std::fs::read_dir(data.join("recordings"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "wav"))
+            .max_by_key(|p| p.metadata().map(|m| m.len()).unwrap_or(0))
+            .expect("no recording to transcribe");
+        println!("audio: {}", wav.display());
+
+        let reader = hound::WavReader::open(&wav).unwrap();
+        let spec = reader.spec();
+        let all: Vec<i16> = reader.into_samples::<i16>().flatten().collect();
+        // Left channel only: the file is stereo with the microphone on the left.
+        let pcm: Vec<i16> = if spec.channels == 2 {
+            all.iter().step_by(2).copied().collect()
+        } else {
+            all
+        };
+        println!("{} samples at {} Hz", pcm.len(), spec.sample_rate);
+
+        for backend in ["cpu", "auto"] {
+            let started = std::time::Instant::now();
+            let out = run_whisper(&model, &pcm, spec.sample_rate, "pt", backend);
+            let took = started.elapsed();
+            match out {
+                Ok(text) => println!(
+                    "{backend}: {:?} -> {:?}",
+                    took,
+                    text.chars().take(120).collect::<String>()
+                ),
+                Err(e) => panic!("{backend} failed: {e}"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;

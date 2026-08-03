@@ -163,10 +163,19 @@ pub fn probe_host() -> CapabilityProbe {
     // with no CUDA backend: it is what names the card in the report, and the
     // name is what tells the user their GPU was seen and not used.
     let mut cuda_device_name = None;
-    if let Ok(out) = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=name", "--format=csv,noheader"])
-        .output()
+    let mut smi = std::process::Command::new("nvidia-smi");
+    smi.args(["--query-gpu=name", "--format=csv,noheader"]);
+    // `nvidia-smi` is a console program, and a GUI process spawning one on
+    // Windows gets a console window for as long as it runs. It flashed on
+    // screen every time the settings panel opened, which is every time this
+    // probe runs.
+    #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        smi.creation_flags(CREATE_NO_WINDOW);
+    }
+    if let Ok(out) = smi.output() {
         if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !text.is_empty() && !text.to_ascii_lowercase().contains("not found") {

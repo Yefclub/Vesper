@@ -1,0 +1,99 @@
+name: cuda-pack
+
+# The CUDA backend, built and packaged on its own.
+#
+# It is not in the installer and not in CI's normal path, because cuBLAS alone
+# is 385 MB compressed — twenty times the size of the whole application — and
+# almost nobody needs it: a machine with an NVIDIA card already runs every local
+# model on Vulkan. This produces the pack the app offers to download when it
+# finds an NVIDIA GPU, the same way it offers to download model weights.
+#
+# Fired by pushing a `cuda-pack-*` tag, not by hand from the Actions tab.
+# `workflow_dispatch` only works for a workflow already on the default branch,
+# and the default branch of a public repository should show what has been
+# released rather than what is being built. A push event runs the workflow as
+# it exists at the pushed ref, so a tag on a working branch is enough.
+#
+# The pattern cannot collide with the release workflow, which watches `v*`.
+on:
+  push:
+    tags: ["cuda-pack-*"]
+
+jobs:
+  pack:
+    # Not `windows-latest`. That image carries Visual Studio 2026, and CUDA
+    # 12.6's nvcc refuses it outright — "unsupported Microsoft Visual Studio
+    # version" — because a CUDA release only accepts host compilers that
+    # existed when it shipped. The pack is a standalone artifact loaded through
+    # ggml's C backend interface, so the compiler that builds it does not have
+    # to match the one that builds the app.
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Ninja, the same generator the Vulkan jobs use, and for a reason that
+      # turns out not to be about Vulkan at all: with the Visual Studio
+      # generator this configure step dies on "Policy CMP0194 is not set: MSVC
+      # is not an assembler for language ASM", which CMake 4 retired. Pinning
+      # CMake back to 3.31 only traded that for a generator it does not know —
+      # the runner's toolchain is newer than 3.31 has heard of.
+      - name: Ninja generator
+        shell: pwsh
+        run: |
+          choco install ninja -y --no-progress
+          Add-Content -Path $env:GITHUB_ENV -Value 'CMAKE_GENERATOR=Ninja'
+      - name: LLVM binutils on PATH
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
+      # The same MAX_PATH failure the Vulkan job hits: MSBuild's tracker ignores
+      # `LongPathsEnabled`, and the runner's own workspace path is already long
+      # enough to break the nested shader project.
+      - name: Short target directory
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value 'CARGO_TARGET_DIR=C:\vt'
+      - name: CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: "12.6.0"
+          method: network
+          # nvcc and the headers are what the build needs; the rest of the
+          # toolkit is several more gigabytes of things it does not.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+      - name: Build the CUDA backend
+        working-directory: src-tauri
+        shell: bash
+        run: cargo build --release --features gpu-cuda
+
+      # `ggml-cuda.dll` is ours; the three beside it are NVIDIA's redistributables,
+      # which `ggml-cuda.dll` imports at load time and which no ordinary machine
+      # has installed. Without them the library loads and immediately fails, which
+      # looks exactly like the GPU not being there.
+      - name: Collect the pack
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP\vesper-cuda"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $backends = Get-ChildItem 'C:\vt\release\build' -Directory -Filter 'llama-cpp-sys-2-*' |
+            ForEach-Object { Join-Path $_.FullName 'out\backends' } |
+            Where-Object { Test-Path (Join-Path $_ 'ggml-cuda.dll') } |
+            Select-Object -First 1
+          if (-not $backends) { throw 'ggml-cuda.dll was not built' }
+          Copy-Item (Join-Path $backends 'ggml-cuda.dll') $out
+          foreach ($name in 'cudart64_*.dll','cublas64_*.dll','cublasLt64_*.dll') {
+            $found = Get-ChildItem "$env:CUDA_PATH\bin" -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $found) { throw "missing redistributable: $name" }
+            Copy-Item $found.FullName $out
+          }
+          Get-ChildItem $out | ForEach-Object { "{0,-24} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+          Compress-Archive -Path "$out\*" -DestinationPath "$env:RUNNER_TEMP\vesper-cuda.zip" -CompressionLevel Optimal
+          $zip = Get-Item "$env:RUNNER_TEMP\vesper-cuda.zip"
+          "zip: {0:N1} MB" -f ($zip.Length / 1MB)
+          # The catalog pins both, and the app refuses an artifact that does not
+          # match — the same rule the model downloads already follow.
+          "sha256: $((Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower())"
+          "bytes: $($zip.Length)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vesper-cuda
+          path: ${{ runner.temp }}\vesper-cuda.zip
+          compression-level: 0
