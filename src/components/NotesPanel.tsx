@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Plus, X } from "lucide-react";
-import { api, type ContextNote } from "../lib/api";
 import { useI18n } from "../lib/i18n";
+import { useContextNotes } from "../lib/notes";
 import { FOCUS } from "./Button";
 
 /** `mm:ss`, and an hour field once there is one. Same shape as the Rust side,
@@ -26,50 +26,16 @@ function stamp(ms: number): string {
 /// They are not the AI's, and summarising never touches them.
 export function NotesPanel({ meetingId }: { meetingId: string }) {
   const { t } = useI18n();
-  const [notes, setNotes] = useState<ContextNote[]>([]);
+  const { notes, error, add, remove } = useContextNotes(meetingId);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let live = true;
-    api
-      .listContextNotes(meetingId)
-      .then((rows) => live && setNotes(rows))
-      .catch(() => live && setNotes([]));
-    return () => {
-      live = false;
-    };
-  }, [meetingId]);
-
-  const add = useCallback(async () => {
-    const body = text.trim();
-    if (!body || busy) return;
+  const submit = async () => {
+    if (busy) return;
     setBusy(true);
-    setError(null);
-    try {
-      const saved = await api.addContextNote(meetingId, body);
-      setNotes((prev) => [...prev, saved]);
-      setText("");
-    } catch (e) {
-      // Kept in the box. What was typed is the part that cost something.
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [text, busy, meetingId]);
-
-  const remove = useCallback(
-    async (id: number) => {
-      setNotes((prev) => prev.filter((n) => n.id !== id));
-      try {
-        await api.deleteContextNote(meetingId, id);
-      } catch {
-        api.listContextNotes(meetingId).then(setNotes).catch(() => null);
-      }
-    },
-    [meetingId],
-  );
+    if (await add(text)) setText("");
+    setBusy(false);
+  };
 
   return (
     <div className="mx-auto max-w-pane">
@@ -84,7 +50,7 @@ export function NotesPanel({ meetingId }: { meetingId: string }) {
         className="mb-4 flex items-start gap-2"
         onSubmit={(e) => {
           e.preventDefault();
-          void add();
+          void submit();
         }}
       >
         <textarea
@@ -98,7 +64,7 @@ export function NotesPanel({ meetingId }: { meetingId: string }) {
             // behave the same way. A note is a line, not a document.
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              void add();
+              void submit();
             }
           }}
           placeholder={t("notes.placeholder")}

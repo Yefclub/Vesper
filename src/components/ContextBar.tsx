@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Plus, X } from "lucide-react";
-import { api, type ContextNote } from "../lib/api";
 import { useI18n } from "../lib/i18n";
+import { useContextNotes } from "../lib/notes";
 import { duration, ease } from "../lib/motion";
 import { FOCUS } from "./Button";
 
@@ -27,51 +27,16 @@ function stamp(ms: number): string {
 /// the chat, where they are told to win over the transcript.
 export function ContextBar({ meetingId }: { meetingId: string }) {
   const { t } = useI18n();
-  const [notes, setNotes] = useState<ContextNote[]>([]);
+  const { notes, add, remove } = useContextNotes(meetingId);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    let live = true;
-    api
-      .listContextNotes(meetingId)
-      .then((rows) => live && setNotes(rows))
-      .catch(() => live && setNotes([]));
-    return () => {
-      live = false;
-    };
-  }, [meetingId]);
-
-  const add = useCallback(async () => {
-    const body = text.trim();
-    if (!body || busy) return;
+  const submit = async () => {
+    if (busy) return;
     setBusy(true);
-    try {
-      // The stored note, not the typed one: the backend stamps it with where
-      // the recording actually is, and the list has to show that rather than a
-      // position the window guessed at.
-      const saved = await api.addContextNote(meetingId, body);
-      setNotes((prev) => [...prev, saved]);
-      setText("");
-    } catch {
-      // Kept in the box. Losing what was just typed, mid-meeting, to say
-      // nothing useful about why, is the worst of both.
-    } finally {
-      setBusy(false);
-    }
-  }, [text, busy, meetingId]);
-
-  const remove = useCallback(
-    async (id: number) => {
-      setNotes((prev) => prev.filter((n) => n.id !== id));
-      try {
-        await api.deleteContextNote(meetingId, id);
-      } catch {
-        api.listContextNotes(meetingId).then(setNotes).catch(() => null);
-      }
-    },
-    [meetingId],
-  );
+    if (await add(text)) setText("");
+    setBusy(false);
+  };
 
   return (
     <div className="pointer-events-auto mb-2 w-full max-w-md rounded-lg border border-border bg-surface-2 p-2">
@@ -113,7 +78,7 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
         className="flex items-center gap-1"
         onSubmit={(e) => {
           e.preventDefault();
-          void add();
+          void submit();
         }}
       >
         <input
