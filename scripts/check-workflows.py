@@ -48,7 +48,15 @@ def check_parses(paths: list[pathlib.Path]) -> None:
     try:
         import yaml
     except ImportError:
-        print("  (pyyaml missing — skipping the parse check)", file=sys.stderr)
+        # Not a skip. AGENTS.md requires this script before a workflow change,
+        # and a required check that quietly does not run is worse than one that
+        # is missing: the exit code says the workflows were checked.
+        fail(
+            "the duplicate-key check cannot run",
+            "pyyaml is not installed",
+            "pip install pyyaml -- without it this rule passes everything, "
+            "including the duplicated env key that shipped once already",
+        )
         return
 
     class NoDuplicates(yaml.SafeLoader):

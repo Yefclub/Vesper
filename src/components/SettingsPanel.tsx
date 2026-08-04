@@ -643,7 +643,14 @@ export function SettingsPanel({
                   worked. This says so, and says it in the present tense: the
                   pack is registered as soon as it is unpacked, so by the time
                   this renders the card is already the one doing the work. */}
-              {cudaPack?.ready && caps?.cuda_device_name && (
+              {/* `cuda_available`, not `cuda_device_name`: the second only
+                  says nvidia-smi saw a card, which stays true when the pack
+                  failed to register against an unsupported driver. And not
+                  while the user has pinned the CPU — the sentence claims where
+                  the work happens, and there it would be wrong. */}
+              {cudaPack?.ready &&
+                caps?.cuda_available &&
+                draft.compute_backend !== "cpu" && (
                 <p className="rounded-md border border-border bg-surface-2 p-3 text-xs leading-relaxed text-fg-muted">
                   {t("cuda.installed").replace(
                     "{gpu}",

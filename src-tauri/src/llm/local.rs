@@ -24,6 +24,22 @@ use std::sync::OnceLock;
 /// an error in the C library, so it lives here rather than beside each load.
 static BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
 
+/// Serialises every touch of ggml's backend registry.
+///
+/// The registry is a C++ vector with no locking of its own. That was harmless
+/// while it was only ever written once at startup, and stopped being harmless
+/// when a downloaded pack could register a backend mid-session: a download
+/// finishing while a summary enumerates devices is a native data race, and the
+/// symptom would be a process that dies with no Rust frame to blame.
+///
+/// Held across registration, enumeration and model load — the three places that
+/// read or write it — and never across generation, which does not touch it.
+static REGISTRY: Mutex<()> = Mutex::new(());
+
+fn registry() -> parking_lot::MutexGuard<'static, ()> {
+    REGISTRY.lock()
+}
+
 fn backend() -> Result<&'static LlamaBackend, String> {
     BACKEND
         .get_or_init(|| {
@@ -161,6 +177,14 @@ fn holds_a_backend(dir: &Path) -> bool {
 /// MB to reach was unreachable. The probe is a walk over the registered
 /// devices; that is cheaper than being wrong until the next launch.
 pub(crate) fn probe_support() -> BackendSupport {
+    // Before the lock: initialising the backend registers backends itself, and
+    // the `OnceLock` already serialises that against every other caller.
+    let ready = backend().is_ok();
+    let _guard = registry();
+    probe_support_locked(ready)
+}
+
+fn probe_support_locked(backend_ready: bool) -> BackendSupport {
     {
         let (cuda_built, vulkan_built) = built_backends();
         let mut support = BackendSupport {
@@ -171,7 +195,7 @@ pub(crate) fn probe_support() -> BackendSupport {
         // No initialised backend means no device list to read. Claiming a GPU
         // from the build flags alone would be a guess, and the cost of guessing
         // wrong is a load that fails instead of a transcript that is slow.
-        if backend().is_err() {
+        if !backend_ready {
             return support;
         }
         for device in llama_cpp_2::list_llama_ggml_backend_devices() {
@@ -207,12 +231,15 @@ pub(crate) fn probe_support() -> BackendSupport {
 /// worth making to the caller.
 pub(crate) fn register_downloaded_backend() -> bool {
     // The process-wide init has to have happened, or there is no registry to add
-    // to and no device list to read back.
+    // to and no device list to read back. Outside the lock, because that init
+    // registers backends of its own and the `OnceLock` is what orders it.
     if backend().is_err() {
         return false;
     }
+    let _guard = registry();
     load_downloaded_backend();
-    probe_support().cuda_present
+    // The locked form: taking the guard again here would deadlock.
+    probe_support_locked(true).cuda_present
 }
 
 /// One GPU as ggml sees it.
@@ -241,6 +268,7 @@ pub(crate) fn gpu_devices() -> Vec<GpuDevice> {
     if backend().is_err() {
         return Vec::new();
     }
+    let _guard = registry();
     let mut seen = std::collections::HashSet::new();
     llama_cpp_2::list_llama_ggml_backend_devices()
         .into_iter()
@@ -323,6 +351,9 @@ fn load_model(
     model_path: &Path,
     chosen: ComputeBackend,
 ) -> Result<(LlamaModel, ComputeBackend), String> {
+    // Loading picks devices out of the same registry a download can be writing
+    // to. Held over the load only — generation afterwards never reads it.
+    let _guard = registry();
     let cpu = || {
         LlamaModel::load_from_file(backend, model_path, &LlamaModelParams::default())
             .map_err(|e| format!("llama load failed: {e}"))
