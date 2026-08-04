@@ -199,9 +199,13 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
             current.openrouter_llm_model.clone(),
         )
     };
-    // Which weights are wanted, before the save decides otherwise. Compared
-    // after the write so a change frees what the old answer was holding.
-    let previously_wanted = wanted_local_weights(&state.settings.lock());
+    // Which weights are wanted, before the save decides otherwise, and whether
+    // summaries were being produced without being asked for. Both compared after
+    // the write so a change frees what the old answer was holding.
+    let (previously_wanted, previously_automatic) = {
+        let current = state.settings.lock();
+        (wanted_local_weights(&current), current.auto_summarize)
+    };
     settings.validate_models().map_err(|e| e.to_string())?;
     // The theme is not this command's to write. `set_theme` owns it, and the
     // drawer's draft carries whatever the theme was when it opened — so a Save
@@ -255,7 +259,13 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
     // models behind for a cloud provider. Both used to keep the old weights in
     // memory until something happened to reload, which on the machine that most
     // needed the room was exactly the wrong answer.
-    if wanted_local_weights(&settings) != previously_wanted {
+    // Turning auto-summarize off is the second trigger, and it is the one the
+    // settings screen makes a promise about: it says no language model is
+    // loaded, and a model already resident from an earlier summary would make
+    // that a lie. Asking for a summary by hand afterwards loads it again, which
+    // is the point — it happens when the user asks.
+    let stopped_summarising = previously_automatic && !settings.auto_summarize;
+    if stopped_summarising || wanted_local_weights(&settings) != previously_wanted {
         crate::llm::local::release_model();
     }
     Ok(settings)
