@@ -1,7 +1,6 @@
 use crate::domain::chat::ChatMessage;
 use crate::domain::cost::usd_to_nano;
-use crate::domain::i18n::Locale;
-use crate::domain::summary::{build_summary_prompt, MeetingInsights, SummaryTemplate};
+use crate::domain::summary::{build_summary_prompt_with, MeetingInsights};
 use serde_json::json;
 
 #[derive(Debug, Clone)]
@@ -77,12 +76,16 @@ impl OpenRouterLlm {
         &self,
         api_key: &str,
         model: &str,
-        transcript: &str,
-        template: SummaryTemplate,
-        locale: Locale,
+        subject: crate::domain::context::SummarySubject<'_>,
         reasoning: bool,
     ) -> Result<(MeetingInsights, Option<i64>), String> {
-        let prompt = build_summary_prompt(template, transcript, locale);
+        let crate::domain::context::SummarySubject {
+            transcript,
+            template,
+            locale,
+            notes,
+        } = subject;
+        let prompt = build_summary_prompt_with(template, transcript, locale, notes);
         let messages = vec![
             ChatMessage {
                 role: "system".into(),

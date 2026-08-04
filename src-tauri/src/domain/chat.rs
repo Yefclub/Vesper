@@ -14,6 +14,7 @@ pub fn build_chat_context(
     history: &[ChatMessage],
     user_question: &str,
     max_transcript_chars: usize,
+    notes: &[crate::domain::context::ContextNote],
 ) -> Vec<ChatMessage> {
     let excerpt = if transcript.chars().count() > max_transcript_chars {
         let truncated: String = transcript.chars().take(max_transcript_chars).collect();
@@ -31,6 +32,9 @@ pub fn build_chat_context(
         }
     }
     system.push_str(&format!("Transcript:\n{excerpt}"));
+    // After the transcript, like the summary prompt: read the meeting first,
+    // then the corrections, and they read as corrections.
+    system.push_str(&crate::domain::context::notes_block(notes));
 
     let mut msgs = vec![ChatMessage {
         role: "system".into(),
@@ -86,6 +90,7 @@ mod tests {
             &[],
             "What did we decide?",
             10_000,
+            &[],
         );
         assert_eq!(msgs[0].role, "system");
         assert!(msgs[0].content.contains("Weekly sync"));
@@ -97,7 +102,7 @@ mod tests {
     #[test]
     fn truncates_long_transcript() {
         let long = "x".repeat(500);
-        let msgs = build_chat_context("T", &long, None, &[], "q", 50);
+        let msgs = build_chat_context("T", &long, None, &[], "q", 50, &[]);
         assert!(msgs[0].content.contains("truncated"));
     }
 

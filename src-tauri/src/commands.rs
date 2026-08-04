@@ -746,6 +746,7 @@ pub async fn stop_recording(
                 &settings,
                 &meeting.transcript_text,
                 SummaryTemplate::General,
+                &state.db.list_context_notes(&id).unwrap_or_default(),
             )
             .await
         {
@@ -954,7 +955,14 @@ pub async fn summarize_meeting(
     let _flight = state.refine_flight.lock().await;
     let (insights, cost) = state
         .llm
-        .summarize(&settings, &m.transcript_text, tpl)
+        .summarize(
+            &settings,
+            &m.transcript_text,
+            tpl,
+            // Empty on failure rather than refusing to summarise: a note that
+            // cannot be read is a worse summary, not a lost meeting.
+            &state.db.list_context_notes(&id).unwrap_or_default(),
+        )
         .await?;
     // The summary being replaced has to become a version before it is gone.
     // Without this, re-summarising a meeting nobody had opened the history of
@@ -991,15 +999,22 @@ pub async fn chat_meeting(
         .get_meeting(&id)?
         .ok_or_else(|| "meeting not found".to_string())?;
     let history = state.db.list_chat(&id)?;
+    // The same corrections the summary gets. A question about a client's name
+    // should be answered from what the participant typed, not from what the
+    // transcriber heard.
+    let notes = state.db.list_context_notes(&id).unwrap_or_default();
     let settings = state.settings.lock().clone();
     state.db.add_chat(&id, "user", &question)?;
     let (answer, cost) = state
         .llm
         .chat(
             &settings,
-            &meeting.title,
-            &meeting.transcript_text,
-            meeting.summary.as_deref(),
+            crate::domain::context::ChatSubject {
+                meeting_title: &meeting.title,
+                transcript: &meeting.transcript_text,
+                summary: meeting.summary.as_deref(),
+                notes: &notes,
+            },
             &history,
             &question,
         )
@@ -1012,6 +1027,51 @@ pub async fn chat_meeting(
         role: "assistant".into(),
         content: answer,
     })
+}
+
+/// A note the participant typed while the meeting was happening.
+///
+/// `at_ms` comes from the recorder rather than from the caller: the WebView
+/// knows what it painted, not where the recording actually is, and a note that
+/// claims a position the audio never had is worse than one with no position.
+#[tauri::command]
+pub fn add_context_note(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    text: String,
+) -> Result<crate::domain::context::ContextNote, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("a note needs something in it".into());
+    }
+    // Bounded because it reaches a prompt. Not a security boundary — the person
+    // typing owns the machine — but a megabyte pasted here would push the
+    // transcript out of the model's window and quietly ruin the summary.
+    if text.chars().count() > 2_000 {
+        return Err("that note is too long".into());
+    }
+    let at_ms = state
+        .recorder
+        .is_recording()
+        .then(|| state.recorder.elapsed_ms() as i64);
+    state.db.add_context_note(&id, text, at_ms)
+}
+
+#[tauri::command]
+pub fn list_context_notes(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<crate::domain::context::ContextNote>, String> {
+    state.db.list_context_notes(&id)
+}
+
+#[tauri::command]
+pub fn delete_context_note(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    note_id: i64,
+) -> Result<(), String> {
+    state.db.delete_context_note(&id, note_id)
 }
 
 #[tauri::command]

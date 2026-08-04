@@ -43,6 +43,7 @@ import { SummaryHistory } from "./components/SummaryHistory";
 import { ChatPanel } from "./components/ChatPanel";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
+import { ContextBar } from "./components/ContextBar";
 import { RecordTransport } from "./components/RecordTransport";
 import { Sidebar } from "./components/Sidebar";
 import { WindowControls } from "./components/WindowControls";
@@ -1574,6 +1575,12 @@ function AppShell({
                 true the instant recording begins — which is precisely when the
                 control has to still be there. It changes into pause and stop
                 instead of vanishing. */}
+            {/* Above the dock and only while recording: it is context about
+                what is being said now, and after Stop the meeting's own screen
+                is where notes belong. */}
+            {status?.recording && selectedId && (
+              <ContextBar meetingId={selectedId} />
+            )}
             <AnimatePresence>
               {(!selected || status?.recording) && (
                 <RecordDock

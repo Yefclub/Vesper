@@ -23,6 +23,7 @@ impl LlmService {
         settings: &AppSettings,
         transcript: &str,
         template: SummaryTemplate,
+        notes: &[crate::domain::context::ContextNote],
     ) -> Result<(MeetingInsights, Option<i64>), String> {
         match settings.llm_provider {
             // A local model costs nothing, which is not the same as costing
@@ -35,8 +36,19 @@ impl LlmService {
                 let model = settings.local_llm_model.clone();
                 let backend = settings.compute_backend.clone();
                 let reasoning = settings.reasoning_enabled;
+                let notes = notes.to_vec();
                 tokio::task::spawn_blocking(move || {
-                    local.summarize(&transcript, template, locale, &model, &backend, reasoning)
+                    local.summarize(
+                        crate::domain::context::SummarySubject {
+                            transcript: &transcript,
+                            template,
+                            locale,
+                            notes: &notes,
+                        },
+                        &model,
+                        &backend,
+                        reasoning,
+                    )
                 })
                 .await
                 .map_err(|e| e.to_string())?
@@ -50,9 +62,12 @@ impl LlmService {
                     .summarize(
                         settings.openrouter_api_key.as_deref().unwrap_or(""),
                         &settings.openrouter_llm_model,
-                        transcript,
-                        template,
-                        settings.locale(),
+                        crate::domain::context::SummarySubject {
+                            transcript,
+                            template,
+                            locale: settings.locale(),
+                            notes,
+                        },
                         settings.reasoning_enabled,
                     )
                     .await
@@ -153,24 +168,23 @@ impl LlmService {
     pub async fn chat(
         &self,
         settings: &AppSettings,
-        meeting_title: &str,
-        transcript: &str,
-        summary: Option<&str>,
+        subject: crate::domain::context::ChatSubject<'_>,
         history: &[ChatMessage],
         question: &str,
     ) -> Result<(String, Option<i64>), String> {
         let messages = build_chat_context(
-            meeting_title,
-            transcript,
-            summary,
+            subject.meeting_title,
+            subject.transcript,
+            subject.summary,
             history,
             question,
             12_000,
+            subject.notes,
         );
         match settings.llm_provider {
             LlmProvider::Local => {
                 let local = self.local.clone();
-                let transcript = transcript.to_string();
+                let transcript = subject.transcript.to_string();
                 let model = settings.local_llm_model.clone();
                 let backend = settings.compute_backend.clone();
                 tokio::task::spawn_blocking(move || {

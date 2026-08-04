@@ -4,8 +4,7 @@
 
 use crate::domain::backend::{built_backends, resolve_llm_backend, BackendSupport, ComputeBackend};
 use crate::domain::chat::{offline_answer, ChatMessage};
-use crate::domain::i18n::Locale;
-use crate::domain::summary::{extractive_summary, MeetingInsights, SummaryTemplate};
+use crate::domain::summary::{extractive_summary, MeetingInsights};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -438,16 +437,21 @@ impl LocalLlm {
 
     pub fn summarize(
         &self,
-        transcript: &str,
-        template: SummaryTemplate,
-        locale: Locale,
+        subject: crate::domain::context::SummarySubject<'_>,
         model_id: &str,
         backend_preference: &str,
         reasoning: bool,
     ) -> Result<MeetingInsights, String> {
+        let crate::domain::context::SummarySubject {
+            transcript,
+            template,
+            locale,
+            notes,
+        } = subject;
         if self.is_ready(model_id) {
-            let mut prompt =
-                crate::domain::summary::build_summary_prompt(template, transcript, locale);
+            let mut prompt = crate::domain::summary::build_summary_prompt_with(
+                template, transcript, locale, notes,
+            );
             if !reasoning {
                 // Qwen3's own switch, and inert for a model that has no such
                 // mode. Thinking is not free: it is spent out of the same token
@@ -728,6 +732,8 @@ mod cache {
 #[cfg(test)]
 mod gpu_bench {
     use super::*;
+    use crate::domain::i18n::Locale;
+    use crate::domain::summary::SummaryTemplate;
 
     /// Generate from the local model on each backend in turn, and print what
     /// each one cost.
@@ -799,6 +805,8 @@ mod gpu_bench {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::i18n::Locale;
+    use crate::domain::summary::SummaryTemplate;
     use tempfile::tempdir;
 
     #[test]
@@ -806,9 +814,12 @@ mod tests {
         let llm = LocalLlm::with_models_dir(tempdir().unwrap().path().to_path_buf());
         let i = llm
             .summarize(
-                "Me: we need to ship auth. Others: agreed. TODO write tests.",
-                SummaryTemplate::General,
-                Locale::En,
+                crate::domain::context::SummarySubject {
+                    transcript: "Me: we need to ship auth. Others: agreed. TODO write tests.",
+                    template: SummaryTemplate::General,
+                    locale: Locale::En,
+                    notes: &[],
+                },
                 "llama32-1b",
                 "cpu",
                 false,
@@ -823,9 +834,12 @@ mod tests {
         llm.soft_fallback = false;
         let err = llm
             .summarize(
-                "hi",
-                SummaryTemplate::General,
-                Locale::En,
+                crate::domain::context::SummarySubject {
+                    transcript: "hi",
+                    template: SummaryTemplate::General,
+                    locale: Locale::En,
+                    notes: &[],
+                },
                 "llama32-1b",
                 "cpu",
                 false,
