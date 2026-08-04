@@ -38,6 +38,26 @@ export function EditableLine({
     if (!editing) setDraft(text);
   }, [text, editing]);
 
+  // Blur does not fire when a focused node is removed, and this one can be
+  // removed out from under the typist: selecting another meeting, or a
+  // `meeting://ready` arriving, replaces the pane mid-correction. Without this
+  // the words typed would be gone with no sign they had ever been there.
+  //
+  // Refs rather than the values themselves, so the cleanup runs on unmount
+  // alone instead of on every keystroke.
+  const pending = useRef<{ draft: string; text: string } | null>(null);
+  pending.current = editing ? { draft, text } : null;
+  const save = useRef(onSave);
+  save.current = onSave;
+  useEffect(() => {
+    return () => {
+      const open = pending.current;
+      if (!open) return;
+      const next = open.draft.trim();
+      if (next && next !== open.text) void save.current(next);
+    };
+  }, []);
+
   useEffect(() => {
     const el = box.current;
     if (!editing || !el) return;

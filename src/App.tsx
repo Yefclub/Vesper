@@ -1371,11 +1371,16 @@ function AppShell({
                                   <EditableLine
                                     text={s.text}
                                     mine={me}
-                                    // Never while it is being written. The
-                                    // transcription ticker writes the whole set
-                                    // back, so an edit made mid-recording would
-                                    // be overwritten by the next chunk.
-                                    editable={!status?.recording}
+                                    // Only the meeting being recorded is off
+                                    // limits — the transcription ticker writes
+                                    // its whole set back, so an edit there
+                                    // would be overwritten by the next chunk.
+                                    // Every other meeting is a finished
+                                    // recording and correctable.
+                                    editable={
+                                      !status?.recording ||
+                                      status.meeting_id !== selected.id
+                                    }
                                     label={t("transcript.edit")}
                                     onSave={async (next) => {
                                       const updated =

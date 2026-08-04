@@ -386,7 +386,7 @@ pub fn get_transcript(
 /// an edit made in that window would be silently overwritten by the next chunk,
 /// which is worse than not offering it.
 #[tauri::command]
-pub fn edit_transcript_segment(
+pub async fn edit_transcript_segment(
     state: State<'_, Arc<AppState>>,
     id: String,
     segment_id: String,
@@ -409,6 +409,14 @@ pub fn edit_transcript_segment(
     if recording_this {
         return Err("the transcript can be corrected once the recording has stopped".into());
     }
+    // The same lock the final pass and a retranscription take. Without it the
+    // recorder stopping is not enough: `stop_recording` is still awaiting the
+    // last chunk with a transcript it cloned before this edit existed, and it
+    // writes that clone back — so a correction made in the window between the
+    // capture closing and that write would vanish with no sign it had been
+    // made. Held across the whole read-modify-write below, because the value
+    // being protected is the transcript, not any one statement about it.
+    let _flight = state.stt_flight.lock().await;
 
     let mut meeting = state
         .db
@@ -422,13 +430,13 @@ pub fn edit_transcript_segment(
         return Err("that line is no longer in this transcript".into());
     }
 
-    state.db.save_transcript(&id, &transcript)?;
-    // The summary reads this field, not the segments, so the correction has to
-    // land here or it would be visible on screen and invisible to the model.
-    // `upsert_meeting` reindexes the search body as part of the same write.
+    // The summary reads `transcript_text`, not the segments, so the correction
+    // has to land there or it would be visible on screen and invisible to the
+    // model. All three writes — segments, that field, and the search index —
+    // commit together or not at all.
     meeting.transcript_text = transcript.plain_text();
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
-    state.db.upsert_meeting(&meeting)?;
+    state.db.save_corrected_transcript(&meeting, &transcript)?;
     // The cache is what `get_transcript` answers from while it is warm.
     state.live.lock().insert(id.clone(), transcript.clone());
     Ok(transcript)
