@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "preflight": "python scripts/check-workflows.py"
   },
   "dependencies": {
     "@animateicons/react": "^0.4.1",
