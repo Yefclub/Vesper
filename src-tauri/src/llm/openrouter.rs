@@ -68,7 +68,20 @@ impl OpenRouterLlm {
             body["reasoning"] = json!({ "effort": "medium" });
         }
 
-        let client = reqwest::Client::new();
+        // A redirect out of an approved address undoes the approval. reqwest
+        // follows 307 and 308 with the POST body intact, so a server on
+        // localhost could answer "moved" and have the transcript delivered to
+        // whatever host it named — an address that never passed the check.
+        // OpenRouter keeps the default policy; it is a public API that has
+        // always been allowed to move its own endpoints.
+        let client = if self.branded {
+            reqwest::Client::new()
+        } else {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| e.to_string())?
+        };
         let mut req = client
             .post(format!("{}/chat/completions", self.base_url))
             .json(&body);

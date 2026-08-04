@@ -50,53 +50,33 @@ pub fn validate_endpoint_url(raw: &str) -> Result<String, EndpointError> {
     if raw.is_empty() {
         return Err(EndpointError::Empty);
     }
-    let rest = raw
-        .strip_prefix("http://")
-        .or_else(|| raw.strip_prefix("https://"))
-        .ok_or(EndpointError::NotHttp)?;
-
-    // Everything before the first `/`, `?` or `#` is the authority. Credentials
-    // in it are ignored on purpose: `http://evil.com@127.0.0.1` reads as
-    // loopback to a parser and as `evil.com` to a careless human, so the host is
-    // taken as whatever follows the last `@`.
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .rsplit('@')
-        .next()
-        .unwrap_or("");
-    if authority.is_empty() {
-        return Err(EndpointError::NoHost);
+    // Parsed with the crate reqwest parses with, not by hand. A hand-written
+    // split disagreed with it on `http://evil.com\@127.0.0.1`: WHATWG ends the
+    // authority at the backslash and sends the request to `evil.com`, while
+    // splitting on `/?#` and taking what follows the last `@` sees loopback.
+    // Two parsers disagreeing is how an allowlist gets walked past, so there is
+    // one parser and it is the client's.
+    let url = url::Url::parse(raw).map_err(|_| EndpointError::NotHttp)?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(EndpointError::NotHttp);
     }
-
-    let host = strip_port(authority);
-    if host.is_empty() {
-        return Err(EndpointError::NoHost);
-    }
-    if host.eq_ignore_ascii_case("localhost") {
-        return Ok(raw.trim_end_matches('/').to_string());
-    }
-
-    // A name would have to be resolved to be judged, and what it resolves to can
-    // change between the check and the request. An address cannot.
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    let ip: IpAddr = host.parse().map_err(|_| EndpointError::NotAnAddress)?;
-    if is_local(ip) {
-        Ok(raw.trim_end_matches('/').to_string())
-    } else {
-        Err(EndpointError::PublicAddress)
-    }
-}
-
-/// The host without its port, leaving a bracketed IPv6 literal intact.
-fn strip_port(authority: &str) -> &str {
-    if let Some(end) = authority.rfind(']') {
-        return &authority[..=end];
-    }
-    match authority.rsplit_once(':') {
-        Some((host, _)) => host,
-        None => authority,
+    match url.host() {
+        None => Err(EndpointError::NoHost),
+        // `Domain` covers every name, including `localhost` — which is the one
+        // name allowed, because it is the one every local server prints.
+        Some(url::Host::Domain(name)) if name.eq_ignore_ascii_case("localhost") => {
+            Ok(raw.trim_end_matches('/').to_string())
+        }
+        // Any other name would have to be resolved to be judged, and what it
+        // resolves to can change between the check and the request.
+        Some(url::Host::Domain(_)) => Err(EndpointError::NotAnAddress),
+        Some(url::Host::Ipv4(v4)) if is_local(IpAddr::V4(v4)) => {
+            Ok(raw.trim_end_matches('/').to_string())
+        }
+        Some(url::Host::Ipv6(v6)) if is_local(IpAddr::V6(v6)) => {
+            Ok(raw.trim_end_matches('/').to_string())
+        }
+        Some(_) => Err(EndpointError::PublicAddress),
     }
 }
 
@@ -186,6 +166,18 @@ mod tests {
         assert_eq!(
             validate_endpoint_url("http://127.0.0.1@8.8.8.8/v1"),
             Err(EndpointError::PublicAddress)
+        );
+    }
+
+    /// The bypass that a hand-written authority split allowed. WHATWG ends the
+    /// authority at the backslash, so the host is `evil.com`; splitting on
+    /// `/?#` and taking what follows the last `@` saw loopback and let it
+    /// through. One parser, and it is the one the client uses.
+    #[test]
+    fn a_backslash_cannot_smuggle_a_public_host() {
+        assert_eq!(
+            validate_endpoint_url(r"http://evil.com\@127.0.0.1:11434/v1"),
+            Err(EndpointError::NotAnAddress)
         );
     }
 
