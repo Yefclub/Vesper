@@ -1451,7 +1451,11 @@ function AppShell({
                                   a deadline, and survives the meeting being
                                   summarised again — which the free-text card
                                   could not, because every run replaced it. */}
-                              <ActionItems key={selected.id} meetingId={selected.id} />
+                              <ActionItems
+                                key={selected.id}
+                                meetingId={selected.id}
+                                reloadKey={versionsKey}
+                              />
                               <SummaryHistory
                                 meetingId={selected.id}
                                 reloadKey={versionsKey}

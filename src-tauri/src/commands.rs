@@ -385,7 +385,40 @@ pub fn get_transcript(
 /// even if the task list could not be updated, and the alternative — failing
 /// the whole summarise — would throw away the expensive half over the cheap one.
 fn apply_action_items(state: &AppState, id: &str, insights: &MeetingInsights) {
-    let existing = state.db.list_action_items(id).unwrap_or_default();
+    let mut existing = state.db.list_action_items(id).unwrap_or_default();
+    if existing.is_empty() {
+        // A meeting summarised before this existed has its items only in the
+        // text column. Read them back rather than letting the first merge write
+        // over a list somebody may have been relying on.
+        //
+        // Marked as touched, because there is no way to know which of them a
+        // person had already corrected — the old column kept no such record.
+        // The cost is that a stale suggestion survives until it is deleted by
+        // hand; the alternative is deleting work nobody agreed to lose.
+        existing = state
+            .db
+            .get_meeting(id)
+            .ok()
+            .flatten()
+            .and_then(|m| m.action_items)
+            .map(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .map(|l| l.trim_start_matches('-').trim())
+                    .filter(|l| !l.is_empty())
+                    .map(|l| crate::domain::actions::ActionItem {
+                        id: 0,
+                        text: l.to_string(),
+                        owner: None,
+                        due: None,
+                        status: crate::domain::actions::ActionStatus::Open,
+                        source: crate::domain::actions::ActionSource::Ai,
+                        edited: true,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
     let merged = crate::domain::actions::merge_suggestions(&existing, &insights.action_items);
     if let Err(e) = state.db.save_action_items(id, &merged) {
         tracing::warn!("action items could not be updated: {e}");
@@ -412,11 +445,16 @@ pub fn list_action_items(
 /// exist; a caller cannot promote the model's suggestion into something it
 /// never said.
 #[tauri::command]
-pub fn save_action_items(
+pub async fn save_action_items(
     state: State<'_, Arc<AppState>>,
     id: String,
     items: Vec<crate::domain::actions::ActionItem>,
 ) -> Result<Vec<crate::domain::actions::ActionItem>, String> {
+    // The same flight every whole-set replacement takes. A summary merging in
+    // the background reads this list and writes it back; an edit landing
+    // between those two would be deleted by the write, and the user would watch
+    // their own change disappear seconds after making it.
+    let _flight = state.refine_flight.lock().await;
     if state.db.get_meeting(&id)?.is_none() {
         return Err("meeting not found".into());
     }
@@ -845,7 +883,6 @@ pub async fn stop_recording(
         {
             Ok((insights, cost)) => {
                 state.db.save_insights(&id, &insights)?;
-                apply_action_items(&state, &id, &insights);
                 // A meeting's first insights are version 1. Recording it here
                 // rather than lazily means the history is complete from the
                 // start instead of from whenever someone first opened it.
@@ -858,6 +895,11 @@ pub async fn stop_recording(
                 name_meeting(&state, &settings, &mut meeting, &insights.summary).await;
                 meeting.updated_at = chrono::Utc::now().to_rfc3339();
                 state.db.upsert_meeting(&meeting)?;
+                // Last, because the upsert above writes the model's list into
+                // `action_items` and this writes the merged one over it. The
+                // other order left every protected item out of exports and
+                // search while the rows still held them.
+                apply_action_items(&state, &id, &insights);
             }
             // The transcript is already saved and the meeting is already Ready,
             // so propagating this told the user their recording was lost when
@@ -1068,7 +1110,6 @@ pub async fn summarize_meeting(
             .push_summary_version(&id, "summarize", &current_insights(&m))?;
     }
     state.db.save_insights(&id, &insights)?;
-    apply_action_items(&state, &id, &insights);
     state.db.push_summary_version(&id, "summarize", &insights)?;
     state.db.add_meeting_cost(&id, cost)?;
     m.status = MeetingStatus::Ready;
@@ -1080,6 +1121,9 @@ pub async fn summarize_meeting(
     name_meeting(&state, &settings, &mut m, &insights.summary).await;
     m.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&m)?;
+    // After the upsert, which wrote the model's list; this writes the merged
+    // one over it.
+    apply_action_items(&state, &id, &insights);
     Ok(insights)
 }
 
@@ -1638,12 +1682,12 @@ pub async fn refine_summary_section(
         .db
         .push_summary_version(&id, section.as_str(), &insights)?;
     state.db.save_insights(&id, &insights)?;
-    apply_action_items(&state, &id, &insights);
     meeting.summary = Some(insights.summary.clone());
     meeting.key_points = Some(insights.key_points_text());
     meeting.action_items = Some(insights.action_items_text());
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
+    apply_action_items(&state, &id, &insights);
     Ok(version)
 }
 
@@ -1678,12 +1722,15 @@ pub async fn restore_summary_version(
     };
     let created = state.db.push_summary_version(&id, "restore", &insights)?;
     state.db.save_insights(&id, &insights)?;
-    apply_action_items(&state, &id, &insights);
     meeting.summary = Some(insights.summary.clone());
     meeting.key_points = Some(insights.key_points_text());
     meeting.action_items = Some(insights.action_items_text());
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
+    // A restore is the user asking for an older set, and it still goes through
+    // the merge: what they have edited or ticked since is theirs, and a restore
+    // of the prose is not a request to undo their task list.
+    apply_action_items(&state, &id, &insights);
     Ok(created)
 }
 

@@ -14,7 +14,17 @@ import { FOCUS } from "./Button";
 ///
 /// The whole list is saved on every change rather than a field at a time. There
 /// is one write, one failure to report, and no way for an edit to half-apply.
-export function ActionItems({ meetingId }: { meetingId: string }) {
+export function ActionItems({
+  meetingId,
+  reloadKey,
+}: {
+  meetingId: string;
+  /// Bumped whenever a summary rewrote this list. Without it the panel showed
+  /// the rows from before the run, and the next ordinary edit wrote that stale
+  /// list back over the merge — losing exactly the suggestions the summary had
+  /// just produced.
+  reloadKey: number;
+}) {
   const { t } = useI18n();
   const [items, setItems] = useState<ActionItem[]>([]);
   const [draft, setDraft] = useState("");
@@ -29,7 +39,7 @@ export function ActionItems({ meetingId }: { meetingId: string }) {
     return () => {
       live = false;
     };
-  }, [meetingId]);
+  }, [meetingId, reloadKey]);
 
   const persist = useCallback(
     async (next: ActionItem[]) => {
