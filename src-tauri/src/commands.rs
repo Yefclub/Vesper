@@ -374,6 +374,74 @@ pub fn get_transcript(
     state.db.load_transcript(&id)
 }
 
+/// Correct one line of a transcript.
+///
+/// Local speech-to-text mishears names, acronyms and one-word answers, and a
+/// person fixing the line is the fastest route to notes worth trusting. The
+/// timing is not editable: it came from the audio, and the summary, the search
+/// index and any future alignment all read it.
+///
+/// Refused while that meeting is recording. The live transcript is being
+/// appended to by the transcription ticker, which writes the whole set back —
+/// an edit made in that window would be silently overwritten by the next chunk,
+/// which is worse than not offering it.
+#[tauri::command]
+pub async fn edit_transcript_segment(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    segment_id: String,
+    text: String,
+) -> Result<LiveTranscript, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("a line cannot be emptied — delete is a different action".into());
+    }
+    // Bounded for the same reason a note is: this reaches the summary prompt.
+    if text.chars().count() > 4_000 {
+        return Err("that line is too long".into());
+    }
+    let recording_this = state
+        .active_meeting
+        .lock()
+        .as_deref()
+        .is_some_and(|active| active == id)
+        && state.recorder.is_recording();
+    if recording_this {
+        return Err("the transcript can be corrected once the recording has stopped".into());
+    }
+    // The same lock the final pass and a retranscription take. Without it the
+    // recorder stopping is not enough: `stop_recording` is still awaiting the
+    // last chunk with a transcript it cloned before this edit existed, and it
+    // writes that clone back — so a correction made in the window between the
+    // capture closing and that write would vanish with no sign it had been
+    // made. Held across the whole read-modify-write below, because the value
+    // being protected is the transcript, not any one statement about it.
+    let _flight = state.stt_flight.lock().await;
+
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    let mut transcript = match state.live.lock().get(&id) {
+        Some(t) => t.clone(),
+        None => state.db.load_transcript(&id)?,
+    };
+    if !transcript.edit_segment(&segment_id, text) {
+        return Err("that line is no longer in this transcript".into());
+    }
+
+    // The summary reads `transcript_text`, not the segments, so the correction
+    // has to land there or it would be visible on screen and invisible to the
+    // model. All three writes — segments, that field, and the search index —
+    // commit together or not at all.
+    meeting.transcript_text = transcript.plain_text();
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    state.db.save_corrected_transcript(&meeting, &transcript)?;
+    // The cache is what `get_transcript` answers from while it is warm.
+    state.live.lock().insert(id.clone(), transcript.clone());
+    Ok(transcript)
+}
+
 #[tauri::command]
 pub fn delete_meeting(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.db.delete_meeting(&id)

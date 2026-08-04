@@ -301,6 +301,11 @@ export const api = {
     invoke<ContextNote[]>("list_context_notes", { id }),
   deleteContextNote: (id: string, noteId: number) =>
     invoke<void>("delete_context_note", { id, noteId }),
+  /// Correct one line. Returns the whole transcript, because the summary text
+  /// and the search index are rewritten from it and the caller has to show what
+  /// was actually stored rather than what it hoped for.
+  editTranscriptSegment: (id: string, segmentId: string, text: string) =>
+    invoke<LiveTranscript>("edit_transcript_segment", { id, segmentId, text }),
   listModels: () => invoke<ModelInfo[]>("list_models_cmd"),
   // No URL parameter: the backend resolves it from its own catalog and verifies
   // the artifact's checksum before it reaches whisper.cpp / llama.cpp.
