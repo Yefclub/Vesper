@@ -2,6 +2,7 @@ use crate::audio::capture::{read_dual_wav, DualChannelRecorder};
 use crate::audio::decode::decode_audio_file;
 use crate::audio::devices::{list_audio_devices, AudioDevice};
 use crate::db::{Database, KeyHome};
+use crate::domain::actions::ActionItem;
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::chat::ChatMessage;
 use crate::domain::export::{export_meeting, safe_file_stem, ExportFormat};
@@ -372,6 +373,141 @@ pub fn get_transcript(
         return Ok(t.clone());
     }
     state.db.load_transcript(&id)
+}
+
+/// Fold a fresh set of suggestions into the meeting's action items.
+///
+/// The model may replace its own untouched suggestions and nothing else — the
+/// rule lives in `domain::actions::merge_suggestions` and is tested there. This
+/// is the plumbing: read what is stored, merge, write both the rows and the
+/// text column that export and search read.
+///
+/// Errors are swallowed on purpose. A summary that arrived is worth keeping
+/// even if the task list could not be updated, and the alternative — failing
+/// the whole summarise — would throw away the expensive half over the cheap one.
+fn apply_action_items(state: &AppState, id: &str, insights: &MeetingInsights) {
+    let mut existing = state.db.list_action_items(id).unwrap_or_default();
+    if existing.is_empty() {
+        // A meeting summarised before this existed has its items only in the
+        // text column. Read them back rather than letting the first merge write
+        // over a list somebody may have been relying on.
+        //
+        // Marked as touched, because there is no way to know which of them a
+        // person had already corrected — the old column kept no such record.
+        // The cost is that a stale suggestion survives until it is deleted by
+        // hand; the alternative is deleting work nobody agreed to lose.
+        existing = state
+            .db
+            .get_meeting(id)
+            .ok()
+            .flatten()
+            .and_then(|m| m.action_items)
+            .map(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .map(|l| l.trim_start_matches('-').trim())
+                    .filter(|l| !l.is_empty())
+                    .map(|l| crate::domain::actions::ActionItem {
+                        id: 0,
+                        text: l.to_string(),
+                        owner: None,
+                        due: None,
+                        status: crate::domain::actions::ActionStatus::Open,
+                        source: crate::domain::actions::ActionSource::Ai,
+                        edited: true,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    let merged = crate::domain::actions::merge_suggestions(&existing, &insights.action_items);
+    if let Err(e) = state.db.save_action_items(id, &merged) {
+        tracing::warn!("action items could not be updated: {e}");
+    }
+}
+
+#[tauri::command]
+pub fn list_action_items(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<crate::domain::actions::ActionItem>, String> {
+    state.db.list_action_items(&id)
+}
+
+/// One item at a time, never the whole list.
+///
+/// A client that sends the list sends its idea of every *other* item with it,
+/// and that idea is stale the moment anything else writes — a summary merging
+/// in the background, or the same panel a second earlier. Every way this could
+/// lose somebody's work went through exactly that, so the list is not something
+/// the client is allowed to state.
+fn validated(mut item: ActionItem) -> Result<ActionItem, String> {
+    item.text = item.text.trim().to_string();
+    if item.text.is_empty() {
+        return Err("a task needs something in it".into());
+    }
+    if item.text.chars().count() > 2_000 {
+        return Err("that task is too long".into());
+    }
+    let tidy = |v: &Option<String>| {
+        v.as_ref().and_then(|x| {
+            let x = x.trim();
+            (!x.is_empty()).then(|| x.to_string())
+        })
+    };
+    item.owner = tidy(&item.owner);
+    item.due = tidy(&item.due);
+    Ok(item)
+}
+
+#[tauri::command]
+pub async fn add_action_item(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    text: String,
+) -> Result<Vec<ActionItem>, String> {
+    let _flight = state.refine_flight.lock().await;
+    if state.db.get_meeting(&id)?.is_none() {
+        return Err("meeting not found".into());
+    }
+    let item = validated(ActionItem {
+        id: 0,
+        text,
+        owner: None,
+        due: None,
+        status: crate::domain::actions::ActionStatus::Open,
+        // A person wrote it, so no summary may take it away.
+        source: crate::domain::actions::ActionSource::User,
+        edited: true,
+    })?;
+    state.db.insert_action_item(&id, &item)?;
+    state.db.list_action_items(&id)
+}
+
+/// Change one item. The source is not taken from the caller — an existing row
+/// keeps whose it was, so nothing can promote the model's suggestion into
+/// something a person is supposed to have said.
+#[tauri::command]
+pub async fn update_action_item(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    item: ActionItem,
+) -> Result<Vec<ActionItem>, String> {
+    let _flight = state.refine_flight.lock().await;
+    let item = validated(item)?;
+    state.db.update_action_item(&id, &item)?;
+    state.db.list_action_items(&id)
+}
+
+#[tauri::command]
+pub async fn delete_action_item(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    item_id: i64,
+) -> Result<Vec<ActionItem>, String> {
+    let _flight = state.refine_flight.lock().await;
+    state.db.delete_action_item(&id, item_id)?;
+    state.db.list_action_items(&id)
 }
 
 /// Correct one line of a transcript.
@@ -853,6 +989,11 @@ pub async fn stop_recording(
                 name_meeting(&state, &settings, &mut meeting, &insights.summary).await;
                 meeting.updated_at = chrono::Utc::now().to_rfc3339();
                 state.db.upsert_meeting(&meeting)?;
+                // Last, because the upsert above writes the model's list into
+                // `action_items` and this writes the merged one over it. The
+                // other order left every protected item out of exports and
+                // search while the rows still held them.
+                apply_action_items(&state, &id, &insights);
             }
             // The transcript is already saved and the meeting is already Ready,
             // so propagating this told the user their recording was lost when
@@ -1074,6 +1215,9 @@ pub async fn summarize_meeting(
     name_meeting(&state, &settings, &mut m, &insights.summary).await;
     m.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&m)?;
+    // After the upsert, which wrote the model's list; this writes the merged
+    // one over it.
+    apply_action_items(&state, &id, &insights);
     Ok(insights)
 }
 
@@ -1637,6 +1781,7 @@ pub async fn refine_summary_section(
     meeting.action_items = Some(insights.action_items_text());
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
+    apply_action_items(&state, &id, &insights);
     Ok(version)
 }
 
@@ -1676,6 +1821,10 @@ pub async fn restore_summary_version(
     meeting.action_items = Some(insights.action_items_text());
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
+    // A restore is the user asking for an older set, and it still goes through
+    // the merge: what they have edited or ticked since is theirs, and a restore
+    // of the prose is not a request to undo their task list.
+    apply_action_items(&state, &id, &insights);
     Ok(created)
 }
 

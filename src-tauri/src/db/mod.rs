@@ -169,6 +169,27 @@ impl Database {
                 FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_context_meeting ON context_notes(meeting_id);
+            -- What the meeting decided somebody would do.
+            --
+            -- The `meetings.action_items` text column stays: it is what export
+            -- and the search index read, and it is rewritten from these rows.
+            -- Two representations of one truth is a cost, and the alternative
+            -- was rewriting both of those readers in the same change.
+            CREATE TABLE IF NOT EXISTS action_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                owner TEXT,
+                due TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                source TEXT NOT NULL DEFAULT 'ai',
+                -- Touched by a person. Never cleared: it is what stops the next
+                -- summary from replacing their words with the model's.
+                edited INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_actions_meeting ON action_items(meeting_id);
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -260,6 +281,224 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn list_action_items(
+        &self,
+        meeting_id: &str,
+    ) -> Result<Vec<crate::domain::actions::ActionItem>, String> {
+        use crate::domain::actions::{ActionItem, ActionSource, ActionStatus};
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, text, owner, due, status, source, edited FROM action_items
+                 WHERE meeting_id=?1 ORDER BY position, id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![meeting_id], |r| {
+                let status: String = r.get(4)?;
+                let source: String = r.get(5)?;
+                Ok(ActionItem {
+                    id: r.get(0)?,
+                    text: r.get(1)?,
+                    owner: r.get(2)?,
+                    due: r.get(3)?,
+                    status: if status == "done" {
+                        ActionStatus::Done
+                    } else {
+                        ActionStatus::Open
+                    },
+                    source: if source == "user" {
+                        ActionSource::User
+                    } else {
+                        ActionSource::Ai
+                    },
+                    edited: r.get::<_, i64>(6)? != 0,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Rewrite the text column that export and search read, from the rows.
+    ///
+    /// Called inside whatever transaction just changed a row, so the two views
+    /// of the list cannot be seen disagreeing.
+    fn project_action_text(tx: &rusqlite::Transaction<'_>, meeting_id: &str) -> Result<(), String> {
+        let mut stmt = tx
+            .prepare("SELECT text FROM action_items WHERE meeting_id=?1 ORDER BY position, id")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![meeting_id], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut lines = Vec::new();
+        for r in rows {
+            lines.push(format!("- {}", r.map_err(|e| e.to_string())?));
+        }
+        drop(stmt);
+        tx.execute(
+            "UPDATE meetings SET action_items=?2 WHERE id=?1",
+            params![
+                meeting_id,
+                lines.join(
+                    "
+"
+                )
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Add one item. Returns its row.
+    ///
+    /// One item rather than a list, because a client that sends the whole list
+    /// sends its idea of every *other* item too — and that idea is stale the
+    /// moment anything else writes. Every way that could lose somebody's work
+    /// went through exactly that.
+    pub fn insert_action_item(
+        &self,
+        meeting_id: &str,
+        item: &crate::domain::actions::ActionItem,
+    ) -> Result<i64, String> {
+        use crate::domain::actions::{ActionSource, ActionStatus};
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let next: i64 = tx
+            .query_row(
+                "SELECT coalesce(max(position), -1) + 1 FROM action_items WHERE meeting_id=?1",
+                params![meeting_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO action_items
+               (meeting_id, text, owner, due, status, source, edited, position)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                meeting_id,
+                item.text,
+                item.owner,
+                item.due,
+                match item.status {
+                    ActionStatus::Done => "done",
+                    ActionStatus::Open => "open",
+                },
+                match item.source {
+                    ActionSource::User => "user",
+                    ActionSource::Ai => "ai",
+                },
+                item.edited as i64,
+                next
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        let id = tx.last_insert_rowid();
+        Self::project_action_text(&tx, meeting_id)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    /// Change one item, by id and meeting. Marks it touched, which is what
+    /// stops the next summary from replacing it.
+    pub fn update_action_item(
+        &self,
+        meeting_id: &str,
+        item: &crate::domain::actions::ActionItem,
+    ) -> Result<(), String> {
+        use crate::domain::actions::ActionStatus;
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        // The count matters. A summary running alongside this can remove an
+        // untouched suggestion while its field is being edited, and an UPDATE
+        // that matches nothing is not a success — reporting one would hand back
+        // a list without the correction and no sign it had been dropped.
+        let changed = tx
+            .execute(
+                "UPDATE action_items SET text=?3, owner=?4, due=?5, status=?6, edited=1
+             WHERE id=?1 AND meeting_id=?2",
+                params![
+                    item.id,
+                    meeting_id,
+                    item.text,
+                    item.owner,
+                    item.due,
+                    match item.status {
+                        ActionStatus::Done => "done",
+                        ActionStatus::Open => "open",
+                    }
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err("that task is no longer in this meeting's list".into());
+        }
+        Self::project_action_text(&tx, meeting_id)?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn delete_action_item(&self, meeting_id: &str, item_id: i64) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM action_items WHERE id=?1 AND meeting_id=?2",
+            params![item_id, meeting_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Self::project_action_text(&tx, meeting_id)?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Replace a meeting's action items with this list, and rewrite the text
+    /// column that export and search read from it.
+    ///
+    /// Only the merge uses this — it genuinely owns the whole list, because it
+    /// has just computed it from what was stored.
+    ///
+    /// One transaction: the rows and the text are two views of one answer, and
+    /// a failure between them would leave the list showing one thing and every
+    /// export of it showing another.
+    pub fn save_action_items(
+        &self,
+        meeting_id: &str,
+        items: &[crate::domain::actions::ActionItem],
+    ) -> Result<(), String> {
+        use crate::domain::actions::{ActionSource, ActionStatus};
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM action_items WHERE meeting_id=?1",
+            params![meeting_id],
+        )
+        .map_err(|e| e.to_string())?;
+        for (position, item) in items.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO action_items
+                   (meeting_id, text, owner, due, status, source, edited, position)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    meeting_id,
+                    item.text,
+                    item.owner,
+                    item.due,
+                    match item.status {
+                        ActionStatus::Done => "done",
+                        ActionStatus::Open => "open",
+                    },
+                    match item.source {
+                        ActionSource::User => "user",
+                        ActionSource::Ai => "ai",
+                    },
+                    item.edited as i64,
+                    position as i64
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Self::project_action_text(&tx, meeting_id)?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     /// Write a corrected transcript, the text the summary reads, and the search

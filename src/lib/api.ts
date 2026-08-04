@@ -124,6 +124,18 @@ export interface ContextNote {
   created_at: string;
 }
 
+export interface ActionItem {
+  id: number;
+  text: string;
+  owner: string | null;
+  due: string | null;
+  status: "open" | "done";
+  /// Who put it there. The next summary may replace what the model said and
+  /// never what a person said.
+  source: "ai" | "user";
+  edited: boolean;
+}
+
 export interface MeetingInsights {
   summary: string;
   key_points: string[];
@@ -301,6 +313,17 @@ export const api = {
     invoke<ContextNote[]>("list_context_notes", { id }),
   deleteContextNote: (id: string, noteId: number) =>
     invoke<void>("delete_context_note", { id, noteId }),
+  listActionItems: (id: string) =>
+    invoke<ActionItem[]>("list_action_items", { id }),
+  /// One item at a time. Each returns the whole list as stored, because a
+  /// summary may have merged in between — but none of them *sends* a list, so
+  /// none can carry a stale idea of the items it did not touch.
+  addActionItem: (id: string, text: string) =>
+    invoke<ActionItem[]>("add_action_item", { id, text }),
+  updateActionItem: (id: string, item: ActionItem) =>
+    invoke<ActionItem[]>("update_action_item", { id, item }),
+  deleteActionItem: (id: string, itemId: number) =>
+    invoke<ActionItem[]>("delete_action_item", { id, itemId }),
   /// Correct one line. Returns the whole transcript, because the summary text
   /// and the search index are rewritten from it and the caller has to show what
   /// was actually stored rather than what it hoped for.
