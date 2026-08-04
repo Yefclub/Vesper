@@ -27,13 +27,33 @@ export function SummarizeButton({
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement | null>(null);
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  const menu = useRef<HTMLUListElement | null>(null);
+
+  // A summary starting closes the menu. Only the two triggers were disabled, so
+  // an open menu could still fire a second run — a second model call, and on a
+  // cloud provider a second charge.
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  // Opened from the keyboard, the caret kept focus and the menu was
+  // unreachable. Focus moves in on open and back to the caret on close, which
+  // is what makes Escape leave somewhere sensible rather than nowhere.
+  useEffect(() => {
+    if (open) menu.current?.querySelector("button")?.focus();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     const away = (e: PointerEvent) => {
       if (!box.current?.contains(e.target as Node)) setOpen(false);
     };
-    const escape = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    const escape = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      trigger.current?.focus();
+    };
     document.addEventListener("pointerdown", away);
     document.addEventListener("keydown", escape);
     return () => {
@@ -56,6 +76,7 @@ export function SummarizeButton({
         <Sparkles size={16} /> {t("action.summarize")}
       </Button>
       <button
+        ref={trigger}
         type="button"
         disabled={disabled}
         aria-label={t("summary.template")}
@@ -73,7 +94,21 @@ export function SummarizeButton({
 
       {open && (
         <ul
+          ref={menu}
           role="menu"
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+            e.preventDefault();
+            const buttons = Array.from(
+              menu.current?.querySelectorAll("button") ?? [],
+            );
+            const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
+            // Wrapping, because a menu of four with a dead end at each end is
+            // more annoying than one that goes round.
+            const step = e.key === "ArrowDown" ? 1 : -1;
+            const next = (at + step + buttons.length) % buttons.length;
+            buttons[next]?.focus();
+          }}
           className="absolute right-0 top-full z-20 mt-1 w-48 rounded-md border border-border bg-surface-2 p-1 shadow-lg"
         >
           {TEMPLATES.map((id) => (
@@ -83,6 +118,7 @@ export function SummarizeButton({
                 role="menuitem"
                 onClick={() => {
                   setOpen(false);
+                  trigger.current?.focus();
                   onSummarize(id);
                 }}
                 className={clsx(
