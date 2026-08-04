@@ -651,13 +651,18 @@ pub async fn get_capabilities() -> Result<CapabilityReport, String> {
 pub async fn list_openrouter_stt_models(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<OrModel>, String> {
-    let key = state
-        .settings
-        .lock()
-        .openrouter_api_key
-        .clone()
-        .unwrap_or_default();
-    if key.is_empty() || key.contains('…') {
+    let (key, offline) = {
+        let s = state.settings.lock();
+        (
+            s.openrouter_api_key.clone().unwrap_or_default(),
+            s.offline_mode,
+        )
+    };
+    // The built-in list rather than a refusal: this only fills a dropdown, and
+    // an empty picker with an error beside it is a worse answer than the names
+    // that ship with the app. The request itself carries the API key, which is
+    // exactly the kind of quiet egress the switch exists to stop.
+    if offline || key.is_empty() || key.contains('…') {
         return Ok(default_stt_models());
     }
     fetch_openrouter_stt_models(&key).await
@@ -667,13 +672,18 @@ pub async fn list_openrouter_stt_models(
 pub async fn list_openrouter_llm_models(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<OrModel>, String> {
-    let key = state
-        .settings
-        .lock()
-        .openrouter_api_key
-        .clone()
-        .unwrap_or_default();
-    if key.is_empty() || key.contains('…') {
+    let (key, offline) = {
+        let s = state.settings.lock();
+        (
+            s.openrouter_api_key.clone().unwrap_or_default(),
+            s.offline_mode,
+        )
+    };
+    // The built-in list rather than a refusal: this only fills a dropdown, and
+    // an empty picker with an error beside it is a worse answer than the names
+    // that ship with the app. The request itself carries the API key, which is
+    // exactly the kind of quiet egress the switch exists to stop.
+    if offline || key.is_empty() || key.contains('…') {
         return Ok(default_llm_models());
     }
     fetch_openrouter_llm_models(&key).await

@@ -1089,7 +1089,7 @@ function AppShell({
                 </span>
               </div>
             )}
-            {pendingUpdate && (
+            {pendingUpdate && !settings.offline_mode && (
               <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
                 <span>{t("update.available").replace("{version}", pendingUpdate.version)}</span>
                 <Button
@@ -1109,7 +1109,16 @@ function AppShell({
                       // `install` alone when the bytes are already here, which
                       // is the usual case — `downloadAndInstall` would fetch
                       // them a second time.
+                      //
+                      // And never fetch them at all while offline mode is on.
+                      // An update discovered before the switch was thrown
+                      // leaves this offer behind it, and accepting it would
+                      // reach the network on a click the user thinks is local.
+                      // Installing bytes already on disk is not egress and
+                      // stays allowed.
                       if (updateReady) await update.install();
+                      else if (settings.offline_mode)
+                        throw new Error(t("update.offline"));
                       else await update.downloadAndInstall();
                       setUpdateNote(t("update.relaunching"));
                       await relaunch();
