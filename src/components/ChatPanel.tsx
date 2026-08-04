@@ -47,14 +47,21 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const box = useRef<HTMLTextAreaElement | null>(null);
+  /// True from the moment a question is submitted until the conversation has
+  /// been re-read. The mount-time load must not land in that window: by then
+  /// `chat_meeting` may already have stored the question, and installing that
+  /// snapshot while the optimistic copy is still on screen renders it twice.
+  /// The re-read that ends the window is the authority anyway.
+  const inFlight = useRef(false);
+
   useEffect(() => {
     let live = true;
     setHistory([]);
     setLocal([]);
     api
       .listChat(meetingId)
-      .then((rows) => live && setHistory(rows))
-      .catch(() => live && setHistory([]));
+      .then((rows) => live && !inFlight.current && setHistory(rows))
+      .catch(() => live && !inFlight.current && setHistory([]));
     return () => {
       live = false;
     };
@@ -104,6 +111,7 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
     setError(null);
     setSending(true);
     setAtBottom(true);
+    inFlight.current = true;
     // Shown before the round trip, and kept if it fails: the answer is what was
     // lost, not the question, and retyping it is a punishment for the model
     // being slow.
@@ -111,18 +119,24 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
     setInput("");
     try {
       await api.chatMeeting(meetingId, question);
-      // Re-read rather than append. The database now holds both turns, and
-      // asking it is the only way to be sure what the conversation is without
-      // guessing whether an optimistic copy is the same turn as a stored one —
-      // `ChatMessage` has no id to decide that with.
-      const rows = await api.listChat(meetingId);
-      if (rows.length) {
-        setHistory(rows);
-        setLocal([]);
-      }
     } catch (e) {
       setError(String(e));
     } finally {
+      // Re-read either way. `chat_meeting` stores the question before it calls
+      // the model, so a failed answer still leaves a stored turn — and reading
+      // it back is what keeps the optimistic copy from becoming a second one.
+      // Asking the database is also the only way to know what the conversation
+      // is without guessing whether two rows are the same turn; `ChatMessage`
+      // has no id to decide that with.
+      try {
+        const rows = await api.listChat(meetingId);
+        setHistory(rows);
+        setLocal([]);
+      } catch {
+        // The turn is on screen and the error is already reported. Leaving the
+        // optimistic copy is better than blanking what was just said.
+      }
+      inFlight.current = false;
       setSending(false);
     }
   }, [input, sending, meetingId]);
