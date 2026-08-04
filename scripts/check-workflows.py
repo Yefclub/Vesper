@@ -246,7 +246,11 @@ def self_test() -> int:
             # self-test went green without exercising anything.
             hit = next((f for f in failures if expected in f), None)
             if hit is None:
-                silent.append(name)
+                # Carry whatever did come out. Without it the report said the
+                # rule "did not fire" whether the rule was broken or merely
+                # unable to run for want of a parser — different problems with
+                # different fixes, and the message could not tell them apart.
+                silent.append((name, list(failures)))
                 continue
             # Printed, not merely matched. The second bug in this file was in
             # the printing, and a check that never formats its own report would
@@ -255,8 +259,10 @@ def self_test() -> int:
 
     if silent:
         print("\nthe guard itself is broken:\n")
-        for name in silent:
+        for name, others in silent:
             print("  {}: rule did not fire on the shape that broke a build".format(name))
+            for other in others:
+                print("      instead: {}".format(other.splitlines()[0]))
         return 1
     print("self-test: {} known failures, all caught".format(len(SAMPLES)))
     return 0
