@@ -184,9 +184,10 @@ def check_appimage_libs(paths: list[pathlib.Path]) -> None:
 #
 # Each sample is the shape that actually broke a build, reduced to the few lines
 # the rule reads.
-SAMPLES: list[tuple[str, dict[str, str]]] = [
+SAMPLES: list[tuple[str, str, dict[str, str]]] = [
     (
         "msi",
+        "MSI refuses this version",
         {
             "src-tauri/tauri.conf.json": '{"version": "0.1.0"}',
             ".github/workflows/w.yml":
@@ -195,6 +196,7 @@ SAMPLES: list[tuple[str, dict[str, str]]] = [
     ),
     (
         "codename",
+        "distro codename written down",
         {
             ".github/workflows/w.yml":
                 "runs-on: ubuntu-22.04\nrun: wget lunarg-vulkan-noble.list\n",
@@ -202,6 +204,7 @@ SAMPLES: list[tuple[str, dict[str, str]]] = [
     ),
     (
         "appimage",
+        "AppImage bundling will not find",
         {
             ".github/workflows/w.yml":
                 "runs-on: ubuntu-latest\nsteps:\n  - uses: tauri-apps/tauri-action@v0\n",
@@ -209,6 +212,7 @@ SAMPLES: list[tuple[str, dict[str, str]]] = [
     ),
     (
         "duplicate key",
+        "workflow does not parse",
         {".github/workflows/w.yml": "env:\n  A: 1\n  A: 2\n"},
     ),
 ]
@@ -219,7 +223,7 @@ def self_test() -> int:
 
     global WORKFLOWS, TAURI_CONF
     silent = []
-    for name, files in SAMPLES:
+    for name, expected, files in SAMPLES:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             for rel, body in files.items():
@@ -236,13 +240,18 @@ def self_test() -> int:
             check_codenames(paths)
             check_appimage_libs(paths)
 
-            if not failures:
+            # By the rule that had to fire, not by "something failed". Merely
+            # counting let a sample pass on the back of an unrelated rule: with
+            # pyyaml absent every sample reported a missing parser and the whole
+            # self-test went green without exercising anything.
+            hit = next((f for f in failures if expected in f), None)
+            if hit is None:
                 silent.append(name)
                 continue
-            # Printed, not merely counted. The second bug in this file was in
-            # the printing, and a self-test that only counts would have passed
-            # while the real report crashed.
-            print("  {}: caught -- {}".format(name, failures[0].splitlines()[0]))
+            # Printed, not merely matched. The second bug in this file was in
+            # the printing, and a check that never formats its own report would
+            # have passed while the real one crashed.
+            print("  {}: caught -- {}".format(name, hit.splitlines()[0]))
 
     if silent:
         print("\nthe guard itself is broken:\n")
