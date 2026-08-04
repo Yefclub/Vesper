@@ -46,7 +46,13 @@ export function EditableLine({
   // Refs rather than the values themselves, so the cleanup runs on unmount
   // alone instead of on every keystroke.
   const pending = useRef<{ draft: string; text: string } | null>(null);
-  pending.current = editing ? { draft, text } : null;
+  // Nothing pending while a save is already on its way. `editing` only clears
+  // once that save resolves, so without this an unmount in between — a
+  // transcript event replacing the pane — would send the same correction a
+  // second time, and the late answer could replace whatever is on screen by
+  // then.
+  const inFlight = useRef(false);
+  pending.current = editing && !inFlight.current ? { draft, text } : null;
   const save = useRef(onSave);
   save.current = onSave;
   useEffect(() => {
@@ -84,6 +90,7 @@ export function EditableLine({
       return;
     }
     setBusy(true);
+    inFlight.current = true;
     try {
       await onSave(next);
       setEditing(false);
@@ -92,6 +99,7 @@ export function EditableLine({
       // the correction and leave the wrong words on screen as if nothing had
       // happened.
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
