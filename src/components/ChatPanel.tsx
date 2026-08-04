@@ -8,6 +8,12 @@ import { CopyButton } from "./CopyButton";
 import { Markdown } from "./Markdown";
 import { FOCUS } from "./Button";
 
+/** Same turn, by what it says. Two lists of the same conversation have no ids
+ *  to compare — `ChatMessage` carries a role and a body and nothing else. */
+function same(a: ChatMessage, b: ChatMessage): boolean {
+  return a.role === b.role && a.content === b.content;
+}
+
 /** Below this many pixels from the end, the view is following the conversation
  *  and new content should keep it pinned. Above it, the user has gone to read
  *  something and must not be dragged away from it. */
@@ -30,7 +36,12 @@ function composerMaxHeight(): number {
 /// list rather than a spinner somewhere else.
 export function ChatPanel({ meetingId }: { meetingId: string }) {
   const { t } = useI18n();
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  /// Two lists, not one. What the database had when this opened, and what has
+  /// been said since — kept apart because the fetch of the first can land after
+  /// the second exists. Merging them by replacement loses whichever arrived
+  /// first; merging them by order loses nothing.
+  const [history, setHistory] = useState<ChatMessage[]>([]);
+  const [local, setLocal] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,21 +49,26 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const box = useRef<HTMLTextAreaElement | null>(null);
-  /// Whether anything has been sent since this meeting was opened.
-  ///
-  /// The history load is a replacement, and it can land after a question the
-  /// user did not wait for. That snapshot predates the write `chat_meeting`
-  /// makes, so applying it deletes the question from the screen — and then the
-  /// answer arrives with nothing above it.
-  const sent = useRef(false);
-
   useEffect(() => {
     let live = true;
-    sent.current = false;
+    setHistory([]);
+    setLocal([]);
     api
       .listChat(meetingId)
-      .then((rows) => live && !sent.current && setMessages(rows))
-      .catch(() => live && !sent.current && setMessages([]));
+      .then((rows) => {
+        if (!live) return;
+        setHistory(rows);
+        // If the snapshot was taken after `chat_meeting` wrote the question,
+        // that question is in both lists. The optimistic copy is the one to
+        // drop: the stored row is the same text and it is the one the next
+        // load will bring back.
+        setLocal((prev) =>
+          prev.length && rows.length && same(rows[rows.length - 1], prev[0])
+            ? prev.slice(1)
+            : prev,
+        );
+      })
+      .catch(() => live && setHistory([]));
     return () => {
       live = false;
     };
@@ -85,7 +101,9 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
     if (!atBottom) return;
     const el = scroller.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, sending, atBottom]);
+    // The two lists rather than their concatenation: a new array every render
+    // would make this fire on every render.
+  }, [history, local, sending, atBottom]);
 
   const onScroll = useCallback(() => {
     const el = scroller.current;
@@ -100,15 +118,14 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
     setError(null);
     setSending(true);
     setAtBottom(true);
-    sent.current = true;
     // Shown before the round trip, and kept if it fails: the answer is what was
     // lost, not the question, and retyping it is a punishment for the model
     // being slow.
-    setMessages((prev) => [...prev, { role: "user", content: question }]);
+    setLocal((prev) => [...prev, { role: "user", content: question }]);
     setInput("");
     try {
       const answer = await api.chatMeeting(meetingId, question);
-      setMessages((prev) => [...prev, answer]);
+      setLocal((prev) => [...prev, answer]);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -116,6 +133,7 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
     }
   }, [input, sending, meetingId]);
 
+  const messages = [...history, ...local];
   const empty = messages.length === 0 && !sending;
 
   return (
