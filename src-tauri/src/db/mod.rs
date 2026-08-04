@@ -411,22 +411,30 @@ impl Database {
         use crate::domain::actions::ActionStatus;
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE action_items SET text=?3, owner=?4, due=?5, status=?6, edited=1
+        // The count matters. A summary running alongside this can remove an
+        // untouched suggestion while its field is being edited, and an UPDATE
+        // that matches nothing is not a success — reporting one would hand back
+        // a list without the correction and no sign it had been dropped.
+        let changed = tx
+            .execute(
+                "UPDATE action_items SET text=?3, owner=?4, due=?5, status=?6, edited=1
              WHERE id=?1 AND meeting_id=?2",
-            params![
-                item.id,
-                meeting_id,
-                item.text,
-                item.owner,
-                item.due,
-                match item.status {
-                    ActionStatus::Done => "done",
-                    ActionStatus::Open => "open",
-                }
-            ],
-        )
-        .map_err(|e| e.to_string())?;
+                params![
+                    item.id,
+                    meeting_id,
+                    item.text,
+                    item.owner,
+                    item.due,
+                    match item.status {
+                        ActionStatus::Done => "done",
+                        ActionStatus::Open => "open",
+                    }
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err("that task is no longer in this meeting's list".into());
+        }
         Self::project_action_text(&tx, meeting_id)?;
         tx.commit().map_err(|e| e.to_string())
     }

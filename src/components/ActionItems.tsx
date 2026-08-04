@@ -37,25 +37,42 @@ export function ActionItems({
   const editing = useRef<number | null>(null);
   const missed = useRef(false);
 
+  /// Which request is the current one. A read started before a summary can
+  /// answer after the refresh that followed it, and applying that answer puts
+  /// the pre-summary rows back on screen — undoing the very refresh that was
+  /// deferred for it.
+  const generation = useRef(0);
+
   const load = useCallback(() => {
     if (editing.current !== null) {
       // Deferred rather than dropped; taken at the next blur.
       missed.current = true;
       return;
     }
+    const mine = ++generation.current;
     api
       .listActionItems(meetingId)
-      .then(setItems)
+      .then((rows) => {
+        if (mine === generation.current) setItems(rows);
+      })
       .catch(() => null);
   }, [meetingId]);
 
   useEffect(load, [load, reloadKey]);
 
-  const settle = (next: Promise<ActionItem[]>) =>
-    next.then(setItems).catch((e) => {
-      setError(String(e));
-      load();
-    });
+  const settle = (next: Promise<ActionItem[]>) => {
+    const mine = ++generation.current;
+    return next
+      .then((rows) => {
+        if (mine === generation.current) setItems(rows);
+      })
+      .catch((e) => {
+        // Not reloaded: the field still holds what was typed, and replacing the
+        // list under it would take that away as well as the write. The message
+        // says what happened; the text is there to try again with.
+        setError(String(e));
+      });
+  };
 
   const leave = (item: ActionItem) => {
     editing.current = null;
