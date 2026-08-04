@@ -66,6 +66,27 @@ impl LiveTranscript {
         &self.segments
     }
 
+    /// Replace one segment's words, keeping its clock.
+    ///
+    /// Local speech-to-text mishears names, acronyms and one-word answers, and
+    /// the fastest route to notes worth trusting is a person fixing the line.
+    /// The timing is not theirs to change — it came from the audio, and the
+    /// summary, the search index and any future alignment all read it.
+    ///
+    /// Returns whether a segment by that id was there to edit. `false` is not a
+    /// failure worth an error type: the id came from a list the caller was
+    /// looking at, and the honest answer to "edit the row that is gone" is that
+    /// nothing changed.
+    pub fn edit_segment(&mut self, segment_id: &str, text: &str) -> bool {
+        match self.segments.iter_mut().find(|s| s.id == segment_id) {
+            Some(segment) => {
+                segment.text = text.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn plain_text(&self) -> String {
         self.segments
             .iter()
@@ -117,6 +138,53 @@ pub fn format_ts(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn two_lines() -> LiveTranscript {
+        let mut t = LiveTranscript::new();
+        t.segments.push(TranscriptSegment {
+            id: "a".into(),
+            speaker: Speaker::Me,
+            text: "clode Cote".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+        });
+        t.segments.push(TranscriptSegment {
+            id: "b".into(),
+            speaker: Speaker::Others,
+            text: "sim".into(),
+            start_ms: 1_000,
+            end_ms: 2_000,
+        });
+        t
+    }
+
+    #[test]
+    fn an_edit_changes_the_words_and_nothing_else() {
+        let mut t = two_lines();
+        assert!(t.edit_segment("a", "Claude Code"));
+        assert_eq!(t.segments[0].text, "Claude Code");
+        assert_eq!(t.segments[0].start_ms, 0, "the clock is not the user's");
+        assert_eq!(t.segments[0].end_ms, 1_000);
+        assert_eq!(t.segments[0].speaker, Speaker::Me);
+        assert_eq!(t.segments[1].text, "sim", "only the named line moves");
+    }
+
+    #[test]
+    fn editing_a_line_that_is_gone_changes_nothing() {
+        let mut t = two_lines();
+        assert!(!t.edit_segment("zzz", "x"));
+        assert_eq!(t.segments.len(), 2);
+    }
+
+    /// The summary reads `plain_text`, so an edit has to reach it or the
+    /// correction would be visible on screen and invisible to the model.
+    #[test]
+    fn the_corrected_words_are_what_the_summary_will_read() {
+        let mut t = two_lines();
+        t.edit_segment("a", "Claude Code");
+        assert!(t.plain_text().contains("Claude Code"));
+        assert!(!t.plain_text().contains("clode Cote"));
+    }
 
     #[test]
     fn append_orders_by_start_ms() {

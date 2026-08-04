@@ -374,6 +374,66 @@ pub fn get_transcript(
     state.db.load_transcript(&id)
 }
 
+/// Correct one line of a transcript.
+///
+/// Local speech-to-text mishears names, acronyms and one-word answers, and a
+/// person fixing the line is the fastest route to notes worth trusting. The
+/// timing is not editable: it came from the audio, and the summary, the search
+/// index and any future alignment all read it.
+///
+/// Refused while that meeting is recording. The live transcript is being
+/// appended to by the transcription ticker, which writes the whole set back —
+/// an edit made in that window would be silently overwritten by the next chunk,
+/// which is worse than not offering it.
+#[tauri::command]
+pub fn edit_transcript_segment(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    segment_id: String,
+    text: String,
+) -> Result<LiveTranscript, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("a line cannot be emptied — delete is a different action".into());
+    }
+    // Bounded for the same reason a note is: this reaches the summary prompt.
+    if text.chars().count() > 4_000 {
+        return Err("that line is too long".into());
+    }
+    let recording_this = state
+        .active_meeting
+        .lock()
+        .as_deref()
+        .is_some_and(|active| active == id)
+        && state.recorder.is_recording();
+    if recording_this {
+        return Err("the transcript can be corrected once the recording has stopped".into());
+    }
+
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    let mut transcript = match state.live.lock().get(&id) {
+        Some(t) => t.clone(),
+        None => state.db.load_transcript(&id)?,
+    };
+    if !transcript.edit_segment(&segment_id, text) {
+        return Err("that line is no longer in this transcript".into());
+    }
+
+    state.db.save_transcript(&id, &transcript)?;
+    // The summary reads this field, not the segments, so the correction has to
+    // land here or it would be visible on screen and invisible to the model.
+    // `upsert_meeting` reindexes the search body as part of the same write.
+    meeting.transcript_text = transcript.plain_text();
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    state.db.upsert_meeting(&meeting)?;
+    // The cache is what `get_transcript` answers from while it is warm.
+    state.live.lock().insert(id.clone(), transcript.clone());
+    Ok(transcript)
+}
+
 #[tauri::command]
 pub fn delete_meeting(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.db.delete_meeting(&id)

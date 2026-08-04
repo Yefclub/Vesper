@@ -217,6 +217,7 @@ pub fn run() {
             commands::list_meetings,
             commands::get_meeting,
             commands::get_transcript,
+            commands::edit_transcript_segment,
             commands::delete_meeting,
             commands::search_meetings_cmd,
             commands::recorder_status,
