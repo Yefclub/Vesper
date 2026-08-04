@@ -57,6 +57,21 @@ CI verde sozinho **não** é "pronta". O gate é verde **e** aprovado.
 Resumo: <X> abertas | <Y> prontas | <Z> bloqueadas
 ```
 
+## Esperar CI terminar
+
+Não escrever loop de polling. O `gh` já bloqueia até acabar e sai com código:
+
+```bash
+gh pr checks <N> --watch --fail-fast --interval 20   # exit 0 = tudo verde
+gh run watch <run-id> --exit-status --interval 30    # idem, para um run
+```
+
+Rodar isso **em background** — uma notificação quando termina, e o exit code já diz se passou.
+
+**Não montar monitor com `comm -13 <(echo "$a") <(echo "$b")`.** Process substitution não funciona confiável no Git Bash do Windows: o loop roda cego, não emite evento nenhum e expira em silêncio — que é indistinguível de "ainda rodando". Custou três rodadas com o Yef tendo que perguntar o status.
+
+Regra geral: se a saída de um watch pode ser vazia tanto por "nada mudou" quanto por "meu comando quebrou", o watch está errado.
+
 ## Regras
 
 - **Factual.** Check rodando é "rodando" — nunca "deve passar". Previsão aqui vira decisão errada lá na frente.
