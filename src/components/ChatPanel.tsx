@@ -8,12 +8,6 @@ import { CopyButton } from "./CopyButton";
 import { Markdown } from "./Markdown";
 import { FOCUS } from "./Button";
 
-/** Same turn, by what it says. Two lists of the same conversation have no ids
- *  to compare — `ChatMessage` carries a role and a body and nothing else. */
-function same(a: ChatMessage, b: ChatMessage): boolean {
-  return a.role === b.role && a.content === b.content;
-}
-
 /** Below this many pixels from the end, the view is following the conversation
  *  and new content should keep it pinned. Above it, the user has gone to read
  *  something and must not be dragged away from it. */
@@ -36,10 +30,14 @@ function composerMaxHeight(): number {
 /// list rather than a spinner somewhere else.
 export function ChatPanel({ meetingId }: { meetingId: string }) {
   const { t } = useI18n();
-  /// Two lists, not one. What the database had when this opened, and what has
-  /// been said since — kept apart because the fetch of the first can land after
-  /// the second exists. Merging them by replacement loses whichever arrived
-  /// first; merging them by order loses nothing.
+  /// Two lists, not one. What the database holds, and what has been said since
+  /// but is not stored yet — kept apart because the fetch of the first can land
+  /// after the second exists, and merging them by replacement loses whichever
+  /// arrived first.
+  ///
+  /// A completed exchange collapses back into one: the answer is followed by a
+  /// re-read, which is the only way to know what the conversation is without
+  /// guessing whether an optimistic copy and a stored row are the same turn.
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [local, setLocal] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -55,19 +53,7 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
     setLocal([]);
     api
       .listChat(meetingId)
-      .then((rows) => {
-        if (!live) return;
-        setHistory(rows);
-        // If the snapshot was taken after `chat_meeting` wrote the question,
-        // that question is in both lists. The optimistic copy is the one to
-        // drop: the stored row is the same text and it is the one the next
-        // load will bring back.
-        setLocal((prev) =>
-          prev.length && rows.length && same(rows[rows.length - 1], prev[0])
-            ? prev.slice(1)
-            : prev,
-        );
-      })
+      .then((rows) => live && setHistory(rows))
       .catch(() => live && setHistory([]));
     return () => {
       live = false;
@@ -124,8 +110,16 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
     setLocal((prev) => [...prev, { role: "user", content: question }]);
     setInput("");
     try {
-      const answer = await api.chatMeeting(meetingId, question);
-      setLocal((prev) => [...prev, answer]);
+      await api.chatMeeting(meetingId, question);
+      // Re-read rather than append. The database now holds both turns, and
+      // asking it is the only way to be sure what the conversation is without
+      // guessing whether an optimistic copy is the same turn as a stored one —
+      // `ChatMessage` has no id to decide that with.
+      const rows = await api.listChat(meetingId);
+      if (rows.length) {
+        setHistory(rows);
+        setLocal([]);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
