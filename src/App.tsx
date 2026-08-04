@@ -1578,8 +1578,13 @@ function AppShell({
             {/* Above the dock and only while recording: it is context about
                 what is being said now, and after Stop the meeting's own screen
                 is where notes belong. */}
-            {status?.recording && selectedId && (
-              <ContextBar meetingId={selectedId} />
+            {status?.recording && status.meeting_id && (
+              // The meeting being recorded, not the one on screen. The sidebar
+              // stays live during a recording, so those are not the same thing
+              // — and a note stamped with this recording's clock, filed against
+              // a meeting from last week, would be evidence of something that
+              // never happened.
+              <ContextBar meetingId={status.meeting_id} />
             )}
             <AnimatePresence>
               {(!selected || status?.recording) && (

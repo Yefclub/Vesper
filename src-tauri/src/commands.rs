@@ -1050,10 +1050,18 @@ pub fn add_context_note(
     if text.chars().count() > 2_000 {
         return Err("that note is too long".into());
     }
-    let at_ms = state
-        .recorder
-        .is_recording()
-        .then(|| state.recorder.elapsed_ms() as i64);
+    // The note goes to the meeting being recorded, and to no other. The id
+    // arrives from the WebView while the stamp comes from the recorder, so
+    // without this a caller could attach a note carrying this recording's
+    // timestamp to any meeting in the database — and notes are told to win over
+    // the transcript, which makes that a way to write authoritative context
+    // into somebody else's meeting.
+    let active = state.active_meeting.lock().clone();
+    match active {
+        Some(active) if active == id && state.recorder.is_recording() => {}
+        _ => return Err("context notes belong to the meeting being recorded".into()),
+    }
+    let at_ms = Some(state.recorder.elapsed_ms() as i64);
     state.db.add_context_note(&id, text, at_ms)
 }
 
