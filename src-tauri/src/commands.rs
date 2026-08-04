@@ -1071,18 +1071,28 @@ pub fn add_context_note(
     if text.chars().count() > 2_000 {
         return Err("that note is too long".into());
     }
-    // The note goes to the meeting being recorded, and to no other. The id
-    // arrives from the WebView while the stamp comes from the recorder, so
-    // without this a caller could attach a note carrying this recording's
-    // timestamp to any meeting in the database — and notes are told to win over
-    // the transcript, which makes that a way to write authoritative context
-    // into somebody else's meeting.
-    let active = state.active_meeting.lock().clone();
-    match active {
-        Some(active) if active == id && state.recorder.is_recording() => {}
-        _ => return Err("context notes belong to the meeting being recorded".into()),
+    // The stamp is the thing that has to be earned, not the note. A note about
+    // the meeting being recorded gets the recorder's position; a note about any
+    // other meeting gets none.
+    //
+    // That distinction is the security boundary. The id arrives from the
+    // WebView while the stamp comes from the recorder, so handing this
+    // recording's timestamp to an arbitrary meeting would let a caller write
+    // evidence of a position the audio never had — and notes are told to win
+    // over the transcript. A note with no position claims nothing.
+    let recording_this = state
+        .active_meeting
+        .lock()
+        .as_deref()
+        .is_some_and(|active| active == id)
+        && state.recorder.is_recording();
+    let at_ms = recording_this.then(|| state.recorder.elapsed_ms() as i64);
+    // The meeting still has to exist. Without this the foreign key would be the
+    // only thing refusing, and it would do it with a SQLite error rather than a
+    // sentence.
+    if state.db.get_meeting(&id)?.is_none() {
+        return Err("meeting not found".into());
     }
-    let at_ms = Some(state.recorder.elapsed_ms() as i64);
     state.db.add_context_note(&id, text, at_ms)
 }
 
