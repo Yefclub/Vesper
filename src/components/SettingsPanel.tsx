@@ -611,6 +611,14 @@ export function SettingsPanel({
                     setDraft((d) => ({ ...d, auto_summarize: v }))
                   }
                 />
+                {/* Only while it is off. A promise about what the app does not
+                    do is worth reading in the state where it applies, and is
+                    noise in the state where it does not. */}
+                {!draft.auto_summarize && (
+                  <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                    {t("settings.transcription_only")}
+                  </p>
+                )}
               </section>
 
               {/* Only where there is an NVIDIA card the current build cannot

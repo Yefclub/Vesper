@@ -169,6 +169,21 @@ fn normalised_key(key: &Option<String>) -> Option<String> {
 /// Both callers need the same three steps in the same order — restore a redacted
 /// key, put the key in the keychain, then persist everything else — and the
 /// keychain step is easy to forget when it is copied by hand.
+/// Which local weights the settings are asking for, if any.
+///
+/// `None` for a cloud provider: nothing local is wanted at all, which is a
+/// different state from wanting a different local model and has to compare
+/// unequal to it.
+fn wanted_local_weights(settings: &AppSettings) -> Option<(String, String)> {
+    match settings.llm_provider {
+        LlmProvider::Local => Some((
+            settings.local_llm_model.clone(),
+            settings.compute_backend.clone(),
+        )),
+        _ => None,
+    }
+}
+
 fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSettings, String> {
     // The front end only ever sees a redacted key, so a redacted value coming
     // back means "unchanged", not "set it to these characters".
@@ -184,6 +199,9 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
             current.openrouter_llm_model.clone(),
         )
     };
+    // Which weights are wanted, before the save decides otherwise. Compared
+    // after the write so a change frees what the old answer was holding.
+    let previously_wanted = wanted_local_weights(&state.settings.lock());
     settings.validate_models().map_err(|e| e.to_string())?;
     // The theme is not this command's to write. `set_theme` owns it, and the
     // drawer's draft carries whatever the theme was when it opened — so a Save
@@ -231,6 +249,15 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
 
     state.db.save_settings_with(&settings, home)?;
     *state.settings.lock() = settings.clone();
+    // A model nobody is going to ask for again should not stay resident. This
+    // fires when the user picks a different local model — usually a smaller one,
+    // and usually because the larger did not comfortably fit — or leaves local
+    // models behind for a cloud provider. Both used to keep the old weights in
+    // memory until something happened to reload, which on the machine that most
+    // needed the room was exactly the wrong answer.
+    if wanted_local_weights(&settings) != previously_wanted {
+        crate::llm::local::release_model();
+    }
     Ok(settings)
 }
 
