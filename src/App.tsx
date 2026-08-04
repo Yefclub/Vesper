@@ -43,6 +43,7 @@ import { SummaryHistory } from "./components/SummaryHistory";
 import { ChatPanel } from "./components/ChatPanel";
 import { ActionItems } from "./components/ActionItems";
 import { NotesPanel } from "./components/NotesPanel";
+import { EditableLine } from "./components/EditableLine";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { ContextBar } from "./components/ContextBar";
@@ -1368,16 +1369,30 @@ function AppShell({
                                       because `--color-me` is the accent, and a
                                       second accent fill would compete with the
                                       one on screen. */}
-                                  <p
-                                    className={clsx(
-                                      "max-w-reading rounded-lg border px-4 py-3 text-base leading-relaxed",
-                                      me
-                                        ? "rounded-br-sm border-me/30 bg-me/10"
-                                        : "rounded-bl-sm border-border bg-surface-2",
-                                    )}
-                                  >
-                                    {s.text}
-                                  </p>
+                                  <EditableLine
+                                    text={s.text}
+                                    mine={me}
+                                    // Only the meeting being recorded is off
+                                    // limits — the transcription ticker writes
+                                    // its whole set back, so an edit there
+                                    // would be overwritten by the next chunk.
+                                    // Every other meeting is a finished
+                                    // recording and correctable.
+                                    editable={
+                                      !status?.recording ||
+                                      status.meeting_id !== selected.id
+                                    }
+                                    label={t("transcript.edit")}
+                                    onSave={async (next) => {
+                                      const updated =
+                                        await api.editTranscriptSegment(
+                                          selected.id,
+                                          s.id,
+                                          next,
+                                        );
+                                      setTranscript(updated);
+                                    }}
+                                  />
                                 </motion.div>
                               );
                             })}

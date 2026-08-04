@@ -497,18 +497,52 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
         }
-        // The text column keeps its old shape — one `- ` line per item — so
-        // export, search and any older reader carry on working unchanged.
-        let text = items
-            .iter()
-            .map(|i| format!("- {}", i.text))
-            .collect::<Vec<_>>()
-            .join("\n");
+        Self::project_action_text(&tx, meeting_id)?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Write a corrected transcript, the text the summary reads, and the search
+    /// index — as one write or none of them.
+    ///
+    /// These were three statements in two transactions. A failure between them
+    /// left the segments corrected while `transcript_text` still held the old
+    /// words, which is the field the model reads: the fix would have been
+    /// visible on screen and invisible to every consumer of it. Or it left the
+    /// correction saved and unindexed, so search kept answering with what was
+    /// misheard.
+    pub fn save_corrected_transcript(
+        &self,
+        m: &MeetingRecord,
+        transcript: &LiveTranscript,
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute(
-            "UPDATE meetings SET action_items=?2 WHERE id=?1",
-            params![meeting_id, text],
+            "DELETE FROM transcript_segments WHERE meeting_id=?1",
+            params![m.id],
         )
         .map_err(|e| e.to_string())?;
+        for s in transcript.segments() {
+            tx.execute(
+                "INSERT INTO transcript_segments (id, meeting_id, speaker, text, start_ms, end_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    s.id,
+                    m.id,
+                    speaker_str(s.speaker),
+                    s.text,
+                    s.start_ms as i64,
+                    s.end_ms as i64
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "UPDATE meetings SET transcript_text=?2, updated_at=?3 WHERE id=?1",
+            params![m.id, m.transcript_text, m.updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+        Self::index_meeting(&tx, m)?;
         tx.commit().map_err(|e| e.to_string())
     }
 

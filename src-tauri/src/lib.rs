@@ -221,6 +221,7 @@ pub fn run() {
             commands::add_action_item,
             commands::update_action_item,
             commands::delete_action_item,
+            commands::edit_transcript_segment,
             commands::delete_meeting,
             commands::search_meetings_cmd,
             commands::recorder_status,
