@@ -45,7 +45,11 @@ export function ActionItems({
 
   const load = useCallback(() => {
     if (editing.current !== null) {
-      // Deferred rather than dropped; taken at the next blur.
+      // Deferred rather than dropped; taken at the next blur. The generation
+      // still moves, because a read started before this can still be in the
+      // air — and letting it land would replace the field being typed in with
+      // rows older than the refresh that was deferred for it.
+      generation.current += 1;
       missed.current = true;
       return;
     }
