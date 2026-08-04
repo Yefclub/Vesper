@@ -519,14 +519,24 @@ pub fn start_recording(
     let title_locked = given.is_some();
     let title = given.unwrap_or_else(|| fallback_title(chrono::Local::now()));
     let audio_path = recordings_dir().join(format!("{id}.wav"));
-    state
-        .recorder
-        .start(
-            audio_path.clone(),
-            settings.mic_device_id.clone(),
-            settings.system_device_id.clone(),
-        )
-        .map_err(|e| e.to_string())?;
+    // Claimed before the capture opens, not after. Between those two points the
+    // recorder answers "yes, recording" while this still named the previous
+    // meeting, and a context note landing in that gap would be stamped with this
+    // recording's clock and filed against the last one. Cleared again below if
+    // the capture refuses to start.
+    *state.active_meeting.lock() = Some(id.clone());
+    if let Err(e) = state.recorder.start(
+        audio_path.clone(),
+        settings.mic_device_id.clone(),
+        settings.system_device_id.clone(),
+    ) {
+        // Give the claim back. A meeting that never started recording must not
+        // be left owning the recorder, or the next note would be filed against
+        // it and pause, resume and stop would all answer for a capture that
+        // does not exist.
+        *state.active_meeting.lock() = None;
+        return Err(e.to_string());
+    }
     let mut status = MeetingStatus::Idle;
     status = status
         .transition(MeetingEvent::StartRecording)
@@ -550,7 +560,6 @@ pub fn start_recording(
     };
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
-    *state.active_meeting.lock() = Some(id);
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
     spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
