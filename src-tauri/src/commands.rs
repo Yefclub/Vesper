@@ -374,6 +374,78 @@ pub fn get_transcript(
     state.db.load_transcript(&id)
 }
 
+/// Fold a fresh set of suggestions into the meeting's action items.
+///
+/// The model may replace its own untouched suggestions and nothing else — the
+/// rule lives in `domain::actions::merge_suggestions` and is tested there. This
+/// is the plumbing: read what is stored, merge, write both the rows and the
+/// text column that export and search read.
+///
+/// Errors are swallowed on purpose. A summary that arrived is worth keeping
+/// even if the task list could not be updated, and the alternative — failing
+/// the whole summarise — would throw away the expensive half over the cheap one.
+fn apply_action_items(state: &AppState, id: &str, insights: &MeetingInsights) {
+    let existing = state.db.list_action_items(id).unwrap_or_default();
+    let merged = crate::domain::actions::merge_suggestions(&existing, &insights.action_items);
+    if let Err(e) = state.db.save_action_items(id, &merged) {
+        tracing::warn!("action items could not be updated: {e}");
+    }
+}
+
+#[tauri::command]
+pub fn list_action_items(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<crate::domain::actions::ActionItem>, String> {
+    state.db.list_action_items(&id)
+}
+
+/// Replace a meeting's action items with what the user is looking at.
+///
+/// The whole list rather than one field: the panel edits text, owner, due and
+/// status in the same gesture, and a per-field command would have four ways to
+/// half-apply an edit.
+///
+/// Every item that arrives here has been through a person, so each is marked
+/// `edited` — that flag is what protects it from the next summary. The source
+/// is preserved rather than trusted from the caller for the items that already
+/// exist; a caller cannot promote the model's suggestion into something it
+/// never said.
+#[tauri::command]
+pub fn save_action_items(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    items: Vec<crate::domain::actions::ActionItem>,
+) -> Result<Vec<crate::domain::actions::ActionItem>, String> {
+    if state.db.get_meeting(&id)?.is_none() {
+        return Err("meeting not found".into());
+    }
+    if items.len() > 500 {
+        return Err("that is more tasks than a meeting produces".into());
+    }
+    let mut items = items;
+    for item in &mut items {
+        item.text = item.text.trim().to_string();
+        if item.text.is_empty() {
+            return Err("a task needs something in it".into());
+        }
+        if item.text.chars().count() > 2_000 {
+            return Err("that task is too long".into());
+        }
+        item.owner = item.owner.as_ref().and_then(|o| {
+            let o = o.trim();
+            (!o.is_empty()).then(|| o.to_string())
+        });
+        item.due = item.due.as_ref().and_then(|d| {
+            let d = d.trim();
+            (!d.is_empty()).then(|| d.to_string())
+        });
+        item.edited = true;
+    }
+    state.db.save_action_items(&id, &items)?;
+    state.db.list_action_items(&id)
+}
+
 #[tauri::command]
 pub fn delete_meeting(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.db.delete_meeting(&id)
@@ -773,6 +845,7 @@ pub async fn stop_recording(
         {
             Ok((insights, cost)) => {
                 state.db.save_insights(&id, &insights)?;
+                apply_action_items(&state, &id, &insights);
                 // A meeting's first insights are version 1. Recording it here
                 // rather than lazily means the history is complete from the
                 // start instead of from whenever someone first opened it.
@@ -995,6 +1068,7 @@ pub async fn summarize_meeting(
             .push_summary_version(&id, "summarize", &current_insights(&m))?;
     }
     state.db.save_insights(&id, &insights)?;
+    apply_action_items(&state, &id, &insights);
     state.db.push_summary_version(&id, "summarize", &insights)?;
     state.db.add_meeting_cost(&id, cost)?;
     m.status = MeetingStatus::Ready;
@@ -1564,6 +1638,7 @@ pub async fn refine_summary_section(
         .db
         .push_summary_version(&id, section.as_str(), &insights)?;
     state.db.save_insights(&id, &insights)?;
+    apply_action_items(&state, &id, &insights);
     meeting.summary = Some(insights.summary.clone());
     meeting.key_points = Some(insights.key_points_text());
     meeting.action_items = Some(insights.action_items_text());
@@ -1603,6 +1678,7 @@ pub async fn restore_summary_version(
     };
     let created = state.db.push_summary_version(&id, "restore", &insights)?;
     state.db.save_insights(&id, &insights)?;
+    apply_action_items(&state, &id, &insights);
     meeting.summary = Some(insights.summary.clone());
     meeting.key_points = Some(insights.key_points_text());
     meeting.action_items = Some(insights.action_items_text());

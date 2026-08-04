@@ -124,6 +124,18 @@ export interface ContextNote {
   created_at: string;
 }
 
+export interface ActionItem {
+  id: number;
+  text: string;
+  owner: string | null;
+  due: string | null;
+  status: "open" | "done";
+  /// Who put it there. The next summary may replace what the model said and
+  /// never what a person said.
+  source: "ai" | "user";
+  edited: boolean;
+}
+
 export interface MeetingInsights {
   summary: string;
   key_points: string[];
@@ -301,6 +313,13 @@ export const api = {
     invoke<ContextNote[]>("list_context_notes", { id }),
   deleteContextNote: (id: string, noteId: number) =>
     invoke<void>("delete_context_note", { id, noteId }),
+  listActionItems: (id: string) =>
+    invoke<ActionItem[]>("list_action_items", { id }),
+  /// The whole list. Returns what was stored, since the backend trims each item
+  /// and marks it edited — which is the flag that protects it from the next
+  /// summary.
+  saveActionItems: (id: string, items: ActionItem[]) =>
+    invoke<ActionItem[]>("save_action_items", { id, items }),
   listModels: () => invoke<ModelInfo[]>("list_models_cmd"),
   // No URL parameter: the backend resolves it from its own catalog and verifies
   // the artifact's checksum before it reaches whisper.cpp / llama.cpp.

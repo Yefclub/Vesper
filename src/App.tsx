@@ -41,6 +41,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CopyButton } from "./components/CopyButton";
 import { SummaryHistory } from "./components/SummaryHistory";
 import { ChatPanel } from "./components/ChatPanel";
+import { ActionItems } from "./components/ActionItems";
 import { NotesPanel } from "./components/NotesPanel";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
@@ -1445,12 +1446,12 @@ function AppShell({
                                 onImprove={() => improve("key_points")}
                                 improving={improving === "key_points"}
                               />
-                              <Section
-                                title={t("section.action_items")}
-                                body={selected.action_items || "—"}
-                                onImprove={() => improve("action_items")}
-                                improving={improving === "action_items"}
-                              />
+                              {/* Not a `Section`: this one is work rather
+                                  than prose. It ticks off, carries an owner and
+                                  a deadline, and survives the meeting being
+                                  summarised again — which the free-text card
+                                  could not, because every run replaced it. */}
+                              <ActionItems key={selected.id} meetingId={selected.id} />
                               <SummaryHistory
                                 meetingId={selected.id}
                                 reloadKey={versionsKey}

@@ -169,6 +169,27 @@ impl Database {
                 FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_context_meeting ON context_notes(meeting_id);
+            -- What the meeting decided somebody would do.
+            --
+            -- The `meetings.action_items` text column stays: it is what export
+            -- and the search index read, and it is rewritten from these rows.
+            -- Two representations of one truth is a cost, and the alternative
+            -- was rewriting both of those readers in the same change.
+            CREATE TABLE IF NOT EXISTS action_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                owner TEXT,
+                due TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                source TEXT NOT NULL DEFAULT 'ai',
+                -- Touched by a person. Never cleared: it is what stops the next
+                -- summary from replacing their words with the model's.
+                edited INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_actions_meeting ON action_items(meeting_id);
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -260,6 +281,103 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn list_action_items(
+        &self,
+        meeting_id: &str,
+    ) -> Result<Vec<crate::domain::actions::ActionItem>, String> {
+        use crate::domain::actions::{ActionItem, ActionSource, ActionStatus};
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, text, owner, due, status, source, edited FROM action_items
+                 WHERE meeting_id=?1 ORDER BY position, id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![meeting_id], |r| {
+                let status: String = r.get(4)?;
+                let source: String = r.get(5)?;
+                Ok(ActionItem {
+                    id: r.get(0)?,
+                    text: r.get(1)?,
+                    owner: r.get(2)?,
+                    due: r.get(3)?,
+                    status: if status == "done" {
+                        ActionStatus::Done
+                    } else {
+                        ActionStatus::Open
+                    },
+                    source: if source == "user" {
+                        ActionSource::User
+                    } else {
+                        ActionSource::Ai
+                    },
+                    edited: r.get::<_, i64>(6)? != 0,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Replace a meeting's action items with this list, and rewrite the text
+    /// column that export and search read from it.
+    ///
+    /// One transaction: the rows and the text are two views of one answer, and
+    /// a failure between them would leave the list showing one thing and every
+    /// export of it showing another.
+    pub fn save_action_items(
+        &self,
+        meeting_id: &str,
+        items: &[crate::domain::actions::ActionItem],
+    ) -> Result<(), String> {
+        use crate::domain::actions::{ActionSource, ActionStatus};
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM action_items WHERE meeting_id=?1",
+            params![meeting_id],
+        )
+        .map_err(|e| e.to_string())?;
+        for (position, item) in items.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO action_items
+                   (meeting_id, text, owner, due, status, source, edited, position)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    meeting_id,
+                    item.text,
+                    item.owner,
+                    item.due,
+                    match item.status {
+                        ActionStatus::Done => "done",
+                        ActionStatus::Open => "open",
+                    },
+                    match item.source {
+                        ActionSource::User => "user",
+                        ActionSource::Ai => "ai",
+                    },
+                    item.edited as i64,
+                    position as i64
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        // The text column keeps its old shape — one `- ` line per item — so
+        // export, search and any older reader carry on working unchanged.
+        let text = items
+            .iter()
+            .map(|i| format!("- {}", i.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tx.execute(
+            "UPDATE meetings SET action_items=?2 WHERE id=?1",
+            params![meeting_id, text],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn upsert_meeting(&self, m: &MeetingRecord) -> Result<(), String> {
