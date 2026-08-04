@@ -223,6 +223,10 @@ export function SettingsPanel({
           un();
         }
         await onRefreshModels();
+        // A compute backend changes what this machine can reach, and the answer
+        // is read live on the Rust side now. Asking again is what turns a
+        // finished download into a selectable option without a restart.
+        api.capabilities().then(setCaps).catch(() => null);
         setProgress(null);
         adoptIfDraftUnusable(id);
       } catch (e) {
@@ -636,14 +640,15 @@ export function SettingsPanel({
               )}
 
               {/* The offer disappearing was the only sign the download had
-                  worked, and it was the wrong one: ggml registers its backends
-                  once per process, before this screen ever opens, so a pack
-                  that arrives now is used from the next launch. Without this
-                  line the user pays for 600 MB, sees the row vanish, and
-                  summaries carry on running on the CPU with nothing said. */}
+                  worked. This says so, and says it in the present tense: the
+                  pack is registered as soon as it is unpacked, so by the time
+                  this renders the card is already the one doing the work. */}
               {cudaPack?.ready && caps?.cuda_device_name && (
                 <p className="rounded-md border border-border bg-surface-2 p-3 text-xs leading-relaxed text-fg-muted">
-                  {t("cuda.installed")}
+                  {t("cuda.installed").replace(
+                    "{gpu}",
+                    caps.cuda_device_name ?? "",
+                  )}
                 </p>
               )}
 

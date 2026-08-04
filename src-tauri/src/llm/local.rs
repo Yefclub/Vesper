@@ -110,8 +110,11 @@ fn load_downloaded_backend() {
         let mut entries = vec![dir.clone()];
         entries.extend(std::env::split_paths(&path));
         match std::env::join_paths(entries) {
-            // SAFETY: called once, from inside the `OnceLock` that guards the
-            // backend, before any thread can be looking at the environment.
+            // SAFETY: the callers are the backend `OnceLock` and the download
+            // that has just finished unpacking, both of which run on one thread
+            // with no other reader of the environment in flight. Prepending the
+            // same directory twice is harmless — the loader takes the first
+            // match — so the second caller does not have to check.
             Ok(joined) => unsafe { std::env::set_var("PATH", joined) },
             Err(e) => {
                 tracing::warn!("could not put the CUDA pack on PATH: {e}");
@@ -151,11 +154,14 @@ fn holds_a_backend(dir: &Path) -> bool {
 /// and exposes no equivalent enumeration, so it reads this one — the same
 /// machine and the same drivers, seen through the copy that can be asked.
 ///
-/// Memoised: the answer cannot change while the process runs, and probing it is
-/// a walk over every registered backend.
+/// Read live rather than memoised. It used to be cached on the grounds that the
+/// answer could not change while the process runs — which stopped being true the
+/// moment a backend could arrive by download. A user who fetched the CUDA pack
+/// was told, for the rest of that session, that the card they had just paid 600
+/// MB to reach was unreachable. The probe is a walk over the registered
+/// devices; that is cheaper than being wrong until the next launch.
 pub(crate) fn probe_support() -> BackendSupport {
-    static SUPPORT: OnceLock<BackendSupport> = OnceLock::new();
-    *SUPPORT.get_or_init(|| {
+    {
         let (cuda_built, vulkan_built) = built_backends();
         let mut support = BackendSupport {
             cuda_built,
@@ -185,7 +191,28 @@ pub(crate) fn probe_support() -> BackendSupport {
             }
         }
         support
-    })
+    }
+}
+
+/// Register a backend that arrived after the process started.
+///
+/// ggml's registry is additive and the device list is read live, so a pack
+/// unpacked now can be made to count now — the alternative was telling the user
+/// to restart, which is a worse answer to "I just installed this" than doing the
+/// work. Registering twice is harmless: `gpu_devices` already dedupes by the
+/// name ggml gives each device, because a doubly-registered backend was an
+/// observed failure long before this.
+///
+/// Returns whether a CUDA device is visible afterwards, which is the only claim
+/// worth making to the caller.
+pub(crate) fn register_downloaded_backend() -> bool {
+    // The process-wide init has to have happened, or there is no registry to add
+    // to and no device list to read back.
+    if backend().is_err() {
+        return false;
+    }
+    load_downloaded_backend();
+    probe_support().cuda_present
 }
 
 /// One GPU as ggml sees it.
