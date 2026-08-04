@@ -38,13 +38,21 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const box = useRef<HTMLTextAreaElement | null>(null);
+  /// Whether anything has been sent since this meeting was opened.
+  ///
+  /// The history load is a replacement, and it can land after a question the
+  /// user did not wait for. That snapshot predates the write `chat_meeting`
+  /// makes, so applying it deletes the question from the screen — and then the
+  /// answer arrives with nothing above it.
+  const sent = useRef(false);
 
   useEffect(() => {
     let live = true;
+    sent.current = false;
     api
       .listChat(meetingId)
-      .then((rows) => live && setMessages(rows))
-      .catch(() => live && setMessages([]));
+      .then((rows) => live && !sent.current && setMessages(rows))
+      .catch(() => live && !sent.current && setMessages([]));
     return () => {
       live = false;
     };
@@ -92,6 +100,7 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
     setError(null);
     setSending(true);
     setAtBottom(true);
+    sent.current = true;
     // Shown before the round trip, and kept if it fails: the answer is what was
     // lost, not the question, and retyping it is a punishment for the model
     // being slow.
@@ -205,9 +214,15 @@ export function ChatPanel({ meetingId }: { meetingId: string }) {
             value={input}
             disabled={sending}
             onChange={(e) => setInput(e.target.value)}
+            aria-label={t("chat.placeholder")}
             onKeyDown={(e) => {
               // Enter sends, Shift+Enter breaks the line. The other way round
               // is defensible in an editor and wrong in a conversation.
+              //
+              // Not while an input method is composing, though: there Enter is
+              // how a candidate is chosen, and stealing it sends half a word in
+              // Japanese, Chinese or Korean.
+              if (e.nativeEvent.isComposing) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void send();
