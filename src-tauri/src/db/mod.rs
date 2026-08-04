@@ -152,6 +152,23 @@ impl Database {
                 UNIQUE(meeting_id, version)
             );
             CREATE INDEX IF NOT EXISTS idx_versions_meeting ON summary_versions(meeting_id);
+            -- What the user typed while the meeting was happening. Not
+            -- speech and not the model's: the person in the room knows the
+            -- spelling of a client's name and which two minutes to ignore, and
+            -- neither reaches the transcript on its own.
+            --
+            -- `at_ms` is the offset from the start of the recording, so a note
+            -- keeps its place against the transcript. Null for a note added
+            -- after the recording ended, which has no offset to keep.
+            CREATE TABLE IF NOT EXISTS context_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                at_ms INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_context_meeting ON context_notes(meeting_id);
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -514,6 +531,68 @@ impl Database {
                 chrono::Utc::now().to_rfc3339(),
                 meeting_id
             ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn add_context_note(
+        &self,
+        meeting_id: &str,
+        text: &str,
+        at_ms: Option<i64>,
+    ) -> Result<crate::domain::context::ContextNote, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let created_at = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO context_notes (meeting_id, text, at_ms, created_at) VALUES (?1,?2,?3,?4)",
+            params![meeting_id, text, at_ms, created_at],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(crate::domain::context::ContextNote {
+            id: conn.last_insert_rowid(),
+            text: text.to_string(),
+            at_ms,
+            created_at,
+        })
+    }
+
+    /// In the order they were written, which is the order they were meant in.
+    /// By `id` rather than by `at_ms`: a note added after the recording has no
+    /// offset, and sorting on a null would move it somewhere it never was.
+    pub fn list_context_notes(
+        &self,
+        meeting_id: &str,
+    ) -> Result<Vec<crate::domain::context::ContextNote>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, text, at_ms, created_at FROM context_notes
+                 WHERE meeting_id=?1 ORDER BY id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![meeting_id], |r| {
+                Ok(crate::domain::context::ContextNote {
+                    id: r.get(0)?,
+                    text: r.get(1)?,
+                    at_ms: r.get(2)?,
+                    created_at: r.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Scoped to the meeting as well as the id: the id arrives from the WebView,
+    /// and a note belonging to another meeting must not be deletable by guessing
+    /// a number.
+    pub fn delete_context_note(&self, meeting_id: &str, note_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM context_notes WHERE id=?1 AND meeting_id=?2",
+            params![note_id, meeting_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())

@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod capabilities;
 pub mod chat;
+pub mod context;
 pub mod cost;
 pub mod download;
 pub mod export;

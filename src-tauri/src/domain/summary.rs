@@ -256,11 +256,27 @@ pub fn language_name(locale: Locale) -> &'static str {
 /// answer into `summary` and persists two empty vectors. The headings are never
 /// shown — the cards title themselves from the catalog.
 pub fn build_summary_prompt(template: SummaryTemplate, transcript: &str, locale: Locale) -> String {
+    build_summary_prompt_with(template, transcript, locale, &[])
+}
+
+/// The same prompt, plus whatever the participant typed while it was happening.
+///
+/// The notes go after the transcript rather than before it. A model that reads
+/// an instruction first and the evidence second tends to answer the
+/// instruction; reading the meeting and then the corrections treats them as
+/// corrections, which is what they are.
+pub fn build_summary_prompt_with(
+    template: SummaryTemplate,
+    transcript: &str,
+    locale: Locale,
+    notes: &[crate::domain::context::ContextNote],
+) -> String {
     format!(
-        "{}\n\nRespond in markdown with sections:\n## Summary\n## Key points\n## Action items\n\nWrite all prose in {}.\nKeep the three headings exactly as written, in English: ## Summary, ## Key points, ## Action items.\n\nTranscript:\n{}",
+        "{}\n\nRespond in markdown with sections:\n## Summary\n## Key points\n## Action items\n\nWrite all prose in {}.\nKeep the three headings exactly as written, in English: ## Summary, ## Key points, ## Action items.\n\nTranscript:\n{}{}",
         template.system_prompt(),
         language_name(locale),
-        transcript.trim()
+        transcript.trim(),
+        crate::domain::context::notes_block(notes)
     )
 }
 
@@ -358,6 +374,36 @@ We discussed the roadmap.
         assert!(i.summary.contains("roadmap"));
         assert_eq!(i.key_points.len(), 2);
         assert_eq!(i.action_items.len(), 2);
+    }
+
+    #[test]
+    fn notes_reach_the_prompt_after_the_transcript() {
+        let notes = vec![crate::domain::context::ContextNote {
+            id: 1,
+            text: "Cliente = Acme".into(),
+            at_ms: Some(5_000),
+            created_at: "2026-08-04T00:00:00Z".into(),
+        }];
+        let p = build_summary_prompt_with(
+            SummaryTemplate::General,
+            "falamos do contrato",
+            Locale::PtBr,
+            &notes,
+        );
+        assert!(p.contains("Cliente = Acme"), "{p}");
+        assert!(
+            p.find("falamos do contrato") < p.find("Cliente = Acme"),
+            "notes must follow the transcript"
+        );
+    }
+
+    /// A meeting with no notes must read exactly as it did before, or every
+    /// existing summary silently changes shape.
+    #[test]
+    fn no_notes_leaves_the_prompt_untouched() {
+        let plain = build_summary_prompt(SummaryTemplate::General, "oi", Locale::En);
+        let with = build_summary_prompt_with(SummaryTemplate::General, "oi", Locale::En, &[]);
+        assert_eq!(plain, with);
     }
 
     #[test]

@@ -113,6 +113,15 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface ContextNote {
+  id: number;
+  text: string;
+  /// Offset from the start of the recording. Null for a note written after it
+  /// stopped, which has no position to hold against the transcript.
+  at_ms: number | null;
+  created_at: string;
+}
+
 export interface MeetingInsights {
   summary: string;
   key_points: string[];
@@ -282,6 +291,14 @@ export const api = {
   chatMeeting: (id: string, question: string) =>
     invoke<ChatMessage>("chat_meeting", { id, question }),
   listChat: (id: string) => invoke<ChatMessage[]>("list_chat", { id }),
+  /// The note comes back stamped by the backend: it knows where the recording
+  /// is, and the window only knows what it painted.
+  addContextNote: (id: string, text: string) =>
+    invoke<ContextNote>("add_context_note", { id, text }),
+  listContextNotes: (id: string) =>
+    invoke<ContextNote[]>("list_context_notes", { id }),
+  deleteContextNote: (id: string, noteId: number) =>
+    invoke<void>("delete_context_note", { id, noteId }),
   listModels: () => invoke<ModelInfo[]>("list_models_cmd"),
   // No URL parameter: the backend resolves it from its own catalog and verifies
   // the artifact's checksum before it reaches whisper.cpp / llama.cpp.
