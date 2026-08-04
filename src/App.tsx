@@ -41,6 +41,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CopyButton } from "./components/CopyButton";
 import { SummaryHistory } from "./components/SummaryHistory";
 import { ChatPanel } from "./components/ChatPanel";
+import { SummarizeButton } from "./components/SummarizeButton";
 import { ActionItems } from "./components/ActionItems";
 import { NotesPanel } from "./components/NotesPanel";
 import { EditableLine } from "./components/EditableLine";
@@ -1218,9 +1219,10 @@ function AppShell({
                         the flex algorithm resolves the overflow by squeezing the
                         buttons instead of truncating the heading. */}
                     <div className="flex shrink-0 items-center gap-2">
-                      <Button size="xs" onClick={() => handleSummarize("general")}>
-                        <Sparkles size={16} /> {t("action.summarize")}
-                      </Button>
+                      <SummarizeButton
+                        disabled={busy}
+                        onSummarize={handleSummarize}
+                      />
                       <div className="flex items-center gap-1 rounded-md border border-border px-1">
                         {(["md", "pdf", "docx"] as const).map((format) => (
                           <Button
