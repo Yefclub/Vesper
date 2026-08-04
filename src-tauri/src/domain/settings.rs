@@ -19,6 +19,10 @@ pub enum LlmProvider {
     Local,
     #[serde(rename = "openrouter", alias = "open_router")]
     OpenRouter,
+    /// A server the user runs: Ollama, LM Studio, vLLM, an internal proxy.
+    /// Same protocol as OpenRouter, different address and nobody billing.
+    #[serde(rename = "openai_compatible", alias = "local_endpoint")]
+    OpenAiCompatible,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -32,6 +36,13 @@ pub struct AppSettings {
     pub local_llm_model: String,
     pub reasoning_enabled: bool,
     pub auto_summarize: bool,
+    /// Base URL of the OpenAI-compatible server, e.g. `http://localhost:11434/v1`.
+    /// Checked by `domain::endpoint` before it is used, never on the way in: a
+    /// settings file written by an older build must still load.
+    #[serde(default)]
+    pub endpoint_base_url: String,
+    #[serde(default)]
+    pub endpoint_model: String,
     /// Transcription language hint (`auto`, `en`, `pt`, …)
     pub language: String,
     /// UI locale: `en` | `pt-BR`
@@ -94,6 +105,10 @@ impl Default for AppSettings {
             local_llm_model: "qwen2.5-0.5b".into(),
             reasoning_enabled: false,
             auto_summarize: true,
+            // Ollama's own default, which is the server most people already
+            // have running.
+            endpoint_base_url: "http://localhost:11434/v1".into(),
+            endpoint_model: String::new(),
             language: "auto".into(),
             ui_locale: "en".into(),
             onboarding_complete: false,

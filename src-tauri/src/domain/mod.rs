@@ -4,6 +4,7 @@ pub mod chat;
 pub mod context;
 pub mod cost;
 pub mod download;
+pub mod endpoint;
 pub mod export;
 pub mod gate;
 pub mod i18n;

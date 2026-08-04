@@ -20,6 +20,15 @@ export const PROVIDERS: Choice[] = [
   { value: "openrouter", label: "OpenRouter" },
 ];
 
+/// The same two, plus a server the user runs. Separate from `PROVIDERS`
+/// because that list is also the speech-to-text one, and there is no
+/// OpenAI-compatible transcription path — offering it there would be a control
+/// that answers and then fails.
+export const LLM_PROVIDERS: Choice[] = [
+  ...PROVIDERS,
+  { value: "openai_compatible", label: "Ollama / LM Studio" },
+];
+
 interface Props {
   /** Rendered above the control. Omitted where a heading already names it. */
   label?: string;
