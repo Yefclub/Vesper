@@ -4,8 +4,7 @@
 
 use crate::domain::backend::{built_backends, resolve_llm_backend, BackendSupport, ComputeBackend};
 use crate::domain::chat::{offline_answer, ChatMessage};
-use crate::domain::i18n::Locale;
-use crate::domain::summary::{extractive_summary, MeetingInsights, SummaryTemplate};
+use crate::domain::summary::{extractive_summary, MeetingInsights};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -23,6 +22,22 @@ use std::sync::OnceLock;
 /// It registers the ggml backends and installs a log handler; calling it twice is
 /// an error in the C library, so it lives here rather than beside each load.
 static BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
+
+/// Serialises every touch of ggml's backend registry.
+///
+/// The registry is a C++ vector with no locking of its own. That was harmless
+/// while it was only ever written once at startup, and stopped being harmless
+/// when a downloaded pack could register a backend mid-session: a download
+/// finishing while a summary enumerates devices is a native data race, and the
+/// symptom would be a process that dies with no Rust frame to blame.
+///
+/// Held across registration, enumeration and model load — the three places that
+/// read or write it — and never across generation, which does not touch it.
+static REGISTRY: Mutex<()> = Mutex::new(());
+
+fn registry() -> parking_lot::MutexGuard<'static, ()> {
+    REGISTRY.lock()
+}
 
 fn backend() -> Result<&'static LlamaBackend, String> {
     BACKEND
@@ -110,8 +125,11 @@ fn load_downloaded_backend() {
         let mut entries = vec![dir.clone()];
         entries.extend(std::env::split_paths(&path));
         match std::env::join_paths(entries) {
-            // SAFETY: called once, from inside the `OnceLock` that guards the
-            // backend, before any thread can be looking at the environment.
+            // SAFETY: the callers are the backend `OnceLock` and the download
+            // that has just finished unpacking, both of which run on one thread
+            // with no other reader of the environment in flight. Prepending the
+            // same directory twice is harmless — the loader takes the first
+            // match — so the second caller does not have to check.
             Ok(joined) => unsafe { std::env::set_var("PATH", joined) },
             Err(e) => {
                 tracing::warn!("could not put the CUDA pack on PATH: {e}");
@@ -151,11 +169,22 @@ fn holds_a_backend(dir: &Path) -> bool {
 /// and exposes no equivalent enumeration, so it reads this one — the same
 /// machine and the same drivers, seen through the copy that can be asked.
 ///
-/// Memoised: the answer cannot change while the process runs, and probing it is
-/// a walk over every registered backend.
+/// Read live rather than memoised. It used to be cached on the grounds that the
+/// answer could not change while the process runs — which stopped being true the
+/// moment a backend could arrive by download. A user who fetched the CUDA pack
+/// was told, for the rest of that session, that the card they had just paid 600
+/// MB to reach was unreachable. The probe is a walk over the registered
+/// devices; that is cheaper than being wrong until the next launch.
 pub(crate) fn probe_support() -> BackendSupport {
-    static SUPPORT: OnceLock<BackendSupport> = OnceLock::new();
-    *SUPPORT.get_or_init(|| {
+    // Before the lock: initialising the backend registers backends itself, and
+    // the `OnceLock` already serialises that against every other caller.
+    let ready = backend().is_ok();
+    let _guard = registry();
+    probe_support_locked(ready)
+}
+
+fn probe_support_locked(backend_ready: bool) -> BackendSupport {
+    {
         let (cuda_built, vulkan_built) = built_backends();
         let mut support = BackendSupport {
             cuda_built,
@@ -165,7 +194,7 @@ pub(crate) fn probe_support() -> BackendSupport {
         // No initialised backend means no device list to read. Claiming a GPU
         // from the build flags alone would be a guess, and the cost of guessing
         // wrong is a load that fails instead of a transcript that is slow.
-        if backend().is_err() {
+        if !backend_ready {
             return support;
         }
         for device in llama_cpp_2::list_llama_ggml_backend_devices() {
@@ -185,7 +214,31 @@ pub(crate) fn probe_support() -> BackendSupport {
             }
         }
         support
-    })
+    }
+}
+
+/// Register a backend that arrived after the process started.
+///
+/// ggml's registry is additive and the device list is read live, so a pack
+/// unpacked now can be made to count now — the alternative was telling the user
+/// to restart, which is a worse answer to "I just installed this" than doing the
+/// work. Registering twice is harmless: `gpu_devices` already dedupes by the
+/// name ggml gives each device, because a doubly-registered backend was an
+/// observed failure long before this.
+///
+/// Returns whether a CUDA device is visible afterwards, which is the only claim
+/// worth making to the caller.
+pub(crate) fn register_downloaded_backend() -> bool {
+    // The process-wide init has to have happened, or there is no registry to add
+    // to and no device list to read back. Outside the lock, because that init
+    // registers backends of its own and the `OnceLock` is what orders it.
+    if backend().is_err() {
+        return false;
+    }
+    let _guard = registry();
+    load_downloaded_backend();
+    // The locked form: taking the guard again here would deadlock.
+    probe_support_locked(true).cuda_present
 }
 
 /// One GPU as ggml sees it.
@@ -214,6 +267,7 @@ pub(crate) fn gpu_devices() -> Vec<GpuDevice> {
     if backend().is_err() {
         return Vec::new();
     }
+    let _guard = registry();
     let mut seen = std::collections::HashSet::new();
     llama_cpp_2::list_llama_ggml_backend_devices()
         .into_iter()
@@ -296,6 +350,9 @@ fn load_model(
     model_path: &Path,
     chosen: ComputeBackend,
 ) -> Result<(LlamaModel, ComputeBackend), String> {
+    // Loading picks devices out of the same registry a download can be writing
+    // to. Held over the load only — generation afterwards never reads it.
+    let _guard = registry();
     let cpu = || {
         LlamaModel::load_from_file(backend, model_path, &LlamaModelParams::default())
             .map_err(|e| format!("llama load failed: {e}"))
@@ -320,6 +377,26 @@ fn load_model(
 }
 
 static LLM_CACHE: OnceLock<Mutex<Option<(String, LlamaModel)>>> = OnceLock::new();
+
+/// Drop the resident model.
+///
+/// The cache holds one set of weights for as long as the process lives, which is
+/// what makes a second summary fast. It also means a user who switches to a
+/// smaller model — usually because the larger one does not comfortably fit — is
+/// still carrying the larger one until something happens to reload. Switching
+/// away from local models entirely leaves it resident with nothing that will
+/// ever ask for it again.
+///
+/// Called when the settings that decide which weights are wanted change, not on
+/// every save: dropping after each summary would trade the whole point of the
+/// cache for memory nobody was short of.
+pub(crate) fn release_model() {
+    let mut cache = llm_cache().lock();
+    if cache.is_some() {
+        tracing::info!("releasing the resident local model");
+        *cache = None;
+    }
+}
 
 fn llm_cache() -> &'static Mutex<Option<(String, LlamaModel)>> {
     LLM_CACHE.get_or_init(|| Mutex::new(None))
@@ -360,16 +437,21 @@ impl LocalLlm {
 
     pub fn summarize(
         &self,
-        transcript: &str,
-        template: SummaryTemplate,
-        locale: Locale,
+        subject: crate::domain::context::SummarySubject<'_>,
         model_id: &str,
         backend_preference: &str,
         reasoning: bool,
     ) -> Result<MeetingInsights, String> {
+        let crate::domain::context::SummarySubject {
+            transcript,
+            template,
+            locale,
+            notes,
+        } = subject;
         if self.is_ready(model_id) {
-            let mut prompt =
-                crate::domain::summary::build_summary_prompt(template, transcript, locale);
+            let mut prompt = crate::domain::summary::build_summary_prompt_with(
+                template, transcript, locale, notes,
+            );
             if !reasoning {
                 // Qwen3's own switch, and inert for a model that has no such
                 // mode. Thinking is not free: it is spent out of the same token
@@ -635,8 +717,23 @@ pub fn run_llama(
 }
 
 #[cfg(test)]
+mod cache {
+    use super::*;
+
+    /// Releasing an empty cache is what happens on most saves, and it must not
+    /// be the thing that panics on a machine that never loaded a model.
+    #[test]
+    fn releasing_nothing_is_allowed() {
+        release_model();
+        assert!(llm_cache().lock().is_none());
+    }
+}
+
+#[cfg(test)]
 mod gpu_bench {
     use super::*;
+    use crate::domain::i18n::Locale;
+    use crate::domain::summary::SummaryTemplate;
 
     /// Generate from the local model on each backend in turn, and print what
     /// each one cost.
@@ -708,6 +805,8 @@ mod gpu_bench {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::i18n::Locale;
+    use crate::domain::summary::SummaryTemplate;
     use tempfile::tempdir;
 
     #[test]
@@ -715,9 +814,12 @@ mod tests {
         let llm = LocalLlm::with_models_dir(tempdir().unwrap().path().to_path_buf());
         let i = llm
             .summarize(
-                "Me: we need to ship auth. Others: agreed. TODO write tests.",
-                SummaryTemplate::General,
-                Locale::En,
+                crate::domain::context::SummarySubject {
+                    transcript: "Me: we need to ship auth. Others: agreed. TODO write tests.",
+                    template: SummaryTemplate::General,
+                    locale: Locale::En,
+                    notes: &[],
+                },
                 "llama32-1b",
                 "cpu",
                 false,
@@ -732,9 +834,12 @@ mod tests {
         llm.soft_fallback = false;
         let err = llm
             .summarize(
-                "hi",
-                SummaryTemplate::General,
-                Locale::En,
+                crate::domain::context::SummarySubject {
+                    transcript: "hi",
+                    template: SummaryTemplate::General,
+                    locale: Locale::En,
+                    notes: &[],
+                },
                 "llama32-1b",
                 "cpu",
                 false,

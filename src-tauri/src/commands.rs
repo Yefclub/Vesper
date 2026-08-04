@@ -169,6 +169,21 @@ fn normalised_key(key: &Option<String>) -> Option<String> {
 /// Both callers need the same three steps in the same order — restore a redacted
 /// key, put the key in the keychain, then persist everything else — and the
 /// keychain step is easy to forget when it is copied by hand.
+/// Which local weights the settings are asking for, if any.
+///
+/// `None` for a cloud provider: nothing local is wanted at all, which is a
+/// different state from wanting a different local model and has to compare
+/// unequal to it.
+fn wanted_local_weights(settings: &AppSettings) -> Option<(String, String)> {
+    match settings.llm_provider {
+        LlmProvider::Local => Some((
+            settings.local_llm_model.clone(),
+            settings.compute_backend.clone(),
+        )),
+        _ => None,
+    }
+}
+
 fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSettings, String> {
     // The front end only ever sees a redacted key, so a redacted value coming
     // back means "unchanged", not "set it to these characters".
@@ -183,6 +198,13 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
             normalised_key(&current.openrouter_api_key),
             current.openrouter_llm_model.clone(),
         )
+    };
+    // Which weights are wanted, before the save decides otherwise, and whether
+    // summaries were being produced without being asked for. Both compared after
+    // the write so a change frees what the old answer was holding.
+    let (previously_wanted, previously_automatic) = {
+        let current = state.settings.lock();
+        (wanted_local_weights(&current), current.auto_summarize)
     };
     settings.validate_models().map_err(|e| e.to_string())?;
     // The theme is not this command's to write. `set_theme` owns it, and the
@@ -231,6 +253,21 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
 
     state.db.save_settings_with(&settings, home)?;
     *state.settings.lock() = settings.clone();
+    // A model nobody is going to ask for again should not stay resident. This
+    // fires when the user picks a different local model — usually a smaller one,
+    // and usually because the larger did not comfortably fit — or leaves local
+    // models behind for a cloud provider. Both used to keep the old weights in
+    // memory until something happened to reload, which on the machine that most
+    // needed the room was exactly the wrong answer.
+    // Turning auto-summarize off is the second trigger, and it is the one the
+    // settings screen makes a promise about: it says no language model is
+    // loaded, and a model already resident from an earlier summary would make
+    // that a lie. Asking for a summary by hand afterwards loads it again, which
+    // is the point — it happens when the user asks.
+    let stopped_summarising = previously_automatic && !settings.auto_summarize;
+    if stopped_summarising || wanted_local_weights(&settings) != previously_wanted {
+        crate::llm::local::release_model();
+    }
     Ok(settings)
 }
 
@@ -482,14 +519,36 @@ pub fn start_recording(
     let title_locked = given.is_some();
     let title = given.unwrap_or_else(|| fallback_title(chrono::Local::now()));
     let audio_path = recordings_dir().join(format!("{id}.wav"));
-    state
-        .recorder
-        .start(
-            audio_path.clone(),
-            settings.mic_device_id.clone(),
-            settings.system_device_id.clone(),
-        )
-        .map_err(|e| e.to_string())?;
+    // Claimed before the capture opens, not after. Between those two points the
+    // recorder answers "yes, recording" while this still named the previous
+    // meeting, and a context note landing in that gap would be stamped with this
+    // recording's clock and filed against the last one.
+    //
+    // The claim is also what makes two overlapping starts safe. The check at the
+    // top of this command reads a flag the recorder only sets once capture is
+    // open, so two calls can both pass it; only one can find this empty.
+    {
+        let mut active = state.active_meeting.lock();
+        if active.is_some() {
+            return Err("already recording".into());
+        }
+        *active = Some(id.clone());
+    }
+    if let Err(e) = state.recorder.start(
+        audio_path.clone(),
+        settings.mic_device_id.clone(),
+        settings.system_device_id.clone(),
+    ) {
+        // Give the claim back, and only if it is still ours — the same
+        // compare-before-clear the stop path uses. A meeting that never started
+        // recording must not be left owning the recorder, and a meeting that
+        // did must not have its claim taken away by someone else's failure.
+        let mut active = state.active_meeting.lock();
+        if active.as_deref() == Some(id.as_str()) {
+            *active = None;
+        }
+        return Err(e.to_string());
+    }
     let mut status = MeetingStatus::Idle;
     status = status
         .transition(MeetingEvent::StartRecording)
@@ -513,7 +572,6 @@ pub fn start_recording(
     };
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
-    *state.active_meeting.lock() = Some(id);
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
     spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
@@ -709,6 +767,7 @@ pub async fn stop_recording(
                 &settings,
                 &meeting.transcript_text,
                 SummaryTemplate::General,
+                &state.db.list_context_notes(&id).unwrap_or_default(),
             )
             .await
         {
@@ -917,7 +976,14 @@ pub async fn summarize_meeting(
     let _flight = state.refine_flight.lock().await;
     let (insights, cost) = state
         .llm
-        .summarize(&settings, &m.transcript_text, tpl)
+        .summarize(
+            &settings,
+            &m.transcript_text,
+            tpl,
+            // Empty on failure rather than refusing to summarise: a note that
+            // cannot be read is a worse summary, not a lost meeting.
+            &state.db.list_context_notes(&id).unwrap_or_default(),
+        )
         .await?;
     // The summary being replaced has to become a version before it is gone.
     // Without this, re-summarising a meeting nobody had opened the history of
@@ -954,15 +1020,22 @@ pub async fn chat_meeting(
         .get_meeting(&id)?
         .ok_or_else(|| "meeting not found".to_string())?;
     let history = state.db.list_chat(&id)?;
+    // The same corrections the summary gets. A question about a client's name
+    // should be answered from what the participant typed, not from what the
+    // transcriber heard.
+    let notes = state.db.list_context_notes(&id).unwrap_or_default();
     let settings = state.settings.lock().clone();
     state.db.add_chat(&id, "user", &question)?;
     let (answer, cost) = state
         .llm
         .chat(
             &settings,
-            &meeting.title,
-            &meeting.transcript_text,
-            meeting.summary.as_deref(),
+            crate::domain::context::ChatSubject {
+                meeting_title: &meeting.title,
+                transcript: &meeting.transcript_text,
+                summary: meeting.summary.as_deref(),
+                notes: &notes,
+            },
             &history,
             &question,
         )
@@ -975,6 +1048,59 @@ pub async fn chat_meeting(
         role: "assistant".into(),
         content: answer,
     })
+}
+
+/// A note the participant typed while the meeting was happening.
+///
+/// `at_ms` comes from the recorder rather than from the caller: the WebView
+/// knows what it painted, not where the recording actually is, and a note that
+/// claims a position the audio never had is worse than one with no position.
+#[tauri::command]
+pub fn add_context_note(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    text: String,
+) -> Result<crate::domain::context::ContextNote, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("a note needs something in it".into());
+    }
+    // Bounded because it reaches a prompt. Not a security boundary — the person
+    // typing owns the machine — but a megabyte pasted here would push the
+    // transcript out of the model's window and quietly ruin the summary.
+    if text.chars().count() > 2_000 {
+        return Err("that note is too long".into());
+    }
+    // The note goes to the meeting being recorded, and to no other. The id
+    // arrives from the WebView while the stamp comes from the recorder, so
+    // without this a caller could attach a note carrying this recording's
+    // timestamp to any meeting in the database — and notes are told to win over
+    // the transcript, which makes that a way to write authoritative context
+    // into somebody else's meeting.
+    let active = state.active_meeting.lock().clone();
+    match active {
+        Some(active) if active == id && state.recorder.is_recording() => {}
+        _ => return Err("context notes belong to the meeting being recorded".into()),
+    }
+    let at_ms = Some(state.recorder.elapsed_ms() as i64);
+    state.db.add_context_note(&id, text, at_ms)
+}
+
+#[tauri::command]
+pub fn list_context_notes(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<crate::domain::context::ContextNote>, String> {
+    state.db.list_context_notes(&id)
+}
+
+#[tauri::command]
+pub fn delete_context_note(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    note_id: i64,
+) -> Result<(), String> {
+    state.db.delete_context_note(&id, note_id)
 }
 
 #[tauri::command]

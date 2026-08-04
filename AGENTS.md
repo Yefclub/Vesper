@@ -76,6 +76,8 @@ Rodar, nesta ordem, e **colar a saída** no relato — afirmação sem evidênci
 
 Mudou hook ou skill: `sh .claude/hooks/test-hooks.sh` também.
 
+Mexeu em `.github/workflows/`: `npm run preflight` também. Ele checa as quatro coisas que já custaram um build de matriz inteiro cada uma — versão que o MSI recusa, codename de distro escrito à mão em vez de derivado do runner, empacotamento de AppImage sem `LD_LIBRARY_PATH` para as nossas `.so`, e chave YAML duplicada. `python scripts/check-workflows.py --self-test` verifica que as regras ainda disparam; duas delas já nasceram quebradas passando limpo.
+
 Vermelho em qualquer etapa = PR não sai.
 
 ## Como escrever a mudança

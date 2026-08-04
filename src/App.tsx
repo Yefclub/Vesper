@@ -40,8 +40,10 @@ import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CopyButton } from "./components/CopyButton";
 import { SummaryHistory } from "./components/SummaryHistory";
+import { ChatPanel } from "./components/ChatPanel";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
+import { ContextBar } from "./components/ContextBar";
 import { RecordTransport } from "./components/RecordTransport";
 import { Sidebar } from "./components/Sidebar";
 import { WindowControls } from "./components/WindowControls";
@@ -49,7 +51,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
 
-type Tab = "transcript" | "summary";
+type Tab = "transcript" | "summary" | "chat";
 
 /** Move the window, restoring it first if it is maximised.
  *
@@ -1245,6 +1247,7 @@ function AppShell({
                     items={[
                       { id: "transcript", label: t("tab.transcript") },
                       { id: "summary", label: t("tab.summary") },
+                      { id: "chat", label: t("tab.chat") },
                     ]}
                   />
                   {tab === "transcript" && transcript.segments?.length ? (
@@ -1277,7 +1280,15 @@ function AppShell({
                   id={`content-panel-${tab}`}
                   role="tabpanel"
                   aria-labelledby={`content-tab-${tab}`}
-                  className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-4"
+                  // Chat owns its own scrolling: the composer has to stay at
+                  // the foot of the pane, and a scroller wrapping a scroller
+                  // puts it wherever the conversation happens to end. The other
+                  // two tabs are documents and scroll as one.
+                  className={`min-h-0 flex-1 px-6 pb-6 pt-4 ${
+                    tab === "chat"
+                      ? "flex flex-col overflow-hidden"
+                      : "overflow-y-auto"
+                  }`}
                 >
                   <AnimatePresence mode="wait">
                     {tab === "transcript" && (
@@ -1485,6 +1496,20 @@ function AppShell({
                         )}
                       </motion.div>
                     )}
+
+                    {tab === "chat" && (
+                      // Keyed by the meeting so switching rows starts the
+                      // conversation over rather than showing the previous
+                      // meeting's history until the fetch lands.
+                      <motion.div
+                        key="chat"
+                        {...fadeRise}
+                        className="flex min-h-0 flex-1 flex-col"
+                        data-testid="chat-panel"
+                      >
+                        <ChatPanel key={selected.id} meetingId={selected.id} />
+                      </motion.div>
+                    )}
                   </AnimatePresence>
                 </div>
               </>
@@ -1550,6 +1575,17 @@ function AppShell({
                 true the instant recording begins — which is precisely when the
                 control has to still be there. It changes into pause and stop
                 instead of vanishing. */}
+            {/* Above the dock and only while recording: it is context about
+                what is being said now, and after Stop the meeting's own screen
+                is where notes belong. */}
+            {status?.recording && status.meeting_id && (
+              // The meeting being recorded, not the one on screen. The sidebar
+              // stays live during a recording, so those are not the same thing
+              // — and a note stamped with this recording's clock, filed against
+              // a meeting from last week, would be evidence of something that
+              // never happened.
+              <ContextBar meetingId={status.meeting_id} />
+            )}
             <AnimatePresence>
               {(!selected || status?.recording) && (
                 <RecordDock

@@ -444,6 +444,11 @@ where
                         false,
                     ));
                     unpack_backend(&dest)?;
+                    // Now, not at the next launch. ggml takes a new backend at
+                    // any point and the device list is read live, so the card
+                    // becomes selectable in the settings panel the user is
+                    // already looking at.
+                    crate::llm::local::register_downloaded_backend();
                 }
                 on_progress(DownloadProgress::phase(
                     model_id,
@@ -574,6 +579,7 @@ where
             false,
         ));
         unpack_backend(&dest)?;
+        crate::llm::local::register_downloaded_backend();
         // The archive has done its job. Keeping it doubles what the pack costs
         // on disk — 637 MB of container beside the 637 MB it contained — and
         // nothing reads it again: the marker records the digest and the

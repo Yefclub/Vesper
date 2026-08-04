@@ -24,7 +24,7 @@ import { backdropFade, slideInRight } from "../lib/motion";
 import { applyTheme, currentTheme } from "../lib/theme";
 import { Button, FOCUS } from "./Button";
 import { ModelPicker } from "./ModelPicker";
-import { LOCALES, PROVIDERS, Segmented } from "./Segmented";
+import { LLM_PROVIDERS, LOCALES, PROVIDERS, Segmented } from "./Segmented";
 import { Tabs } from "./Tabs";
 
 /** Everything a Tab press can land on, minus the roving members of a list —
@@ -223,6 +223,10 @@ export function SettingsPanel({
           un();
         }
         await onRefreshModels();
+        // A compute backend changes what this machine can reach, and the answer
+        // is read live on the Rust side now. Asking again is what turns a
+        // finished download into a selectable option without a restart.
+        api.capabilities().then(setCaps).catch(() => null);
         setProgress(null);
         adoptIfDraftUnusable(id);
       } catch (e) {
@@ -509,8 +513,31 @@ export function SettingsPanel({
                       llm_provider: v as AppSettings["llm_provider"],
                     }))
                   }
-                  options={PROVIDERS}
+                  options={LLM_PROVIDERS}
                 />
+                {draft.llm_provider === "openai_compatible" && (
+                  <>
+                    <Field
+                      label={t("settings.endpoint_url")}
+                      value={draft.endpoint_base_url}
+                      onChange={(v) =>
+                        setDraft((d) => ({ ...d, endpoint_base_url: v }))
+                      }
+                      placeholder="http://localhost:11434/v1"
+                    />
+                    <Field
+                      label={t("settings.endpoint_model")}
+                      value={draft.endpoint_model}
+                      onChange={(v) =>
+                        setDraft((d) => ({ ...d, endpoint_model: v }))
+                      }
+                      placeholder="llama3.2"
+                    />
+                    <p className="text-xs leading-relaxed text-fg-muted">
+                      {t("settings.endpoint_hint")}
+                    </p>
+                  </>
+                )}
                 {draft.llm_provider === "local" ? (
                   <>
                     {readyLlm.length ? (
@@ -607,6 +634,14 @@ export function SettingsPanel({
                     setDraft((d) => ({ ...d, auto_summarize: v }))
                   }
                 />
+                {/* Only while it is off. A promise about what the app does not
+                    do is worth reading in the state where it applies, and is
+                    noise in the state where it does not. */}
+                {!draft.auto_summarize && (
+                  <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                    {t("settings.transcription_only")}
+                  </p>
+                )}
               </section>
 
               {/* Only where there is an NVIDIA card the current build cannot
@@ -636,14 +671,22 @@ export function SettingsPanel({
               )}
 
               {/* The offer disappearing was the only sign the download had
-                  worked, and it was the wrong one: ggml registers its backends
-                  once per process, before this screen ever opens, so a pack
-                  that arrives now is used from the next launch. Without this
-                  line the user pays for 600 MB, sees the row vanish, and
-                  summaries carry on running on the CPU with nothing said. */}
-              {cudaPack?.ready && caps?.cuda_device_name && (
+                  worked. This says so, and says it in the present tense: the
+                  pack is registered as soon as it is unpacked, so by the time
+                  this renders the card is already the one doing the work. */}
+              {/* `cuda_available`, not `cuda_device_name`: the second only
+                  says nvidia-smi saw a card, which stays true when the pack
+                  failed to register against an unsupported driver. And not
+                  while the user has pinned the CPU — the sentence claims where
+                  the work happens, and there it would be wrong. */}
+              {cudaPack?.ready &&
+                caps?.cuda_available &&
+                draft.compute_backend !== "cpu" && (
                 <p className="rounded-md border border-border bg-surface-2 p-3 text-xs leading-relaxed text-fg-muted">
-                  {t("cuda.installed")}
+                  {t("cuda.installed").replace(
+                    "{gpu}",
+                    caps.cuda_device_name ?? "",
+                  )}
                 </p>
               )}
 
