@@ -379,6 +379,26 @@ fn load_model(
 
 static LLM_CACHE: OnceLock<Mutex<Option<(String, LlamaModel)>>> = OnceLock::new();
 
+/// Drop the resident model.
+///
+/// The cache holds one set of weights for as long as the process lives, which is
+/// what makes a second summary fast. It also means a user who switches to a
+/// smaller model — usually because the larger one does not comfortably fit — is
+/// still carrying the larger one until something happens to reload. Switching
+/// away from local models entirely leaves it resident with nothing that will
+/// ever ask for it again.
+///
+/// Called when the settings that decide which weights are wanted change, not on
+/// every save: dropping after each summary would trade the whole point of the
+/// cache for memory nobody was short of.
+pub(crate) fn release_model() {
+    let mut cache = llm_cache().lock();
+    if cache.is_some() {
+        tracing::info!("releasing the resident local model");
+        *cache = None;
+    }
+}
+
 fn llm_cache() -> &'static Mutex<Option<(String, LlamaModel)>> {
     LLM_CACHE.get_or_init(|| Mutex::new(None))
 }
@@ -690,6 +710,19 @@ pub fn run_llama(
             .map_err(|e| format!("llama decode: {e}"))?;
     }
     Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
+#[cfg(test)]
+mod cache {
+    use super::*;
+
+    /// Releasing an empty cache is what happens on most saves, and it must not
+    /// be the thing that panics on a machine that never loaded a model.
+    #[test]
+    fn releasing_nothing_is_allowed() {
+        release_model();
+        assert!(llm_cache().lock().is_none());
+    }
 }
 
 #[cfg(test)]
