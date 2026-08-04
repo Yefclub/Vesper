@@ -41,6 +41,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CopyButton } from "./components/CopyButton";
 import { SummaryHistory } from "./components/SummaryHistory";
 import { ChatPanel } from "./components/ChatPanel";
+import { NotesPanel } from "./components/NotesPanel";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { ContextBar } from "./components/ContextBar";
@@ -51,7 +52,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
 
-type Tab = "transcript" | "summary" | "chat";
+type Tab = "transcript" | "summary" | "notes" | "chat";
 
 /** Move the window, restoring it first if it is maximised.
  *
@@ -1247,6 +1248,7 @@ function AppShell({
                     items={[
                       { id: "transcript", label: t("tab.transcript") },
                       { id: "summary", label: t("tab.summary") },
+                      { id: "notes", label: t("tab.notes") },
                       { id: "chat", label: t("tab.chat") },
                     ]}
                   />
@@ -1494,6 +1496,17 @@ function AppShell({
                             }
                           />
                         )}
+                      </motion.div>
+                    )}
+
+                    {tab === "notes" && (
+                      <motion.div
+                        key="notes"
+                        {...fadeRise}
+                        className="mx-auto max-w-pane"
+                        data-testid="notes-panel"
+                      >
+                        <NotesPanel key={selected.id} meetingId={selected.id} />
                       </motion.div>
                     )}
 
