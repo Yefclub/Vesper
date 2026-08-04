@@ -18,6 +18,44 @@ impl LlmService {
         }
     }
 
+    /// The client, key and model for whichever remote provider is selected.
+    ///
+    /// Both speak OpenAI's chat-completions protocol, so every call site wants
+    /// the same three things and differs only in where they came from. The
+    /// address is validated here rather than when it was typed: a settings file
+    /// written by an older build, or edited by hand, must not be able to send a
+    /// transcript somewhere the rule would have refused.
+    fn remote_for(
+        &self,
+        settings: &AppSettings,
+    ) -> Result<(OpenRouterLlm, String, String), String> {
+        match settings.llm_provider {
+            LlmProvider::OpenAiCompatible => {
+                let base =
+                    crate::domain::endpoint::validate_endpoint_url(&settings.endpoint_base_url)
+                        .map_err(|e| e.to_string())?;
+                if settings.endpoint_model.trim().is_empty() {
+                    return Err("choose a model on the endpoint".into());
+                }
+                Ok((
+                    OpenRouterLlm::at(base),
+                    String::new(),
+                    settings.endpoint_model.clone(),
+                ))
+            }
+            _ => {
+                settings
+                    .require_openrouter_key()
+                    .map_err(|e| e.to_string())?;
+                Ok((
+                    self.remote.clone(),
+                    settings.openrouter_api_key.clone().unwrap_or_default(),
+                    settings.openrouter_llm_model.clone(),
+                ))
+            }
+        }
+    }
+
     pub async fn summarize(
         &self,
         settings: &AppSettings,
@@ -54,14 +92,12 @@ impl LlmService {
                 .map_err(|e| e.to_string())?
                 .map(|insights| (insights, None))
             }
-            LlmProvider::OpenRouter => {
-                settings
-                    .require_openrouter_key()
-                    .map_err(|e| e.to_string())?;
-                self.remote
+            LlmProvider::OpenRouter | LlmProvider::OpenAiCompatible => {
+                let (client, key, model) = self.remote_for(settings)?;
+                client
                     .summarize(
-                        settings.openrouter_api_key.as_deref().unwrap_or(""),
-                        &settings.openrouter_llm_model,
+                        &key,
+                        &model,
                         crate::domain::context::SummarySubject {
                             transcript,
                             template,
@@ -102,19 +138,15 @@ impl LlmService {
                     .map_err(|e| e.to_string())?
                     .map(|title| (title, None))
             }
-            LlmProvider::OpenRouter => {
-                settings
-                    .require_openrouter_key()
-                    .map_err(|e| e.to_string())?;
+            LlmProvider::OpenRouter | LlmProvider::OpenAiCompatible => {
+                let (client, key, model) = self.remote_for(settings)?;
                 let messages = vec![ChatMessage {
                     role: "user".into(),
                     content: prompt,
                 }];
-                self.remote
+                client
                     .complete(
-                        settings.openrouter_api_key.as_deref().unwrap_or(""),
-                        &settings.openrouter_llm_model,
-                        &messages,
+                        &key, &model, &messages,
                         // Never reasoning, whatever the setting says: six words
                         // do not need a thinking budget, and on OpenRouter that
                         // budget is billed.
@@ -149,18 +181,9 @@ impl LlmService {
                     .map_err(|e| e.to_string())?
                     .map(|answer| (answer, None))
             }
-            LlmProvider::OpenRouter => {
-                settings
-                    .require_openrouter_key()
-                    .map_err(|e| e.to_string())?;
-                self.remote
-                    .complete(
-                        settings.openrouter_api_key.as_deref().unwrap_or(""),
-                        &settings.openrouter_llm_model,
-                        messages,
-                        false,
-                    )
-                    .await
+            LlmProvider::OpenRouter | LlmProvider::OpenAiCompatible => {
+                let (client, key, model) = self.remote_for(settings)?;
+                client.complete(&key, &model, messages, false).await
             }
         }
     }
@@ -194,17 +217,10 @@ impl LlmService {
                 .map_err(|e| e.to_string())?
                 .map(|answer| (answer, None))
             }
-            LlmProvider::OpenRouter => {
-                settings
-                    .require_openrouter_key()
-                    .map_err(|e| e.to_string())?;
-                self.remote
-                    .complete(
-                        settings.openrouter_api_key.as_deref().unwrap_or(""),
-                        &settings.openrouter_llm_model,
-                        &messages,
-                        settings.reasoning_enabled,
-                    )
+            LlmProvider::OpenRouter | LlmProvider::OpenAiCompatible => {
+                let (client, key, model) = self.remote_for(settings)?;
+                client
+                    .complete(&key, &model, &messages, settings.reasoning_enabled)
                     .await
             }
         }

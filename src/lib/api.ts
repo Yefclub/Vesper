@@ -36,7 +36,9 @@ export interface MeetingRecord {
 
 export interface AppSettings {
   stt_provider: "local" | "openrouter";
-  llm_provider: "local" | "openrouter";
+  llm_provider: "local" | "openrouter" | "openai_compatible";
+  endpoint_base_url: string;
+  endpoint_model: string;
   openrouter_api_key?: string | null;
   openrouter_stt_model: string;
   openrouter_llm_model: string;

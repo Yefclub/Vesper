@@ -24,7 +24,7 @@ import { backdropFade, slideInRight } from "../lib/motion";
 import { applyTheme, currentTheme } from "../lib/theme";
 import { Button, FOCUS } from "./Button";
 import { ModelPicker } from "./ModelPicker";
-import { LOCALES, PROVIDERS, Segmented } from "./Segmented";
+import { LLM_PROVIDERS, LOCALES, PROVIDERS, Segmented } from "./Segmented";
 import { Tabs } from "./Tabs";
 
 /** Everything a Tab press can land on, minus the roving members of a list —
@@ -513,8 +513,31 @@ export function SettingsPanel({
                       llm_provider: v as AppSettings["llm_provider"],
                     }))
                   }
-                  options={PROVIDERS}
+                  options={LLM_PROVIDERS}
                 />
+                {draft.llm_provider === "openai_compatible" && (
+                  <>
+                    <Field
+                      label={t("settings.endpoint_url")}
+                      value={draft.endpoint_base_url}
+                      onChange={(v) =>
+                        setDraft((d) => ({ ...d, endpoint_base_url: v }))
+                      }
+                      placeholder="http://localhost:11434/v1"
+                    />
+                    <Field
+                      label={t("settings.endpoint_model")}
+                      value={draft.endpoint_model}
+                      onChange={(v) =>
+                        setDraft((d) => ({ ...d, endpoint_model: v }))
+                      }
+                      placeholder="llama3.2"
+                    />
+                    <p className="text-xs leading-relaxed text-fg-muted">
+                      {t("settings.endpoint_hint")}
+                    </p>
+                  </>
+                )}
                 {draft.llm_provider === "local" ? (
                   <>
                     {readyLlm.length ? (
