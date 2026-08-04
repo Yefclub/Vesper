@@ -21,19 +21,25 @@ export function useContextNotes(meetingId: string) {
   const [notes, setNotes] = useState<ContextNote[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  // One behaviour on failure, everywhere: keep what is on screen. Clearing the
+  // list because a read failed tells the user their notes are gone, and it made
+  // the two views disagree — this one blanked while the other, reloading from
+  // the same event, kept its copy.
   const reload = useCallback(() => {
     return api
       .listContextNotes(meetingId)
       .then(setNotes)
-      .catch(() => setNotes([]));
+      .catch(() => null);
   }, [meetingId]);
 
   useEffect(() => {
     let live = true;
+    // Nothing to preserve at mount, so the same rule costs nothing here and
+    // keeps one story about what a failed read does.
     api
       .listContextNotes(meetingId)
       .then((rows) => live && setNotes(rows))
-      .catch(() => live && setNotes([]));
+      .catch(() => null);
 
     const onChange = (e: Event) => {
       // Only this meeting's. During a recording the other panel is showing the
