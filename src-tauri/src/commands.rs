@@ -522,19 +522,31 @@ pub fn start_recording(
     // Claimed before the capture opens, not after. Between those two points the
     // recorder answers "yes, recording" while this still named the previous
     // meeting, and a context note landing in that gap would be stamped with this
-    // recording's clock and filed against the last one. Cleared again below if
-    // the capture refuses to start.
-    *state.active_meeting.lock() = Some(id.clone());
+    // recording's clock and filed against the last one.
+    //
+    // The claim is also what makes two overlapping starts safe. The check at the
+    // top of this command reads a flag the recorder only sets once capture is
+    // open, so two calls can both pass it; only one can find this empty.
+    {
+        let mut active = state.active_meeting.lock();
+        if active.is_some() {
+            return Err("already recording".into());
+        }
+        *active = Some(id.clone());
+    }
     if let Err(e) = state.recorder.start(
         audio_path.clone(),
         settings.mic_device_id.clone(),
         settings.system_device_id.clone(),
     ) {
-        // Give the claim back. A meeting that never started recording must not
-        // be left owning the recorder, or the next note would be filed against
-        // it and pause, resume and stop would all answer for a capture that
-        // does not exist.
-        *state.active_meeting.lock() = None;
+        // Give the claim back, and only if it is still ours — the same
+        // compare-before-clear the stop path uses. A meeting that never started
+        // recording must not be left owning the recorder, and a meeting that
+        // did must not have its claim taken away by someone else's failure.
+        let mut active = state.active_meeting.lock();
+        if active.as_deref() == Some(id.as_str()) {
+            *active = None;
+        }
         return Err(e.to_string());
     }
     let mut status = MeetingStatus::Idle;
