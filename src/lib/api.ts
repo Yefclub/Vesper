@@ -108,6 +108,11 @@ export interface MeetingProgress {
   error?: string | null;
 }
 
+export interface ChatMessage {
+  role: string;
+  content: string;
+}
+
 export interface MeetingInsights {
   summary: string;
   key_points: string[];
@@ -272,6 +277,11 @@ export const api = {
     invoke<string>("suggested_export_name", { id, format }),
   exportMeeting: (id: string, path: string, format: string) =>
     invoke<string>("export_meeting_cmd", { id, path, format }),
+  /// Ask a question about one meeting. The answer is the whole answer — this
+  /// path does not stream, so the wait is silent and the caller owns saying so.
+  chatMeeting: (id: string, question: string) =>
+    invoke<ChatMessage>("chat_meeting", { id, question }),
+  listChat: (id: string) => invoke<ChatMessage[]>("list_chat", { id }),
   listModels: () => invoke<ModelInfo[]>("list_models_cmd"),
   // No URL parameter: the backend resolves it from its own catalog and verifies
   // the artifact's checksum before it reaches whisper.cpp / llama.cpp.
