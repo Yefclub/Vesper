@@ -315,11 +315,15 @@ export const api = {
     invoke<void>("delete_context_note", { id, noteId }),
   listActionItems: (id: string) =>
     invoke<ActionItem[]>("list_action_items", { id }),
-  /// The whole list. Returns what was stored, since the backend trims each item
-  /// and marks it edited — which is the flag that protects it from the next
-  /// summary.
-  saveActionItems: (id: string, items: ActionItem[]) =>
-    invoke<ActionItem[]>("save_action_items", { id, items }),
+  /// One item at a time. Each returns the whole list as stored, because a
+  /// summary may have merged in between — but none of them *sends* a list, so
+  /// none can carry a stale idea of the items it did not touch.
+  addActionItem: (id: string, text: string) =>
+    invoke<ActionItem[]>("add_action_item", { id, text }),
+  updateActionItem: (id: string, item: ActionItem) =>
+    invoke<ActionItem[]>("update_action_item", { id, item }),
+  deleteActionItem: (id: string, itemId: number) =>
+    invoke<ActionItem[]>("delete_action_item", { id, itemId }),
   listModels: () => invoke<ModelInfo[]>("list_models_cmd"),
   // No URL parameter: the backend resolves it from its own catalog and verifies
   // the artifact's checksum before it reaches whisper.cpp / llama.cpp.

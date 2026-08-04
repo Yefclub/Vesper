@@ -2,6 +2,7 @@ use crate::audio::capture::{read_dual_wav, DualChannelRecorder};
 use crate::audio::decode::decode_audio_file;
 use crate::audio::devices::{list_audio_devices, AudioDevice};
 use crate::db::{Database, KeyHome};
+use crate::domain::actions::ActionItem;
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::chat::ChatMessage;
 use crate::domain::export::{export_meeting, safe_file_stem, ExportFormat};
@@ -433,54 +434,79 @@ pub fn list_action_items(
     state.db.list_action_items(&id)
 }
 
-/// Replace a meeting's action items with what the user is looking at.
+/// One item at a time, never the whole list.
 ///
-/// The whole list rather than one field: the panel edits text, owner, due and
-/// status in the same gesture, and a per-field command would have four ways to
-/// half-apply an edit.
-///
-/// Every item that arrives here has been through a person, so each is marked
-/// `edited` — that flag is what protects it from the next summary. The source
-/// is preserved rather than trusted from the caller for the items that already
-/// exist; a caller cannot promote the model's suggestion into something it
-/// never said.
+/// A client that sends the list sends its idea of every *other* item with it,
+/// and that idea is stale the moment anything else writes — a summary merging
+/// in the background, or the same panel a second earlier. Every way this could
+/// lose somebody's work went through exactly that, so the list is not something
+/// the client is allowed to state.
+fn validated(mut item: ActionItem) -> Result<ActionItem, String> {
+    item.text = item.text.trim().to_string();
+    if item.text.is_empty() {
+        return Err("a task needs something in it".into());
+    }
+    if item.text.chars().count() > 2_000 {
+        return Err("that task is too long".into());
+    }
+    let tidy = |v: &Option<String>| {
+        v.as_ref().and_then(|x| {
+            let x = x.trim();
+            (!x.is_empty()).then(|| x.to_string())
+        })
+    };
+    item.owner = tidy(&item.owner);
+    item.due = tidy(&item.due);
+    Ok(item)
+}
+
 #[tauri::command]
-pub async fn save_action_items(
+pub async fn add_action_item(
     state: State<'_, Arc<AppState>>,
     id: String,
-    items: Vec<crate::domain::actions::ActionItem>,
-) -> Result<Vec<crate::domain::actions::ActionItem>, String> {
-    // The same flight every whole-set replacement takes. A summary merging in
-    // the background reads this list and writes it back; an edit landing
-    // between those two would be deleted by the write, and the user would watch
-    // their own change disappear seconds after making it.
+    text: String,
+) -> Result<Vec<ActionItem>, String> {
     let _flight = state.refine_flight.lock().await;
     if state.db.get_meeting(&id)?.is_none() {
         return Err("meeting not found".into());
     }
-    if items.len() > 500 {
-        return Err("that is more tasks than a meeting produces".into());
-    }
-    let mut items = items;
-    for item in &mut items {
-        item.text = item.text.trim().to_string();
-        if item.text.is_empty() {
-            return Err("a task needs something in it".into());
-        }
-        if item.text.chars().count() > 2_000 {
-            return Err("that task is too long".into());
-        }
-        item.owner = item.owner.as_ref().and_then(|o| {
-            let o = o.trim();
-            (!o.is_empty()).then(|| o.to_string())
-        });
-        item.due = item.due.as_ref().and_then(|d| {
-            let d = d.trim();
-            (!d.is_empty()).then(|| d.to_string())
-        });
-        item.edited = true;
-    }
-    state.db.save_action_items(&id, &items)?;
+    let item = validated(ActionItem {
+        id: 0,
+        text,
+        owner: None,
+        due: None,
+        status: crate::domain::actions::ActionStatus::Open,
+        // A person wrote it, so no summary may take it away.
+        source: crate::domain::actions::ActionSource::User,
+        edited: true,
+    })?;
+    state.db.insert_action_item(&id, &item)?;
+    state.db.list_action_items(&id)
+}
+
+/// Change one item. The source is not taken from the caller — an existing row
+/// keeps whose it was, so nothing can promote the model's suggestion into
+/// something a person is supposed to have said.
+#[tauri::command]
+pub async fn update_action_item(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    item: ActionItem,
+) -> Result<Vec<ActionItem>, String> {
+    let _flight = state.refine_flight.lock().await;
+    let item = validated(item)?;
+    state.db.update_action_item(&id, &item)?;
+    state.db.list_action_items(&id)
+}
+
+#[tauri::command]
+pub async fn delete_action_item(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    item_id: i64,
+) -> Result<Vec<ActionItem>, String> {
+    let _flight = state.refine_flight.lock().await;
+    state.db.delete_action_item(&id, item_id)?;
     state.db.list_action_items(&id)
 }
 

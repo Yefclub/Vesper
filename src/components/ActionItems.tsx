@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { Plus, X } from "lucide-react";
 import { api, type ActionItem } from "../lib/api";
@@ -12,17 +12,18 @@ import { FOCUS } from "./Button";
 /// the old free-text bullets were replaced wholesale every run, so correcting
 /// them taught people not to bother.
 ///
-/// The whole list is saved on every change rather than a field at a time. There
-/// is one write, one failure to report, and no way for an edit to half-apply.
+/// **Nothing here ever sends the list.** Each change is one item, and every
+/// call returns the list as stored. A client that states the whole list states
+/// its idea of the items it did not touch too, and that idea is stale the
+/// moment a summary merges in the background — which is how four separate ways
+/// of losing somebody's work all arrived at once.
 export function ActionItems({
   meetingId,
   reloadKey,
 }: {
   meetingId: string;
-  /// Bumped whenever a summary rewrote this list. Without it the panel showed
-  /// the rows from before the run, and the next ordinary edit wrote that stale
-  /// list back over the merge — losing exactly the suggestions the summary had
-  /// just produced.
+  /// Bumped whenever a summary rewrote this list. Without it the panel kept
+  /// showing the rows from before the run.
   reloadKey: number;
 }) {
   const { t } = useI18n();
@@ -30,54 +31,44 @@ export function ActionItems({
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let live = true;
+  /// The item being typed in, if any. A refresh must not replace the field
+  /// under someone's cursor — losing a half-typed correction to a background
+  /// summary is exactly the kind of thing that stops people trusting the list.
+  const editing = useRef<number | null>(null);
+  const missed = useRef(false);
+
+  const load = useCallback(() => {
+    if (editing.current !== null) {
+      // Deferred rather than dropped; taken at the next blur.
+      missed.current = true;
+      return;
+    }
     api
       .listActionItems(meetingId)
-      .then((rows) => live && setItems(rows))
+      .then(setItems)
       .catch(() => null);
-    return () => {
-      live = false;
-    };
-  }, [meetingId, reloadKey]);
+  }, [meetingId]);
 
-  const persist = useCallback(
-    async (next: ActionItem[]) => {
-      // Optimistic, and reconciled with what came back: the backend trims and
-      // marks every item edited, so what it returns is what is stored.
-      setItems(next);
-      setError(null);
-      try {
-        setItems(await api.saveActionItems(meetingId, next));
-      } catch (e) {
-        setError(String(e));
-        api.listActionItems(meetingId).then(setItems).catch(() => null);
-      }
-    },
-    [meetingId],
-  );
+  useEffect(load, [load, reloadKey]);
 
-  const add = async () => {
-    const text = draft.trim();
-    if (!text) return;
-    setDraft("");
-    await persist([
-      ...items,
-      {
-        id: 0,
-        text,
-        owner: null,
-        due: null,
-        status: "open",
-        // Written by a person, so the next summary leaves it alone.
-        source: "user",
-        edited: true,
-      },
-    ]);
+  const settle = (next: Promise<ActionItem[]>) =>
+    next.then(setItems).catch((e) => {
+      setError(String(e));
+      load();
+    });
+
+  const leave = (item: ActionItem) => {
+    editing.current = null;
+    void settle(api.updateActionItem(meetingId, item));
+    if (missed.current) {
+      missed.current = false;
+      // The summary that landed mid-edit still has to reach the screen.
+      setTimeout(load, 0);
+    }
   };
 
-  const update = (id: number, patch: Partial<ActionItem>) =>
-    void persist(items.map((i) => (i.id === id ? { ...i, ...patch } : i)));
+  const patch = (id: number, change: Partial<ActionItem>) =>
+    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...change } : i)));
 
   return (
     <section>
@@ -98,24 +89,23 @@ export function ActionItems({
               checked={item.status === "done"}
               aria-label={item.text}
               onChange={(e) =>
-                update(item.id, { status: e.target.checked ? "done" : "open" })
+                void settle(
+                  api.updateActionItem(meetingId, {
+                    ...item,
+                    status: e.target.checked ? "done" : "open",
+                  }),
+                )
               }
               className={clsx("mt-1 shrink-0 accent-accent", FOCUS)}
             />
             <div className="min-w-0 flex-1">
               <input
                 value={item.text}
-                onChange={(e) =>
-                  setItems((prev) =>
-                    prev.map((i) =>
-                      i.id === item.id ? { ...i, text: e.target.value } : i,
-                    ),
-                  )
-                }
-                // Saved on blur, not on every keystroke: this writes the whole
-                // list, and a write per character would be a write per
-                // character.
-                onBlur={() => void persist(items)}
+                onFocus={() => (editing.current = item.id)}
+                onChange={(e) => patch(item.id, { text: e.target.value })}
+                // On blur, not on every keystroke: one write per character
+                // would be one write per character.
+                onBlur={() => leave(item)}
                 className={clsx(
                   "w-full bg-transparent text-sm outline-none",
                   item.status === "done" && "text-fg-subtle line-through",
@@ -126,28 +116,18 @@ export function ActionItems({
                   value={item.owner ?? ""}
                   placeholder={t("actions.owner")}
                   aria-label={t("actions.owner")}
-                  onChange={(e) =>
-                    setItems((prev) =>
-                      prev.map((i) =>
-                        i.id === item.id ? { ...i, owner: e.target.value } : i,
-                      ),
-                    )
-                  }
-                  onBlur={() => void persist(items)}
+                  onFocus={() => (editing.current = item.id)}
+                  onChange={(e) => patch(item.id, { owner: e.target.value })}
+                  onBlur={() => leave(item)}
                   className="w-28 bg-transparent outline-none placeholder:text-fg-subtle/60"
                 />
                 <input
                   value={item.due ?? ""}
                   placeholder={t("actions.due")}
                   aria-label={t("actions.due")}
-                  onChange={(e) =>
-                    setItems((prev) =>
-                      prev.map((i) =>
-                        i.id === item.id ? { ...i, due: e.target.value } : i,
-                      ),
-                    )
-                  }
-                  onBlur={() => void persist(items)}
+                  onFocus={() => (editing.current = item.id)}
+                  onChange={(e) => patch(item.id, { due: e.target.value })}
+                  onBlur={() => leave(item)}
                   className="w-32 bg-transparent outline-none placeholder:text-fg-subtle/60"
                 />
               </div>
@@ -155,7 +135,7 @@ export function ActionItems({
             <button
               type="button"
               onClick={() =>
-                void persist(items.filter((i) => i.id !== item.id))
+                void settle(api.deleteActionItem(meetingId, item.id))
               }
               aria-label={t("actions.remove")}
               className={clsx(
@@ -174,7 +154,10 @@ export function ActionItems({
         className="mt-2 flex items-center gap-2 px-2"
         onSubmit={(e) => {
           e.preventDefault();
-          void add();
+          const text = draft.trim();
+          if (!text) return;
+          setDraft("");
+          void settle(api.addActionItem(meetingId, text));
         }}
       >
         <input
