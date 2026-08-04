@@ -50,6 +50,8 @@ export interface AppSettings {
   local_llm_model: string;
   reasoning_enabled: boolean;
   auto_summarize: boolean;
+  /// Nothing this application does may reach the network.
+  offline_mode: boolean;
   language: string;
   ui_locale: string;
   /** `light` | `dark`. Optional because the field lands with the backend change;

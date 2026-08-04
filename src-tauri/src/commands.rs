@@ -1491,6 +1491,14 @@ pub async fn download_model_cmd(
     state: State<'_, Arc<AppState>>,
     model_id: String,
 ) -> Result<String, String> {
+    // A model download is egress like any other — the catalogue lives on the
+    // internet, and the switch says nothing leaves.
+    if let Some(refusal) = crate::domain::offline::refuse(
+        state.settings.lock().offline_mode,
+        crate::domain::offline::Egress::Download,
+    ) {
+        return Err(refusal);
+    }
     // `try_lock`, not `lock().await`: a queued second download is a click the user
     // has forgotten about by the time it starts. Refusing is the honest answer, and
     // the drawer's disabled buttons make this unreachable in the ordinary case —

@@ -29,6 +29,18 @@ impl LlmService {
         &self,
         settings: &AppSettings,
     ) -> Result<(OpenRouterLlm, String, String), String> {
+        // Every remote provider passes through here, which is why the check
+        // lives here: one place to be sure about rather than four call sites
+        // that each have to remember. A server on the user's own machine is not
+        // egress, so offline mode leaves it alone.
+        if settings.llm_provider != LlmProvider::OpenAiCompatible {
+            if let Some(refusal) = crate::domain::offline::refuse(
+                settings.offline_mode,
+                crate::domain::offline::Egress::CloudLlm,
+            ) {
+                return Err(refusal);
+            }
+        }
         match settings.llm_provider {
             LlmProvider::OpenAiCompatible => {
                 let base =

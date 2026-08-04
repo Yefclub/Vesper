@@ -399,6 +399,12 @@ function AppShell({
         setError(String(e));
       }
       try {
+        // Not while offline mode is on. An update check is a request to a
+        // server that learns this installation exists, which is exactly what
+        // the switch is for — and a "fully offline" mode that phones home
+        // about versions would be the kind of small lie that makes the rest of
+        // the promise unbelievable.
+        if (settings.offline_mode) return;
         // Offered, never applied on its own: installing relaunches the app, and
         // relaunching can throw away a recording in progress. Deciding that for
         // someone is not ours to do.
