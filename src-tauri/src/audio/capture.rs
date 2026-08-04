@@ -89,13 +89,12 @@ impl DualChannelRecorder {
 
     pub fn elapsed_ms(&self) -> u64 {
         let g = self.inner.lock();
-        let mut total = g.elapsed_before_pause_ms;
-        if let Some(start) = g.start {
-            if !self.paused.load(Ordering::SeqCst) {
-                total += start.elapsed().as_millis() as u64;
-            }
-        }
-        total
+        elapsed(
+            g.start,
+            g.elapsed_before_pause_ms,
+            self.paused.load(Ordering::SeqCst),
+            Instant::now(),
+        )
     }
 
     pub fn start(
@@ -160,8 +159,34 @@ impl DualChannelRecorder {
                     eprintln!("mic start failed: {e}");
                     return;
                 }
+                let mut stream_paused = false;
                 while !stop.load(Ordering::SeqCst) {
-                    if paused.load(Ordering::SeqCst) {
+                    let want_pause = paused.load(Ordering::SeqCst);
+                    match capture_step(want_pause, stream_paused) {
+                        StreamAction::EnterPause => {
+                            stream.pause();
+                            stream_paused = true;
+                            // Chunks already in the ring are pre-pause audio and
+                            // belong in the recording, so take them now.
+                            while let Some(chunk) = stream.poll_chunk() {
+                                let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                                inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                            }
+                        }
+                        StreamAction::LeavePause => {
+                            stream.resume();
+                            stream_paused = false;
+                        }
+                        StreamAction::StayPaused | StreamAction::Poll => {}
+                    }
+                    if want_pause {
+                        // Nothing is arriving; a meter frozen at the last
+                        // pre-pause value says the opposite.
+                        {
+                            let mut g = inner_mic.lock();
+                            g.levels.me_peak = 0.0;
+                            g.levels.me_rms = 0.0;
+                        }
                         thread::sleep(Duration::from_millis(20));
                         continue;
                     }
@@ -174,7 +199,31 @@ impl DualChannelRecorder {
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
-                let _ = stream.stop();
+                // Pause, then drain, then stop. Stop can arrive between a pause
+                // and the loop noticing it, leaving pre-pause chunks in the ring
+                // with nothing left to take them — real audio the user already
+                // recorded, and on a very short take all of it.
+                //
+                // `pause()` rather than draining straight away: it halts the
+                // producer while leaving the ring readable, which is the property
+                // `EnterPause` above is already built on. Draining first leaves a
+                // window for one more chunk to land behind the sweep, and
+                // `stop()` first would take the queue down with the producer.
+                stream.pause();
+                while let Some(chunk) = stream.poll_chunk() {
+                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                }
+                stream.stop();
+                // And once more after the join. The intake worker can have read
+                // `paused == false` and enqueued one last chunk between the sweep
+                // above and the pause taking effect; `stop()` joins it without
+                // discarding the queue, so that chunk is still there to take.
+                // Costs nothing when there is nothing: `poll_chunk` answers None.
+                while let Some(chunk) = stream.poll_chunk() {
+                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                }
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
 
@@ -207,8 +256,34 @@ impl DualChannelRecorder {
                 {
                     inner_sys.lock().system_loopback_active = true;
                 }
+                let mut stream_paused = false;
                 while !stop_sys.load(Ordering::SeqCst) {
-                    if paused_sys.load(Ordering::SeqCst) {
+                    let want_pause = paused_sys.load(Ordering::SeqCst);
+                    match capture_step(want_pause, stream_paused) {
+                        StreamAction::EnterPause => {
+                            stream.pause();
+                            stream_paused = true;
+                            // Chunks already in the ring are pre-pause audio and
+                            // belong in the recording, so take them now.
+                            while let Some(chunk) = stream.poll_chunk() {
+                                let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                                inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                            }
+                        }
+                        StreamAction::LeavePause => {
+                            stream.resume();
+                            stream_paused = false;
+                        }
+                        StreamAction::StayPaused | StreamAction::Poll => {}
+                    }
+                    if want_pause {
+                        // Nothing is arriving; a meter frozen at the last
+                        // pre-pause value says the opposite.
+                        {
+                            let mut g = inner_sys.lock();
+                            g.levels.others_peak = 0.0;
+                            g.levels.others_rms = 0.0;
+                        }
                         thread::sleep(Duration::from_millis(20));
                         continue;
                     }
@@ -221,7 +296,27 @@ impl DualChannelRecorder {
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
-                let _ = stream.stop();
+                // Pause, then drain, then stop. Stop can arrive between a pause
+                // and the loop noticing it, leaving pre-pause chunks in the ring
+                // with nothing left to take them — real audio the user already
+                // recorded, and on a very short take all of it.
+                //
+                // `pause()` rather than draining straight away: it halts the
+                // producer while leaving the ring readable, which is the property
+                // `EnterPause` above is already built on. Draining first leaves a
+                // window for one more chunk to land behind the sweep, and
+                // `stop()` first would take the queue down with the producer.
+                stream.pause();
+                while let Some(chunk) = stream.poll_chunk() {
+                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                }
+                stream.stop();
+                // And once more after the join — see the mic thread above.
+                while let Some(chunk) = stream.poll_chunk() {
+                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                }
                 inner_sys.lock().system_loopback_active = false;
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
@@ -299,6 +394,23 @@ impl DualChannelRecorder {
         (mic, sys, sample_rate)
     }
 
+    /// Put back what `drain_chunks` just handed out.
+    ///
+    /// The samples never left `mic_samples`/`sys_samples` — draining only advances
+    /// a cursor — so this rewinds the cursor by what was taken. A transcription
+    /// that failed cost the meeting that slice of audio every time, which with a
+    /// provider rejecting every chunk meant the live transcript was being shredded
+    /// 1200ms at a time while the window showed nothing.
+    ///
+    /// Saturating on purpose: a rewind can only ever race a drain, and landing at
+    /// zero re-reads audio that was already transcribed. Duplicated text is
+    /// recoverable; a hole in the transcript is not.
+    pub fn rewind_chunks(&self, mic_len: usize, sys_len: usize) {
+        let mut g = self.inner.lock();
+        g.mic_stt_pos = g.mic_stt_pos.saturating_sub(mic_len);
+        g.sys_stt_pos = g.sys_stt_pos.saturating_sub(sys_len);
+    }
+
     /// Snapshot of the full dual-channel recording (for tests / diagnostics).
     pub fn recording_len(&self) -> (usize, usize) {
         let g = self.inner.lock();
@@ -318,6 +430,49 @@ impl DualChannelRecorder {
     pub fn flush_recording_for_test(&self, path: &Path) -> Result<(), CaptureError> {
         let g = self.inner.lock();
         write_dual_wav(path, g.sample_rate, &g.mic_samples, &g.sys_samples)
+    }
+}
+
+/// What a capture worker owes the backend on this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamAction {
+    /// The clock is running: take whatever the stream has.
+    Poll,
+    /// First tick of a pause. Stop the backend's delivery, then take what is
+    /// already in the ring — that audio is from before the pause.
+    EnterPause,
+    /// Still paused. The backend is already stopped; touch nothing.
+    StayPaused,
+    /// First tick after a resume. Start delivery again before polling, or the
+    /// first poll returns nothing and the next one returns a gap.
+    LeavePause,
+}
+
+/// The pause edge, as a value a test can assert on.
+///
+/// Flipping the worker's own `continue` is not a pause: flexaudio keeps filling
+/// a 50-chunk (1 s) DROP_OLDEST ring, and the first poll after a resume splices
+/// that second of pause audio into the recording. Only the edges may talk to the
+/// backend, so a stray extra `pause()` cannot discard a chunk mid-pause.
+fn capture_step(want_pause: bool, was_paused: bool) -> StreamAction {
+    match (want_pause, was_paused) {
+        (true, false) => StreamAction::EnterPause,
+        (true, true) => StreamAction::StayPaused,
+        (false, true) => StreamAction::LeavePause,
+        (false, false) => StreamAction::Poll,
+    }
+}
+
+/// The recording clock at `now`: everything before the current pause, plus the
+/// running span when the clock is not paused.
+///
+/// Lifted out of `elapsed_ms` so the paused case is reachable without an audio
+/// device — the WAV's sample count and this number have to agree, and only one
+/// of the two can be tested here.
+fn elapsed(start: Option<Instant>, before_ms: u64, paused: bool, now: Instant) -> u64 {
+    match start {
+        Some(start) if !paused => before_ms + now.duration_since(start).as_millis() as u64,
+        _ => before_ms,
     }
 }
 
@@ -393,6 +548,7 @@ pub fn write_dual_wav(
 pub fn read_wav_mono(path: &Path) -> Result<(Vec<i16>, u32), CaptureError> {
     let mut reader =
         hound::WavReader::open(path).map_err(|e| CaptureError::Device(e.to_string()))?;
+    reject_overlong_wav(&reader)?;
     let spec = reader.spec();
     let channels = spec.channels.max(1) as usize;
     let samples: Result<Vec<i16>, _> = match spec.sample_format {
@@ -409,6 +565,26 @@ pub fn read_wav_mono(path: &Path) -> Result<(Vec<i16>, u32), CaptureError> {
         mono.push((sum / channels as i32) as i16);
     }
     Ok((mono, spec.sample_rate))
+}
+
+/// Rejects a WAV whose declared length exceeds the decoder's ceiling.
+///
+/// Reading the header costs nothing and covers every encoding the reader accepts.
+/// Guessing from the file size does not: 8-bit mono is one byte per sample on
+/// disk and two in memory, so a byte-based bound lets four times the intended
+/// number of samples through.
+fn reject_overlong_wav(
+    reader: &hound::WavReader<std::io::BufReader<std::fs::File>>,
+) -> Result<(), CaptureError> {
+    let channels = reader.spec().channels.max(1) as usize;
+    let frames = reader.len() as usize / channels;
+    if frames > crate::audio::decode::MAX_DECODED_SAMPLES {
+        return Err(CaptureError::Device(format!(
+            "audio is longer than {} hours; split it into shorter recordings",
+            crate::audio::decode::MAX_DECODED_SAMPLES / (60 * 60 * 48_000)
+        )));
+    }
+    Ok(())
 }
 
 /// Split stereo dual-channel WAV (L=Me, R=Others) into separate mono buffers.
@@ -440,8 +616,66 @@ pub fn read_dual_wav(path: &Path) -> Result<(Vec<i16>, Vec<i16>, u32), CaptureEr
 
 #[cfg(test)]
 mod tests {
+
+    /// A failed transcription must not cost the meeting its audio.
+    #[test]
+    fn rewinding_hands_the_same_chunk_back_to_the_next_poll() {
+        let rec = DualChannelRecorder::new();
+        rec.push_samples_for_test(&[7i16; 1600], &[9i16; 1600]);
+
+        let (mic, sys, _) = rec.drain_chunks();
+        assert_eq!(mic.len(), 1600);
+        // Draining again with nothing new gives nothing — the cursor moved.
+        assert!(rec.drain_chunks().0.is_empty());
+
+        rec.rewind_chunks(mic.len(), sys.len());
+        let (again, _, _) = rec.drain_chunks();
+        assert_eq!(
+            again.len(),
+            1600,
+            "the audio a failed transcription was holding must come back"
+        );
+        assert_eq!(again[0], 7);
+    }
+
+    /// Rewinding more than was ever taken lands at the start rather than
+    /// underflowing, which on a `usize` would be a panic in release and a
+    /// catastrophic cursor in debug.
+    #[test]
+    fn rewinding_past_the_beginning_is_not_an_underflow() {
+        let rec = DualChannelRecorder::new();
+        rec.push_samples_for_test(&[1i16; 100], &[1i16; 100]);
+        let _ = rec.drain_chunks();
+        rec.rewind_chunks(usize::MAX, usize::MAX);
+        assert_eq!(rec.drain_chunks().0.len(), 100);
+    }
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn entering_pause_drains_then_stops_the_stream() {
+        // Only the false→true edge may touch the backend; every later paused
+        // tick has to leave the already-stopped stream alone.
+        assert_eq!(capture_step(true, false), StreamAction::EnterPause);
+        assert_eq!(capture_step(true, true), StreamAction::StayPaused);
+    }
+
+    #[test]
+    fn leaving_pause_resumes_before_polling() {
+        assert_eq!(capture_step(false, true), StreamAction::LeavePause);
+        assert_eq!(capture_step(false, false), StreamAction::Poll);
+    }
+
+    #[test]
+    fn a_paused_clock_does_not_advance() {
+        let start = Instant::now();
+        let now = start + Duration::from_secs(30);
+        // 10s recorded, then 30s of wall clock spent paused.
+        assert_eq!(elapsed(Some(start), 10_000, true, now), 10_000);
+        assert_eq!(elapsed(Some(start), 10_000, false, now), 40_000);
+        // `pause()` takes `start`, so a paused recorder has none to run from.
+        assert_eq!(elapsed(None, 10_000, false, now), 10_000);
+    }
 
     #[test]
     fn write_and_read_wav_roundtrip_preserves_channels() {
@@ -505,7 +739,11 @@ mod tests {
         let path = dir.path().join("meeting.wav");
         rec.flush_recording_for_test(&path).unwrap();
         let (mic, sys, _) = read_dual_wav(&path).unwrap();
-        assert_eq!(mic.len(), 4000, "final WAV must keep all samples after live STT drains");
+        assert_eq!(
+            mic.len(),
+            4000,
+            "final WAV must keep all samples after live STT drains"
+        );
         assert_eq!(sys.len(), 4000);
         // Spot-check channels still distinct (Me vs Others)
         assert_eq!(mic[0], 100);

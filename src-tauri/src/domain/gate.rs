@@ -16,6 +16,19 @@ pub fn can_start_recording(
     local_stt_ready: bool,
     onboarding_complete: bool,
 ) -> StartGate {
+    can_start_recording_with(settings, local_stt_ready, false, onboarding_complete)
+}
+
+/// `local_stt_present` separates "the file is missing" from "the file is there but
+/// this build has never verified it". Saying a model is not installed while it sits
+/// on the user's disk sends them to re-download something they already have — and
+/// the settings screen, which knows the difference, would be contradicting this one.
+pub fn can_start_recording_with(
+    settings: &AppSettings,
+    local_stt_ready: bool,
+    local_stt_present: bool,
+    onboarding_complete: bool,
+) -> StartGate {
     if !onboarding_complete || !settings.onboarding_complete {
         return StartGate {
             allowed: false,
@@ -30,6 +43,15 @@ pub fn can_start_recording(
                     allowed: true,
                     reason: None,
                     reason_key: None,
+                }
+            } else if local_stt_present {
+                StartGate {
+                    allowed: false,
+                    reason: Some(format!(
+                        "Local STT model `{}` is on disk but has not been verified yet.",
+                        settings.local_stt_model
+                    )),
+                    reason_key: Some("gate.local_stt_unverified".into()),
                 }
             } else {
                 StartGate {
@@ -78,15 +100,18 @@ mod tests {
     use crate::domain::settings::{AppSettings, SttProvider};
 
     fn base() -> AppSettings {
-        let mut s = AppSettings::default();
-        s.onboarding_complete = true;
-        s
+        AppSettings {
+            onboarding_complete: true,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn blocks_before_onboarding() {
-        let mut s = AppSettings::default();
-        s.onboarding_complete = false;
+        let s = AppSettings {
+            onboarding_complete: false,
+            ..Default::default()
+        };
         let g = can_start_recording(&s, true, false);
         assert!(!g.allowed);
         assert_eq!(g.reason_key.as_deref(), Some("gate.onboarding"));

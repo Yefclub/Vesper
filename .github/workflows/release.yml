@@ -1,0 +1,143 @@
+name: release
+
+# Cutting a release is a deliberate act, so this only ever runs from a tag or by
+# hand. Nothing here fires on a push to a branch.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (for example v0.0.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Vulkan on the two platforms that have it. The SDK is a *build*
+          # requirement — `vulkan-1` ships with every GPU driver, so the
+          # installer never asks the user for anything.
+          - platform: windows-latest
+            args: --target x86_64-pc-windows-msvc --features gpu-vulkan
+          # macOS has no Vulkan, and Metal is a separate backend this release
+          # does not carry yet. Apple builds stay on the CPU.
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          # Back on `latest`. 22.04 was tried to get the AppImage bundling
+          # working and cost more than it bought: `libspa` — the PipeWire
+          # binding, which the audio capture needs — does not compile against
+          # jammy's pipewire, failing with seven type errors before the bundler
+          # is even reached. 24.04 builds the application fine; only the
+          # AppImage step there is unhappy, and that is a bundler problem to
+          # solve on its own terms rather than by moving the whole toolchain.
+          - platform: ubuntu-latest
+            args: --target x86_64-unknown-linux-gnu --features gpu-vulkan
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux deps
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev libpipewire-0.3-dev libclang-dev cmake pkg-config
+      # llama_cpp_sys looks for the LLVM binutils and aborts with "No suitable
+      # tool equivalent to nm/objcopy has been found". The Windows image ships
+      # LLVM but does not put it on PATH — the same prerequisite AGENTS.md
+      # documents for a local checkout.
+      - name: LLVM binutils on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
+      - name: Vulkan SDK (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          # The codename comes from the runner rather than being written here.
+          # It used to say `noble`, and the moment the Linux leg moved to 22.04
+          # apt started offering packages built against glibc 2.38 to an image
+          # carrying 2.35 — sixteen unmet dependencies and "held broken
+          # packages", none of which mentioned Vulkan.
+          CODENAME=$(lsb_release -cs)
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO "/etc/apt/sources.list.d/lunarg-vulkan-$CODENAME.list" "https://packages.lunarg.com/vulkan/lunarg-vulkan-$CODENAME.list"
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+      - name: Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -L -o "$env:RUNNER_TEMP\vulkan.exe" https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe
+          & "$env:RUNNER_TEMP\vulkan.exe" --accept-licenses --default-answer --confirm-command install | Out-Null
+          $sdk = (Get-ChildItem 'C:\VulkanSDK' | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
+          Add-Content -Path $env:GITHUB_PATH -Value "$sdk\Bin"
+      # MSBuild's tracker ignores `LongPathsEnabled`, and the nested
+      # `vulkan-shaders-gen` project pushes its log past MAX_PATH from the
+      # default workspace: `FileTracker : error FTK1011: could not create the
+      # new file tracking log file`. A short target directory is the fix, and
+      # it is the same one AGENTS.md documents for a local checkout.
+      # MSBuild builds the nested `vulkan-shaders-gen` ExternalProject with its
+      # steps on separate parallel nodes, so the install step can start before
+      # the configure step has finished: `CMake error : Not a file:
+      # .../cmake_install.cmake`. Ninja gets the dependency order right, and is
+      # faster besides. The cmake crate supports MSVC with Ninja explicitly — it
+      # passes the compiler's absolute path when that pair is in use.
+      - name: Ninja generator (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ninja -y --no-progress
+          Add-Content -Path $env:GITHUB_ENV -Value 'CMAKE_GENERATOR=Ninja'
+      - name: Short target directory (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value 'CARGO_TARGET_DIR=C:\vt'
+      - run: npm ci
+
+      # The signing key is what makes an update verifiable. Without these the
+      # build either fails while signing or ships a latest.json that no existing
+      # install will accept — see updater_pubkey_is_real in commands.rs, which
+      # fails the test suite if the public half is ever replaced by a placeholder.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # linuxdeploy is itself an AppImage, and an AppImage mounts itself
+          # through FUSE. This makes it unpack instead of mount, which needs no
+          # package and no root.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          # Where our own shared libraries are. `dynamic-link` is mandatory —
+          # two vendored copies of ggml collide at link time otherwise — so the
+          # binary depends on libllama.so.0, libwhisper.so and the ggml
+          # backends, and those live in a resource directory rather than on any
+          # system path. linuxdeploy walks the ELF's dependencies and refuses to
+          # continue when one cannot be resolved:
+          #
+          #   ERROR: Could not find dependency: libllama.so.0
+          #   ERROR: Failed to deploy dependencies for existing files
+          #
+          # Naming the directory here lets it find them and copy them into the
+          # AppDir, which is where they have to end up anyway.
+          LD_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/gpu-backends
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: Vesper ${{ github.event.inputs.tag || github.ref_name }}
+          # Published as a draft so a human decides when installs start seeing it.
+          # The updater endpoint reads the latest *published* release, so nothing
+          # reaches anyone until that button is pressed.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

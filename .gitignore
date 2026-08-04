@@ -16,10 +16,14 @@ src-tauri/target/
 !.env.*.example
 *.key
 *.pem
+*.p12
+.credentials.json
 
 # Local / personal (not versioned)
 CLAUDE.local.md
+AGENTS.local.md
 SPEC.md
+PENDENCIAS.md
 .claude/settings.local.json
 .claude/worktrees/
 .grok/
@@ -46,8 +50,10 @@ recordings/
 .idea/
 *.swp
 *.swo
+*~
 .DS_Store
 Thumbs.db
+Desktop.ini
 *.suo
 *.ntvs*
 *.njsproj
@@ -66,7 +72,15 @@ yarn-error.log*
 # Test artifacts
 playwright-report/
 test-results/
+.playwright/
+
+# Scratch work (never versioned)
+scratch/
+tmp/
 
 # Tauri gen (local)
 src-tauri/gen/schemas/*.json
 !src-tauri/gen/schemas/.gitkeep
+
+# Staged by build.rs from the sys crate; rebuilt on every cargo build.
+src-tauri/gpu-backends/

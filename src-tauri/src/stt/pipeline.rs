@@ -1,6 +1,6 @@
+use crate::domain::settings::{AppSettings, SttProvider};
 use crate::domain::speaker::Speaker;
 use crate::domain::transcript::{LiveTranscript, TranscriptSegment};
-use crate::domain::settings::{AppSettings, SttProvider};
 use crate::stt::local::LocalSttEngine;
 use crate::stt::openrouter::OpenRouterStt;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,11 @@ pub struct SttChunkResult {
     pub text: String,
     pub start_ms: u64,
     pub end_ms: u64,
+    /// What this chunk cost, when a provider reported it. `None` for a local
+    /// model, which is not the same as zero — a meeting that never left the
+    /// machine shows no price at all.
+    #[serde(default)]
+    pub cost_nano_usd: Option<i64>,
 }
 
 /// Pure merge of STT chunk results into a live transcript (testable without engines).
@@ -58,17 +63,34 @@ impl SttService {
             return Ok(SttChunkResult {
                 speaker,
                 text: String::new(),
+                cost_nano_usd: None,
                 start_ms,
                 end_ms: start_ms,
             });
         }
         let duration_ms = (pcm.len() as u64 * 1000) / sample_rate.max(1) as u64;
-        let text = match settings.stt_provider {
-            SttProvider::Local => self
-                .local
-                .transcribe(pcm, sample_rate, &settings.local_stt_model, &settings.language)?,
+        let (text, cost_nano_usd) = match settings.stt_provider {
+            // whisper.cpp inference is CPU-bound and runs for seconds. Called
+            // directly it parks a tokio worker for that whole time, and since the
+            // UI polls every 1200ms the parked workers pile up until the runtime
+            // has none left — which is what made live transcription unreliable.
+            SttProvider::Local => {
+                let engine = self.local.clone();
+                let pcm = pcm.to_vec();
+                let model = settings.local_stt_model.clone();
+                let language = settings.language.clone();
+                let backend = settings.compute_backend.clone();
+                let text = tokio::task::spawn_blocking(move || {
+                    engine.transcribe(&pcm, sample_rate, &model, &language, &backend)
+                })
+                .await
+                .map_err(|e| format!("transcription task failed: {e}"))??;
+                (text, None)
+            }
             SttProvider::OpenRouter => {
-                settings.require_openrouter_key().map_err(|e| e.to_string())?;
+                settings
+                    .require_openrouter_key()
+                    .map_err(|e| e.to_string())?;
                 self.remote
                     .transcribe(
                         pcm,
@@ -83,6 +105,7 @@ impl SttService {
         Ok(SttChunkResult {
             speaker,
             text,
+            cost_nano_usd,
             start_ms,
             end_ms: start_ms + duration_ms,
         })
@@ -98,16 +121,24 @@ impl SttService {
     ) -> Result<Vec<SttChunkResult>, String> {
         let (mic, system) = split_dual_for_stt(mic, system);
         let mut out = Vec::new();
-        let me = self
-            .transcribe_channel(settings, Speaker::Me, &mic, sample_rate, start_ms)
-            .await?;
-        let others = self
-            .transcribe_channel(settings, Speaker::Others, &system, sample_rate, start_ms)
-            .await?;
-        if !me.text.is_empty() {
+        // The two channels are independent, so waiting for one before starting the
+        // other doubled the latency of every chunk for no reason. Local inference
+        // still serialises on the whisper context, but it does so on blocking
+        // threads instead of holding the caller.
+        let (me, others) = tokio::join!(
+            self.transcribe_channel(settings, Speaker::Me, &mic, sample_rate, start_ms),
+            self.transcribe_channel(settings, Speaker::Others, &system, sample_rate, start_ms),
+        );
+        let (me, others) = (me?, others?);
+        // A chunk with no words can still have been billed — a cloud model
+        // charges for the seconds of audio it listened to whether or not anyone
+        // was speaking. Dropping it here lost the charge before any caller could
+        // record it. `apply_stt_chunks` already ignores empty text, so keeping
+        // it costs nothing downstream.
+        if !me.text.is_empty() || me.cost_nano_usd.is_some() {
             out.push(me);
         }
-        if !others.text.is_empty() {
+        if !others.text.is_empty() || others.cost_nano_usd.is_some() {
             out.push(others);
         }
         Ok(out)
@@ -135,12 +166,14 @@ mod tests {
             SttChunkResult {
                 speaker: Speaker::Others,
                 text: "world".into(),
+                cost_nano_usd: None,
                 start_ms: 500,
                 end_ms: 900,
             },
             SttChunkResult {
                 speaker: Speaker::Me,
                 text: "hello".into(),
+                cost_nano_usd: None,
                 start_ms: 0,
                 end_ms: 400,
             },

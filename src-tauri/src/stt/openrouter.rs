@@ -1,23 +1,41 @@
 //! OpenRouter audio transcription client (`/api/v1/audio/transcriptions`).
 
+use crate::domain::cost::usd_to_nano;
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OpenRouterStt {
     base_url: String,
+    client: reqwest::Client,
 }
+
+impl Default for OpenRouterStt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Long enough for a slow transcription of a whole meeting, short enough that a
+/// silently dropped connection does not hang the recorder forever. Without any
+/// timeout at all a stalled request keeps the caller waiting until the process
+/// dies.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 impl OpenRouterStt {
     pub fn new() -> Self {
-        Self {
-            base_url: "https://openrouter.ai/api/v1".into(),
-        }
+        Self::with_base_url("https://openrouter.ai/api/v1")
     }
 
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            // Built once and cloned: a fresh Client per request throws away the
+            // connection pool, so every chunk paid for a new TLS handshake.
+            client: reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .unwrap_or_default(),
         }
     }
 
@@ -28,12 +46,11 @@ impl OpenRouterStt {
         api_key: &str,
         model: &str,
         language: &str,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Option<i64>), String> {
         if api_key.trim().is_empty() {
             return Err("OpenRouter API key required".into());
         }
         let wav = pcm_to_wav_bytes(pcm, sample_rate)?;
-        let client = reqwest::Client::new();
         let part = reqwest::multipart::Part::bytes(wav)
             .file_name("audio.wav")
             .mime_str("audio/wav")
@@ -45,7 +62,8 @@ impl OpenRouterStt {
             form = form.text("language", language.to_string());
         }
 
-        let res = client
+        let res = self
+            .client
             .post(format!("{}/audio/transcriptions", self.base_url))
             .header("Authorization", format!("Bearer {api_key}"))
             .header("HTTP-Referer", "https://github.com/Yefclub/Vesper")
@@ -61,11 +79,16 @@ impl OpenRouterStt {
             return Err(format!("OpenRouter STT {status}: {body}"));
         }
         let v: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        Ok(v.get("text")
+        // The transcription endpoint reports its price in the same response, so
+        // nothing here has to know what the model charges per second of audio.
+        let cost = v["usage"]["cost"].as_f64().and_then(usd_to_nano);
+        let text = v
+            .get("text")
             .and_then(|t| t.as_str())
             .unwrap_or("")
             .trim()
-            .to_string())
+            .to_string();
+        Ok((text, cost))
     }
 }
 
@@ -78,8 +101,7 @@ pub fn pcm_to_wav_bytes(pcm: &[i16], sample_rate: u32) -> Result<Vec<u8>, String
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
-        let mut writer =
-            WavWriter::new(&mut cursor, spec).map_err(|e| e.to_string())?;
+        let mut writer = WavWriter::new(&mut cursor, spec).map_err(|e| e.to_string())?;
         for s in pcm {
             writer.write_sample(*s).map_err(|e| e.to_string())?;
         }

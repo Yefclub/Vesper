@@ -55,10 +55,13 @@ pub fn rms_level(samples: &[i16]) -> f32 {
     if samples.is_empty() {
         return 0.0;
     }
-    let sum: f64 = samples.iter().map(|s| {
-        let v = *s as f64 / i16::MAX as f64;
-        v * v
-    }).sum();
+    let sum: f64 = samples
+        .iter()
+        .map(|s| {
+            let v = *s as f64 / i16::MAX as f64;
+            v * v
+        })
+        .sum();
     (sum / samples.len() as f64).sqrt() as f32
 }
 

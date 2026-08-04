@@ -1,0 +1,18 @@
+{
+  "productName": "Vesper Dev",
+  "identifier": "com.yefclub.vesper.dev",
+  "app": {
+    "windows": [
+      {
+        "title": "Vesper Dev"
+      }
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Yefclub/Vesper/releases/download/dev-channel/latest.json"
+      ]
+    }
+  }
+}

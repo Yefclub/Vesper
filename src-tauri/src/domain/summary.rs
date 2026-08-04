@@ -1,3 +1,4 @@
+use crate::domain::i18n::Locale;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -54,6 +55,116 @@ pub struct MeetingInsights {
     pub action_items: Vec<String>,
 }
 
+/// Split a reasoning model's thinking from its answer.
+///
+/// Qwen3 and its kind write their working inside `<think>…</think>` before
+/// answering. Fed straight to the parser that reads headings, that working
+/// becomes the summary — the user gets a paragraph of the model talking to
+/// itself where the meeting should be.
+///
+/// Returns `(thinking, answer)`. A model that does not think returns the whole
+/// text as the answer, which is every model in the catalog today.
+pub fn split_thinking(raw: &str) -> (Option<String>, String) {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+
+    let Some(start) = raw.find(OPEN) else {
+        return (None, raw.to_string());
+    };
+    match raw[start..].find(CLOSE) {
+        Some(offset) => {
+            let inner = &raw[start + OPEN.len()..start + offset];
+            let mut answer = String::from(&raw[..start]);
+            answer.push_str(&raw[start + offset + CLOSE.len()..]);
+            let thinking = inner.trim().to_string();
+            (
+                (!thinking.is_empty()).then_some(thinking),
+                answer.trim().to_string(),
+            )
+        }
+        // Thinking that ran out of budget before closing. Everything after the
+        // tag is working, not answer — returning it as the summary would be
+        // worse than returning nothing.
+        None => {
+            let thinking = raw[start + OPEN.len()..].trim().to_string();
+            (
+                (!thinking.is_empty()).then_some(thinking),
+                raw[..start].trim().to_string(),
+            )
+        }
+    }
+}
+
+/// Which section a line opens, if it opens one.
+///
+/// The prompt asks for the three headings in English and most models comply,
+/// but the better a model writes the target language the likelier it is to
+/// translate them too: Gemma 3 4B produced the best Portuguese prose in the
+/// bench and titled it `## Resumo`. Matching English only, the whole answer
+/// fell into the summary and the other two sections came back empty — the best
+/// output scored worst. So the headings are read in both shipped languages.
+///
+/// Bold (`**Resumo**`) and trailing colons appear about as often as plain ones,
+/// and cost a line each to accept.
+fn section_of(line: &str) -> Option<Section> {
+    let hashed = line.starts_with('#');
+    // Looped, because the decoration nests in either order: `**Key points:**`
+    // puts the colon inside the bold and `**Key points**:` puts it outside.
+    // One pass in a fixed order strips whichever came first and then stalls on
+    // the other, leaving a label that matches nothing — and a heading that
+    // matches nothing silently pours its section into the previous one.
+    let mut label = line.trim_start_matches('#').trim().to_string();
+    loop {
+        let stripped = label
+            .trim()
+            .trim_start_matches("**")
+            .trim_end_matches("**")
+            .trim_end_matches(':')
+            .trim();
+        if stripped.len() == label.len() {
+            break;
+        }
+        label = stripped.to_string();
+    }
+    let label = label.to_lowercase();
+
+    // A bare word only opens a section when it is the whole line. Without that,
+    // a summary whose first sentence starts "Resumo da reunião…" would be eaten
+    // as a heading.
+    let opens = |names: &[&str]| {
+        names.iter().any(|n| {
+            if hashed {
+                label.starts_with(n)
+            } else {
+                label == *n
+            }
+        })
+    };
+
+    if opens(&["summary", "resumo"]) {
+        return Some(Section::Summary);
+    }
+    if opens(&[
+        "key points",
+        "key point",
+        "pontos-chave",
+        "pontos chave",
+        "pontos principais",
+    ]) {
+        return Some(Section::KeyPoints);
+    }
+    if opens(&[
+        "action items",
+        "action item",
+        "itens de ação",
+        "ações",
+        "próximos passos",
+    ]) {
+        return Some(Section::ActionItems);
+    }
+    None
+}
+
 impl MeetingInsights {
     pub fn from_model_text(raw: &str) -> Self {
         let mut summary = String::new();
@@ -63,17 +174,8 @@ impl MeetingInsights {
 
         for line in raw.lines() {
             let trimmed = line.trim();
-            let lower = trimmed.to_ascii_lowercase();
-            if lower.starts_with("## summary") || lower == "summary:" || lower == "summary" {
-                section = Section::Summary;
-                continue;
-            }
-            if lower.starts_with("## key") || lower.starts_with("key points") {
-                section = Section::KeyPoints;
-                continue;
-            }
-            if lower.starts_with("## action") || lower.starts_with("action items") {
-                section = Section::ActionItems;
+            if let Some(heading) = section_of(trimmed) {
+                section = heading;
                 continue;
             }
             if trimmed.is_empty() {
@@ -132,11 +234,32 @@ enum Section {
     ActionItems,
 }
 
+/// The language the model is told to write in, named in English.
+///
+/// It lives here rather than on `Locale` because it is prompt text, not UI
+/// copy: an English system prompt asking the model to "responda em Inglês" is
+/// worse than one asking it to "answer in English", and a translated entry in
+/// the i18n dictionaries would be a key no screen ever renders.
+pub fn language_name(locale: Locale) -> &'static str {
+    match locale {
+        Locale::En => "English",
+        Locale::PtBr => "Brazilian Portuguese",
+    }
+}
+
 /// Build the user prompt for summarization from a transcript + template.
-pub fn build_summary_prompt(template: SummaryTemplate, transcript: &str) -> String {
+///
+/// The prose follows the app's locale; the three markdown headings do not.
+/// They are a wire protocol: `MeetingInsights::from_model_text` switches
+/// sections on `## summary` / `## key` / `## action`, so a model that answers
+/// with `## Resumo` / `## Pontos principais` / `## Ações` collapses the whole
+/// answer into `summary` and persists two empty vectors. The headings are never
+/// shown — the cards title themselves from the catalog.
+pub fn build_summary_prompt(template: SummaryTemplate, transcript: &str, locale: Locale) -> String {
     format!(
-        "{}\n\nRespond in markdown with sections:\n## Summary\n## Key points\n## Action items\n\nTranscript:\n{}",
+        "{}\n\nRespond in markdown with sections:\n## Summary\n## Key points\n## Action items\n\nWrite all prose in {}.\nKeep the three headings exactly as written, in English: ## Summary, ## Key points, ## Action items.\n\nTranscript:\n{}",
         template.system_prompt(),
+        language_name(locale),
         transcript.trim()
     )
 }
@@ -144,11 +267,13 @@ pub fn build_summary_prompt(template: SummaryTemplate, transcript: &str) -> Stri
 /// Offline extractive fallback when no LLM is available.
 pub fn extractive_summary(transcript: &str, max_sentences: usize) -> MeetingInsights {
     let sentences: Vec<&str> = transcript
-        .split(|c| c == '.' || c == '!' || c == '?')
+        .split(['.', '!', '?'])
         .map(str::trim)
         .filter(|s| s.len() > 12)
         .collect();
-    let take = max_sentences.min(sentences.len()).max(1.min(sentences.len()));
+    let take = max_sentences
+        .min(sentences.len())
+        .max(1.min(sentences.len()));
     let summary = sentences
         .iter()
         .take(take)
@@ -185,6 +310,35 @@ pub fn extractive_summary(transcript: &str, max_sentences: usize) -> MeetingInsi
 }
 
 #[cfg(test)]
+mod thinking {
+    use super::*;
+
+    #[test]
+    fn a_model_that_does_not_think_is_untouched() {
+        let (thinking, answer) = split_thinking("## Resumo\nDecidimos o escopo.");
+        assert!(thinking.is_none());
+        assert_eq!(answer, "## Resumo\nDecidimos o escopo.");
+    }
+
+    #[test]
+    fn thinking_is_lifted_out_of_the_answer() {
+        let (thinking, answer) =
+            split_thinking("<think>Preciso listar os pontos.</think>\n## Resumo\nEscopo fechado.");
+        assert_eq!(thinking.as_deref(), Some("Preciso listar os pontos."));
+        assert_eq!(answer, "## Resumo\nEscopo fechado.");
+    }
+
+    /// A budget that ran out mid-thought leaves no closing tag. Handing the
+    /// remainder over as the summary would show the user the model muttering.
+    #[test]
+    fn unfinished_thinking_does_not_become_the_summary() {
+        let (thinking, answer) = split_thinking("<think>Primeiro eu preciso");
+        assert_eq!(thinking.as_deref(), Some("Primeiro eu preciso"));
+        assert!(answer.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -208,9 +362,95 @@ We discussed the roadmap.
 
     #[test]
     fn template_prompt_includes_transcript() {
-        let p = build_summary_prompt(SummaryTemplate::Standup, "Me: done with API");
+        let p = build_summary_prompt(SummaryTemplate::Standup, "Me: done with API", Locale::En);
         assert!(p.contains("standup") || p.contains("Standup") || p.contains("done with API"));
         assert!(p.contains("done with API"));
+    }
+
+    #[test]
+    fn a_portuguese_locale_asks_for_portuguese_prose() {
+        let p = build_summary_prompt(SummaryTemplate::General, "Me: bom dia", Locale::PtBr);
+        assert!(p.contains("Write all prose in Brazilian Portuguese."));
+    }
+
+    #[test]
+    fn the_markdown_headings_stay_english_in_every_locale() {
+        for locale in [Locale::En, Locale::PtBr] {
+            let p = build_summary_prompt(SummaryTemplate::General, "Me: hi", locale);
+            assert!(p.contains("## Summary"));
+            assert!(p.contains("## Key points"));
+            assert!(p.contains("## Action items"));
+            assert!(p.contains("Keep the three headings exactly as written, in English"));
+        }
+    }
+
+    /// Bold and a colon nest in either order, and both orders occur.
+    #[test]
+    fn a_heading_survives_its_decoration() {
+        for heading in [
+            "**Pontos-chave:**",
+            "**Pontos-chave**:",
+            "## **Key points**",
+            "Key points:",
+        ] {
+            let raw = format!(
+                "## Resumo
+x
+{heading}
+- um ponto"
+            );
+            let i = MeetingInsights::from_model_text(&raw);
+            assert_eq!(i.key_points, vec!["um ponto"], "failed on {heading}");
+        }
+    }
+
+    /// Gemma 3 4B's real shape: it translates the headings it was told to keep.
+    #[test]
+    fn portuguese_headings_still_find_their_sections() {
+        let raw = "## Resumo
+Fechamos o escopo.
+
+**Pontos-chave**
+- Instalador trava
+
+## Ações:
+- Assinar o build";
+        let i = MeetingInsights::from_model_text(raw);
+        assert_eq!(i.summary, "Fechamos o escopo.");
+        assert_eq!(i.key_points, vec!["Instalador trava"]);
+        assert_eq!(i.action_items, vec!["Assinar o build"]);
+    }
+
+    /// Prose that merely opens with the word must not be mistaken for a heading.
+    #[test]
+    fn a_sentence_starting_with_resumo_is_not_a_heading() {
+        let i = MeetingInsights::from_model_text(
+            "## Resumo
+Resumo da reunião: escopo fechado.",
+        );
+        assert_eq!(i.summary, "Resumo da reunião: escopo fechado.");
+    }
+
+    #[test]
+    fn sections_still_parse_when_the_body_is_portuguese() {
+        // What the model answers once it is told to write in Portuguese and to
+        // keep the headings. Lose the second half of that instruction and every
+        // branch below misses, the whole answer lands in `summary`, and two
+        // empty vectors get persisted.
+        let raw = r#"
+## Summary
+Discutimos o roadmap do trimestre.
+## Key points
+- Enviar a v1
+- Contratações
+## Action items
+- Alice redige o RFC
+- Bob revisa as métricas
+"#;
+        let i = MeetingInsights::from_model_text(raw);
+        assert!(i.summary.contains("roadmap"));
+        assert_eq!(i.key_points.len(), 2);
+        assert_eq!(i.action_items.len(), 2);
     }
 
     #[test]

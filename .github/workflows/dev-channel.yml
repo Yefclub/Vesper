@@ -1,0 +1,163 @@
+name: dev-channel
+
+# Installable builds of the integration branch, so a change can be tried the way
+# a user will meet it rather than out of a build tree.
+#
+# Fired by a `dev-*` tag, not by every merge: a build here is three platforms and
+# the better part of an hour, and a tag is the deliberate "this one is worth
+# installing" that a test channel wants. Same mechanism as `cuda-pack-*`.
+on:
+  push:
+    tags: ["dev-*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: --target x86_64-pc-windows-msvc --features gpu-vulkan
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          # Back on `latest`. 22.04 was tried to get the AppImage bundling
+          # working and cost more than it bought: `libspa` — the PipeWire
+          # binding, which the audio capture needs — does not compile against
+          # jammy's pipewire, failing with seven type errors before the bundler
+          # is even reached. 24.04 builds the application fine; only the
+          # AppImage step there is unhappy, and that is a bundler problem to
+          # solve on its own terms rather than by moving the whole toolchain.
+          - platform: ubuntu-latest
+            args: --target x86_64-unknown-linux-gnu --features gpu-vulkan --verbose
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux deps
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev libpipewire-0.3-dev libclang-dev cmake pkg-config
+      - name: LLVM binutils on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
+      - name: Vulkan SDK (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          # The codename comes from the runner rather than being written here.
+          # It used to say `noble`, and the moment the Linux leg moved to 22.04
+          # apt started offering packages built against glibc 2.38 to an image
+          # carrying 2.35 — sixteen unmet dependencies and "held broken
+          # packages", none of which mentioned Vulkan.
+          CODENAME=$(lsb_release -cs)
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO "/etc/apt/sources.list.d/lunarg-vulkan-$CODENAME.list" "https://packages.lunarg.com/vulkan/lunarg-vulkan-$CODENAME.list"
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+      - name: Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -L -o "$env:RUNNER_TEMP\vulkan.exe" https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe
+          & "$env:RUNNER_TEMP\vulkan.exe" --accept-licenses --default-answer --confirm-command install | Out-Null
+          $sdk = (Get-ChildItem 'C:\VulkanSDK' | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
+          Add-Content -Path $env:GITHUB_PATH -Value "$sdk\Bin"
+      - name: Ninja generator (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ninja -y --no-progress
+          Add-Content -Path $env:GITHUB_ENV -Value 'CMAKE_GENERATOR=Ninja'
+      - name: Short target directory (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value 'CARGO_TARGET_DIR=C:\vt'
+
+      # Merged into the real config rather than passed with `--config`, so there
+      # is one file to read when something looks wrong and no question about
+      # which path the CLI resolves the flag against.
+      #
+      # The version has to differ from the stable one and has to climb, or the
+      # updater sees nothing new. `0.1.0-dev.7` is a semver prerelease: below
+      # `0.1.0`, above `0.1.0-dev.6`, which is exactly the ordering a side
+      # channel wants. The run number supplies it — a date from the tag could
+      # carry a leading zero, which semver rejects in a numeric identifier.
+      - name: Apply the dev channel identity
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, io, os
+          base = json.load(io.open("src-tauri/tauri.conf.json", encoding="utf-8"))
+          over = json.load(io.open("src-tauri/tauri.dev.conf.json", encoding="utf-8"))
+
+          def merge(a, b):
+              for k, v in b.items():
+                  if isinstance(v, dict) and isinstance(a.get(k), dict):
+                      merge(a[k], v)
+                  elif k == "windows" and isinstance(v, list) and isinstance(a.get(k), list):
+                      # The window list is keyed by position, and only the first
+                      # one — the main window — is being retitled.
+                      merge(a[k][0], v[0])
+                  else:
+                      a[k] = v
+
+          merge(base, over)
+          # Numeric-only, because the MSI bundler refuses anything else:
+          # `0.1.0-dev.1` fails with "pre-release identifier must be
+          # numeric-only". `0.1.0-1` still sorts below `0.1.0` and above
+          # `0.1.0-1`'s predecessors, which is all the updater needs — and the
+          # build says which channel it is through the product name and its own
+          # identifier, not through the version string.
+          base["version"] = f'{base["version"]}-{os.environ["GITHUB_RUN_NUMBER"]}'
+          json.dump(base, io.open("src-tauri/tauri.conf.json", "w", encoding="utf-8"), indent=2)
+          print("version:", base["version"], "identifier:", base["identifier"])
+          PY
+      - run: npm ci
+
+      # Published to one fixed tag rather than to the tag that fired this build.
+      # The updater needs a URL that does not move, and GitHub's `latest`
+      # redirect skips prereleases — so the channel is a single release whose
+      # assets are replaced, and the tag that triggered the build only marks the
+      # commit.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # linuxdeploy is itself an AppImage, and an AppImage mounts itself
+          # through FUSE. This makes it unpack instead of mount, which needs no
+          # package and no root.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          # Where our own shared libraries are. `dynamic-link` is mandatory —
+          # two vendored copies of ggml collide at link time otherwise — so the
+          # binary depends on libllama.so.0, libwhisper.so and the ggml
+          # backends, and those live in a resource directory rather than on any
+          # system path. linuxdeploy walks the ELF's dependencies and refuses to
+          # continue when one cannot be resolved:
+          #
+          #   ERROR: Could not find dependency: libllama.so.0
+          #   ERROR: Failed to deploy dependencies for existing files
+          #
+          # Naming the directory here lets it find them and copy them into the
+          # AppDir, which is where they have to end up anyway.
+          LD_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/gpu-backends
+        with:
+          tagName: dev-channel
+          releaseName: "Vesper Dev (${{ github.ref_name }})"
+          releaseBody: |
+            Installable build of the integration branch, from `${{ github.ref_name }}`.
+
+            Installs beside the stable application rather than over it, and
+            updates only from this channel.
+          releaseDraft: false
+          prerelease: true
+          args: ${{ matrix.args }}

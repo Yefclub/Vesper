@@ -13,6 +13,59 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+default = []
+
+# GPU acceleration. Off by default so `cargo test` and a contributor without a
+# Vulkan SDK or a CUDA toolkit can still build the app — the SDKs are build-time
+# requirements only, and the shipped binary must never need them installed.
+#
+# The split is not cosmetic. The two engines reach the GPU in different ways and
+# only one of them is safe to enable unconditionally:
+#
+# * `llama-cpp-2` has `dynamic-backends`, which is llama.cpp's `GGML_BACKEND_DL`:
+#   each backend becomes a shared library loaded at runtime, so `ggml-cuda.dll`
+#   is only opened when an NVIDIA driver is actually present. A machine with no
+#   NVIDIA GPU never touches it.
+# * `whisper-rs-sys` has no such thing, and no way to pass CMake arguments. Its
+#   `cuda` feature emits `rustc-link-lib=cudart` and `=cuda` — *load-time*
+#   imports — so a binary built with it does not start at all on a machine
+#   without the NVIDIA runtime. That is why whisper gets Vulkan and not CUDA:
+#   `vulkan-1.dll` ships with every GPU driver, and losing CUDA for
+#   transcription costs far less than losing the single installer. CUDA's real
+#   win is prompt processing, which is the summarisation path, and that is
+#   llama's side.
+gpu = ["gpu-vulkan"]
+
+# Vulkan for whisper, and deliberately not for llama.
+#
+# Both crates vendor their own ggml, and a process where both initialise Vulkan
+# dies with an access violation while loading tensors. Measured rather than
+# guessed: the same build with `whisper-rs/vulkan` removed offloads all 25
+# layers and generates fine, and putting it back crashes again. Two models and
+# two quantisations behave identically, so it is the pair of backends, not the
+# weights.
+#
+# Whisper is the one that gets it because transcription is the work this
+# application actually does — it runs for the length of the meeting, while
+# summarising happens once at the end. llama reaches a GPU through the optional
+# CUDA pack, which is a separate ggml loaded at runtime and does not collide;
+# without that it runs on the processor, where the same prompt costs 1.34s
+# against Vulkan's 1.11s. Seventeen per cent was never the reason to want this.
+#
+# Not compiling it also removes llama's Vulkan shader generation from the
+# build, which was the slowest step in it.
+gpu-vulkan = ["whisper-rs/vulkan"]
+
+# Needs the CUDA toolkit at build time (nvcc). Kept apart from `gpu-vulkan` so a
+# machine with only the driver can still build every other combination.
+gpu-cuda = ["llama-cpp-2/cuda"]
+
+# Both backends in one binary, chosen at runtime. Windows only in practice —
+# runtime choice is what `dynamic-backends` buys, and that is Windows-only for
+# the reason given beside the dependency.
+gpu-all = ["gpu-vulkan", "gpu-cuda"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
@@ -31,16 +84,42 @@ chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Dual-channel: mic + OS system loopback (WASAPI / CoreAudio taps / PipeWire)
 flexaudio = "0.2"
+# Already in the tree —  resamples the capture with it — and named
+# here so the import path can use it too. A file arrives at its own rate, and
+# dropping to 16 kHz without a low-pass reflects everything above 8 kHz back
+# onto the speech.
+rubato = "3.0"
 cpal = "0.15"
 hound = "3.5"
 # Multi-format decode (wav/mp3/m4a/ogg/flac; webm best-effort)
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "ogg", "flac", "pcm", "wav", "mkv"] }
 # Local STT (whisper.cpp)
 whisper-rs = "0.16"
-# Local LLM (llama.cpp) — compat-only to ease Windows MSVC builds
-llama_cpp = { version = "0.3", default-features = false, features = ["compat"] }
+# Local LLM (llama.cpp). `llama_cpp 0.3.2` pinned a 2024-era llama.cpp with no
+# path to a GPU backend; this line is the current one and is what makes CUDA and
+# Vulkan reachable at all. `openmp` is off because it drags a runtime DLL into
+# the bundle for a gain the GPU backends make irrelevant.
+#
+# `dynamic-link` is not a preference. `whisper-rs-sys` and `llama-cpp-sys-2` each
+# vendor their own ggml, and two static copies of those symbols is `LNK2005` on
+# MSVC and `rust-lld: error: duplicate symbol` on Linux — the link simply fails
+# on both. Shared libraries give each its own copy. `dynamic-backends` rides
+# along because it is only meaningful with shared libraries, and it is what lets
+# one binary pick Vulkan or AVX-512 on the machine it lands on.
+llama-cpp-2 = { version = "0.1.153", default-features = false, features = ["dynamic-link", "dynamic-backends"] }
+# Never named in the code. It is here so cargo hands `DEP_LLAMA_ROOT` and
+# `DEP_LLAMA_BACKENDS_DIR` to this crate's build script: `links` metadata only
+# reaches a *direct* dependent, and those two variables are the only pointers
+# that name the unit cargo is building right now. Everything else — newest
+# directory, matching feature set — is a guess that a second build output in the
+# same profile can defeat, and guessing wrong stages a mismatched `llama.dll`
+# next to the executable. Unified with the copy llama-cpp-2 already builds, so
+# it costs nothing.
+llama-cpp-sys-2 = { version = "0.1.153", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "blocking", "stream"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+# `net` is for the loopback server in the resume test; reqwest already pulls it in
+# transitively, so it costs nothing in the bundle.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
 futures-util = "0.3"
 parking_lot = "0.12"
 base64 = "0.22"
@@ -48,11 +127,19 @@ printpdf = "0.7"
 docx-rs = "0.4"
 dirs = "6"
 sha2 = "0.10"
+# Already in the tree through docx-rs; named here to unpack the optional CUDA
+# backend, which is the only zip this app opens. `default-features = false`
+# plus `deflate`: the pack is deflate, and the other codecs are parsers this
+# has no reason to expose.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 flate2 = "1"
 tar = "0.4"
+keyring = { version = "4.1.6", features = ["apple-native-keyring-store"] }
+tauri-plugin-single-instance = "2.4.3"
+tracing-appender = "0.2.5"
 
 [dev-dependencies]
 tempfile = "3"

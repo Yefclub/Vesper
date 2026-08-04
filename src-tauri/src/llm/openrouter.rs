@@ -1,4 +1,6 @@
 use crate::domain::chat::ChatMessage;
+use crate::domain::cost::usd_to_nano;
+use crate::domain::i18n::Locale;
 use crate::domain::summary::{build_summary_prompt, MeetingInsights, SummaryTemplate};
 use serde_json::json;
 
@@ -20,7 +22,7 @@ impl OpenRouterLlm {
         model: &str,
         messages: &[ChatMessage],
         reasoning: bool,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Option<i64>), String> {
         if api_key.trim().is_empty() {
             return Err("OpenRouter API key required".into());
         }
@@ -31,6 +33,11 @@ impl OpenRouterLlm {
         let mut body = json!({
             "model": model,
             "messages": msgs,
+            // Without this OpenRouter answers with token counts and no price.
+            // The whole point of reading `usage.cost` is that the provider has
+            // already applied whatever discount or free tier this key gets, so
+            // deriving it from tokens here would be a different number.
+            "usage": { "include": true },
         });
         if reasoning {
             body["include_reasoning"] = json!(true);
@@ -59,7 +66,11 @@ impl OpenRouterLlm {
             .and_then(|c| c["message"]["content"].as_str())
             .unwrap_or("")
             .to_string();
-        Ok(content)
+        // Absent rather than zero when the field does not arrive: a call whose
+        // price we never learned is unknown, and recording it as free would
+        // quietly understate what the meeting cost.
+        let cost = v["usage"]["cost"].as_f64().and_then(usd_to_nano);
+        Ok((content, cost))
     }
 
     pub async fn summarize(
@@ -68,9 +79,10 @@ impl OpenRouterLlm {
         model: &str,
         transcript: &str,
         template: SummaryTemplate,
+        locale: Locale,
         reasoning: bool,
-    ) -> Result<MeetingInsights, String> {
-        let prompt = build_summary_prompt(template, transcript);
+    ) -> Result<(MeetingInsights, Option<i64>), String> {
+        let prompt = build_summary_prompt(template, transcript, locale);
         let messages = vec![
             ChatMessage {
                 role: "system".into(),
@@ -81,8 +93,8 @@ impl OpenRouterLlm {
                 content: prompt,
             },
         ];
-        let raw = self.complete(api_key, model, &messages, reasoning).await?;
-        Ok(MeetingInsights::from_model_text(&raw))
+        let (raw, cost) = self.complete(api_key, model, &messages, reasoning).await?;
+        Ok((MeetingInsights::from_model_text(&raw), cost))
     }
 }
 

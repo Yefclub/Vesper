@@ -2,6 +2,7 @@
 //! When a GGML/GGUF whisper model is present, runs real ASR.
 //! Without a model file, returns a clear error (no silent energy-theater as "ASR").
 
+use crate::domain::backend::resolve_stt_backend;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -44,9 +45,11 @@ impl LocalSttEngine {
         bin
     }
 
+    /// Ready means "verified against the catalog digest", not merely "a big file is
+    /// there". whisper.cpp parses this file, so bytes of unknown provenance must not
+    /// reach it just because they predate the checksum work.
     pub fn is_model_ready(&self, model_id: &str) -> bool {
-        let p = self.model_path(model_id);
-        p.is_file() && std::fs::metadata(&p).map(|m| m.len() > 1_000_000).unwrap_or(false)
+        crate::models::artifact_is_verified(&self.model_path(model_id), model_id)
     }
 
     /// Transcribe mono PCM with local Whisper when model weights exist.
@@ -56,6 +59,7 @@ impl LocalSttEngine {
         sample_rate: u32,
         model_id: &str,
         language: &str,
+        backend_preference: &str,
     ) -> Result<String, String> {
         if pcm.is_empty() {
             return Ok(String::new());
@@ -71,7 +75,7 @@ impl LocalSttEngine {
             ));
         }
         let path = self.model_path(model_id);
-        run_whisper(&path, pcm, sample_rate, language)
+        run_whisper(&path, pcm, sample_rate, language, backend_preference)
     }
 }
 
@@ -82,11 +86,15 @@ impl Default for LocalSttEngine {
 }
 
 /// Real whisper.cpp inference path — always uses WhisperContext when called.
+///
+/// `backend_preference` is the user's `compute_backend` setting verbatim.
+/// whisper never gets CUDA however it is set — see `resolve_stt_backend`.
 pub fn run_whisper(
     model_path: &Path,
     pcm: &[i16],
     sample_rate: u32,
     language: &str,
+    backend_preference: &str,
 ) -> Result<String, String> {
     if !model_path.is_file() {
         return Err(format!("whisper model missing: {}", model_path.display()));
@@ -99,18 +107,26 @@ pub fn run_whisper(
         );
     }
 
-    let key = model_path.display().to_string();
+    let chosen = resolve_stt_backend(backend_preference, crate::llm::local::probe_support());
+    // The backend is part of the key: weights resident on the GPU and weights
+    // resident on the CPU are two different objects, so changing the setting has
+    // to reload rather than keep serving the one already there.
+    let key = format!("{}#{}", model_path.display(), chosen.as_str());
     let mut cache = whisper_cache().lock();
-    let need_load = cache
-        .as_ref()
-        .map(|(k, _)| k != &key)
-        .unwrap_or(true);
+    let need_load = cache.as_ref().map(|(k, _)| k != &key).unwrap_or(true);
     if need_load {
+        let mut params = WhisperContextParameters::default();
+        // Only `use_gpu`. whisper.cpp picks the device itself and falls back to
+        // the CPU when the load will not fit, so there is nothing here to undo
+        // by hand — unlike llama, which needs to be told which of two views of
+        // one card to take.
+        params.use_gpu(chosen.is_gpu());
         let ctx = WhisperContext::new_with_params(
             model_path.to_str().ok_or("non-utf8 model path")?,
-            WhisperContextParameters::default(),
+            params,
         )
         .map_err(|e| format!("whisper load failed: {e}"))?;
+        tracing::info!("local STT running on {}", chosen.as_str());
         *cache = Some((key, ctx));
     }
     let ctx = &cache.as_ref().unwrap().1;
@@ -159,31 +175,167 @@ fn num_cpus_soft() -> i32 {
 }
 
 /// Linear resample i16 PCM → 16 kHz f32 mono in [-1, 1].
+/// Band-limited, because the alternative folds half the spectrum onto the words.
+///
+/// Live capture never reaches here — the audio thread asks the device for 16 kHz
+/// mono and gets it — but an imported file arrives at its own rate, and 44.1 or
+/// 48 kHz is the normal case. Dropping to 16 kHz by picking values between the
+/// samples, which is what this used to do, has no low-pass in front of it: every
+/// frequency above 8 kHz reflects back into the band as a tone that was never
+/// spoken. Whisper was trained on properly resampled audio, and sibilants land
+/// exactly where the reflections do.
+///
+/// `rubato` was already in the tree — the capture layer resamples with it — so
+/// this costs a line in the manifest and nothing in the bundle.
 pub fn resample_to_16k_f32(pcm: &[i16], sample_rate: u32) -> Vec<f32> {
+    use rubato::audioadapter_buffers::direct::InterleavedSlice;
+    use rubato::audioadapter_buffers::owned::InterleavedOwned;
+    use rubato::{Fft, FixedSync, Resampler};
+
     if pcm.is_empty() {
         return Vec::new();
     }
-    let sr = sample_rate.max(1) as f64;
-    let target = 16_000f64;
-    if (sr - target).abs() < 1.0 {
-        return pcm
-            .iter()
-            .map(|s| *s as f32 / i16::MAX as f32)
-            .collect();
+    let mono: Vec<f32> = pcm.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
+    let sr = sample_rate.max(1) as usize;
+    if sr == 16_000 {
+        return mono;
     }
-    let ratio = target / sr;
-    let out_len = ((pcm.len() as f64) * ratio).round().max(1.0) as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for i in 0..out_len {
-        let src = i as f64 / ratio;
-        let i0 = src.floor() as usize;
-        let i1 = (i0 + 1).min(pcm.len() - 1);
-        let frac = (src - i0 as f64) as f32;
-        let a = pcm[i0] as f32 / i16::MAX as f32;
-        let b = pcm[i1] as f32 / i16::MAX as f32;
-        out.push(a * (1.0 - frac) + b * frac);
+
+    let mut resampler = Fft::<f32>::new(sr, 16_000, 1024, 2, 1, FixedSync::Input)
+        .expect("a non-zero source rate and a 16 kHz target are always valid");
+
+    let Ok(input) = InterleavedSlice::new(&mono[..], 1, mono.len()) else {
+        return mono;
+    };
+    let mut output =
+        InterleavedOwned::<f32>::new(0.0, 1, resampler.process_all_needed_output_len(mono.len()));
+    match resampler.process_all_into_buffer(&input, &mut output, mono.len(), None) {
+        // `process_all_into_buffer` already trims the filter's own delay, so the
+        // written length is the audio and nothing else.
+        Ok((_, written)) => output.take_data().into_iter().take(written).collect(),
+        Err(e) => {
+            // Returning the unresampled audio would hand whisper the wrong rate
+            // and produce a transcript of a recording played at the wrong speed.
+            tracing::warn!("resampling failed: {e}");
+            Vec::new()
+        }
     }
-    out
+}
+
+#[cfg(test)]
+mod resampling {
+    use super::*;
+
+    fn tone(sample_rate: u32, hz: f32, seconds: f32) -> Vec<i16> {
+        let n = (sample_rate as f32 * seconds) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                ((t * hz * std::f32::consts::TAU).sin() * 0.5 * i16::MAX as f32) as i16
+            })
+            .collect()
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    /// A 12 kHz tone cannot exist at 16 kHz — it is above the Nyquist limit — so
+    /// resampling has to throw it away. Picking values between samples instead
+    /// reflects it down to 4 kHz at nearly full strength, which is a whistle
+    /// over every word of an imported recording.
+    #[test]
+    fn a_tone_above_the_limit_is_removed_rather_than_reflected() {
+        let out = resample_to_16k_f32(&tone(48_000, 12_000.0, 0.5), 48_000);
+        assert!(
+            rms(&out) < 0.05,
+            "expected the tone to be filtered out, got RMS {}",
+            rms(&out)
+        );
+    }
+
+    /// And a tone that does fit has to survive, or the filter is simply eating
+    /// the audio.
+    #[test]
+    fn a_tone_below_the_limit_survives() {
+        let out = resample_to_16k_f32(&tone(48_000, 1_000.0, 0.5), 48_000);
+        assert!(
+            rms(&out) > 0.2,
+            "expected the tone to come through, got RMS {}",
+            rms(&out)
+        );
+    }
+
+    /// Length follows the ratio: three times the rate in, a third of the samples
+    /// out. A drift here shows up as a transcript whose timestamps slide.
+    #[test]
+    fn the_output_length_follows_the_ratio() {
+        let out = resample_to_16k_f32(&tone(48_000, 440.0, 1.0), 48_000);
+        assert_eq!(out.len(), 16_000);
+    }
+
+    /// Already at the target rate, nothing is done to it.
+    #[test]
+    fn audio_already_at_16k_is_passed_through() {
+        let input = tone(16_000, 440.0, 0.25);
+        let out = resample_to_16k_f32(&input, 16_000);
+        assert_eq!(out.len(), input.len());
+    }
+}
+
+#[cfg(test)]
+mod gpu_bench {
+    use super::*;
+
+    /// Transcribe a real recording on the GPU and on the CPU, and print both.
+    ///
+    /// Ignored: it needs downloaded weights and a recording, neither of which
+    /// CI has. Run it by hand with
+    /// `cargo test --release --features gpu-vulkan -- --ignored --nocapture gpu_bench`.
+    #[test]
+    #[ignore]
+    fn transcribes_on_both_backends() {
+        let data = dirs::data_dir().unwrap().join("Vesper");
+        let model = data.join("models").join("whisper-tiny").join("model.bin");
+        assert!(model.is_file(), "whisper-tiny is not downloaded");
+
+        let wav = std::fs::read_dir(data.join("recordings"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "wav"))
+            .max_by_key(|p| p.metadata().map(|m| m.len()).unwrap_or(0))
+            .expect("no recording to transcribe");
+        println!("audio: {}", wav.display());
+
+        let reader = hound::WavReader::open(&wav).unwrap();
+        let spec = reader.spec();
+        let all: Vec<i16> = reader.into_samples::<i16>().flatten().collect();
+        // Left channel only: the file is stereo with the microphone on the left.
+        let pcm: Vec<i16> = if spec.channels == 2 {
+            all.iter().step_by(2).copied().collect()
+        } else {
+            all
+        };
+        println!("{} samples at {} Hz", pcm.len(), spec.sample_rate);
+
+        for backend in ["cpu", "auto"] {
+            let started = std::time::Instant::now();
+            let out = run_whisper(&model, &pcm, spec.sample_rate, "pt", backend);
+            let took = started.elapsed();
+            match out {
+                Ok(text) => println!(
+                    "{backend}: {:?} -> {:?}",
+                    took,
+                    text.chars().take(120).collect::<String>()
+                ),
+                Err(e) => panic!("{backend} failed: {e}"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -204,7 +356,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let engine = LocalSttEngine::with_models_dir(dir.path().to_path_buf());
         let err = engine
-            .transcribe(&[3000i16; 1600], 16_000, "whisper-tiny", "en")
+            .transcribe(&[3000i16; 1600], 16_000, "whisper-tiny", "en", "cpu")
             .unwrap_err();
         assert!(err.contains("not installed") || err.contains("download"));
     }
@@ -220,7 +372,7 @@ mod tests {
         let engine = LocalSttEngine::with_models_dir(dir.path().to_path_buf());
         assert!(!engine.is_model_ready("whisper-tiny"));
         // Direct run_whisper must fail for junk file (proves real engine entry)
-        let err = run_whisper(&p, &[1000i16; 1600], 16_000, "en").unwrap_err();
+        let err = run_whisper(&p, &[1000i16; 1600], 16_000, "en", "cpu").unwrap_err();
         assert!(
             err.contains("too small") || err.contains("whisper"),
             "unexpected: {err}"
