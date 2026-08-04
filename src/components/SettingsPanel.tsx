@@ -634,6 +634,20 @@ export function SettingsPanel({
                     setDraft((d) => ({ ...d, auto_summarize: v }))
                   }
                 />
+                {/* Above the summary switch on purpose: it decides whether
+                    any of the cloud choices above are even reachable, and a
+                    control that overrides three others belongs where they can
+                    still be seen. */}
+                <CheckBox
+                  label={t("settings.offline_mode")}
+                  checked={draft.offline_mode}
+                  onChange={(v) => setDraft((d) => ({ ...d, offline_mode: v }))}
+                />
+                {draft.offline_mode && (
+                  <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                    {t("settings.offline_mode_on")}
+                  </p>
+                )}
                 {/* Only while it is off. A promise about what the app does not
                     do is worth reading in the state where it applies, and is
                     noise in the state where it does not. */}

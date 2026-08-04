@@ -79,6 +79,12 @@ impl OpenRouterLlm {
         } else {
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                // No proxy, ever, for an address the user configured. The
+                // allowlist checks the host in the URL, but a proxy makes the
+                // peer somebody else entirely — `HTTP_PROXY` set in the
+                // environment would carry a transcript bound for 127.0.0.1
+                // straight out to a public host, with the check having passed.
+                .no_proxy()
                 .build()
                 .map_err(|e| e.to_string())?
         };

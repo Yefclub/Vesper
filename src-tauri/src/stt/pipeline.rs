@@ -88,6 +88,16 @@ impl SttService {
                 (text, None)
             }
             SttProvider::OpenRouter => {
+                // Audio is the most sensitive thing this application holds, so
+                // the switch is checked before the key: a refusal that reads
+                // "no API key" would send somebody looking for the wrong
+                // problem.
+                if let Some(refusal) = crate::domain::offline::refuse(
+                    settings.offline_mode,
+                    crate::domain::offline::Egress::CloudStt,
+                ) {
+                    return Err(refusal);
+                }
                 settings
                     .require_openrouter_key()
                     .map_err(|e| e.to_string())?;

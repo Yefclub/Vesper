@@ -399,6 +399,12 @@ function AppShell({
         setError(String(e));
       }
       try {
+        // Not while offline mode is on. An update check is a request to a
+        // server that learns this installation exists, which is exactly what
+        // the switch is for — and a "fully offline" mode that phones home
+        // about versions would be the kind of small lie that makes the rest of
+        // the promise unbelievable.
+        if (settings.offline_mode) return;
         // Offered, never applied on its own: installing relaunches the app, and
         // relaunching can throw away a recording in progress. Deciding that for
         // someone is not ours to do.
@@ -1083,7 +1089,7 @@ function AppShell({
                 </span>
               </div>
             )}
-            {pendingUpdate && (
+            {pendingUpdate && !settings.offline_mode && (
               <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
                 <span>{t("update.available").replace("{version}", pendingUpdate.version)}</span>
                 <Button
@@ -1103,7 +1109,16 @@ function AppShell({
                       // `install` alone when the bytes are already here, which
                       // is the usual case — `downloadAndInstall` would fetch
                       // them a second time.
+                      //
+                      // And never fetch them at all while offline mode is on.
+                      // An update discovered before the switch was thrown
+                      // leaves this offer behind it, and accepting it would
+                      // reach the network on a click the user thinks is local.
+                      // Installing bytes already on disk is not egress and
+                      // stays allowed.
                       if (updateReady) await update.install();
+                      else if (settings.offline_mode)
+                        throw new Error(t("update.offline"));
                       else await update.downloadAndInstall();
                       setUpdateNote(t("update.relaunching"));
                       await relaunch();
