@@ -58,6 +58,10 @@ impl SttService {
         pcm: &[i16],
         sample_rate: u32,
         start_ms: u64,
+        // The end of what this speaker last said, for the decoder to continue
+        // from. Empty for the first utterance of a meeting, and for the
+        // whole-recording passes, which have no "previous" to speak of.
+        prompt: &str,
     ) -> Result<SttChunkResult, String> {
         if pcm.is_empty() || peak_abs(pcm) < 200 {
             return Ok(SttChunkResult {
@@ -80,8 +84,12 @@ impl SttService {
                 let model = settings.local_stt_model.clone();
                 let language = settings.language.clone();
                 let backend = settings.compute_backend.clone();
+                // Local only. OpenRouter's transcription endpoint takes a prompt
+                // too, but it is a paid request over the network and adding
+                // tokens to it is a cost change, not a quality fix.
+                let prompt = prompt.to_string();
                 let text = tokio::task::spawn_blocking(move || {
-                    engine.transcribe(&pcm, sample_rate, &model, &language, &backend)
+                    engine.transcribe(&pcm, sample_rate, &model, &language, &backend, &prompt)
                 })
                 .await
                 .map_err(|e| format!("transcription task failed: {e}"))??;
@@ -135,9 +143,18 @@ impl SttService {
         // other doubled the latency of every chunk for no reason. Local inference
         // still serialises on the whisper context, but it does so on blocking
         // threads instead of holding the caller.
+        // No prompt: this transcribes a whole recording in one call, so there is
+        // no previous utterance to continue from.
         let (me, others) = tokio::join!(
-            self.transcribe_channel(settings, Speaker::Me, &mic, sample_rate, start_ms),
-            self.transcribe_channel(settings, Speaker::Others, &system, sample_rate, start_ms),
+            self.transcribe_channel(settings, Speaker::Me, &mic, sample_rate, start_ms, ""),
+            self.transcribe_channel(
+                settings,
+                Speaker::Others,
+                &system,
+                sample_rate,
+                start_ms,
+                ""
+            ),
         );
         let (me, others) = (me?, others?);
         // A chunk with no words can still have been billed — a cloud model

@@ -60,6 +60,7 @@ impl LocalSttEngine {
         model_id: &str,
         language: &str,
         backend_preference: &str,
+        prompt: &str,
     ) -> Result<String, String> {
         if pcm.is_empty() {
             return Ok(String::new());
@@ -75,7 +76,14 @@ impl LocalSttEngine {
             ));
         }
         let path = self.model_path(model_id);
-        run_whisper(&path, pcm, sample_rate, language, backend_preference)
+        run_whisper(
+            &path,
+            pcm,
+            sample_rate,
+            language,
+            backend_preference,
+            prompt,
+        )
     }
 }
 
@@ -95,6 +103,7 @@ pub fn run_whisper(
     sample_rate: u32,
     language: &str,
     backend_preference: &str,
+    prompt: &str,
 ) -> Result<String, String> {
     if !model_path.is_file() {
         return Err(format!("whisper model missing: {}", model_path.display()));
@@ -148,6 +157,12 @@ pub fn run_whisper(
         params.set_language(Some("auto"));
     }
     params.set_n_threads(num_cpus_soft());
+    // The end of what this speaker just said. Each call gets a fresh state, so
+    // without this whisper decodes every utterance from nothing — which is how
+    // one name came back spelled three ways down a single transcript.
+    if !prompt.is_empty() {
+        params.set_initial_prompt(prompt);
+    }
 
     state
         .full(params, &audio)
@@ -324,7 +339,7 @@ mod gpu_bench {
 
         for backend in ["cpu", "auto"] {
             let started = std::time::Instant::now();
-            let out = run_whisper(&model, &pcm, spec.sample_rate, "pt", backend);
+            let out = run_whisper(&model, &pcm, spec.sample_rate, "pt", backend, "");
             let took = started.elapsed();
             match out {
                 Ok(text) => println!(
@@ -356,7 +371,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let engine = LocalSttEngine::with_models_dir(dir.path().to_path_buf());
         let err = engine
-            .transcribe(&[3000i16; 1600], 16_000, "whisper-tiny", "en", "cpu")
+            .transcribe(&[3000i16; 1600], 16_000, "whisper-tiny", "en", "cpu", "")
             .unwrap_err();
         assert!(err.contains("not installed") || err.contains("download"));
     }
@@ -372,7 +387,7 @@ mod tests {
         let engine = LocalSttEngine::with_models_dir(dir.path().to_path_buf());
         assert!(!engine.is_model_ready("whisper-tiny"));
         // Direct run_whisper must fail for junk file (proves real engine entry)
-        let err = run_whisper(&p, &[1000i16; 1600], 16_000, "en", "cpu").unwrap_err();
+        let err = run_whisper(&p, &[1000i16; 1600], 16_000, "en", "cpu", "").unwrap_err();
         assert!(
             err.contains("too small") || err.contains("whisper"),
             "unexpected: {err}"
