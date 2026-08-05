@@ -3,6 +3,7 @@
 //! PipeWire (Linux) for system audio — never fakes Others from the mic.
 
 use crate::audio::levels::ChannelLevels;
+use crate::domain::segmenter::has_speech;
 use crate::domain::speaker::merge_dual_channel;
 use flexaudio::{open, OutputFormat, SourceKind, StreamConfig};
 use hound::{WavSpec, WavWriter};
@@ -392,6 +393,19 @@ impl DualChannelRecorder {
         g.mic_stt_pos = g.mic_samples.len();
         g.sys_stt_pos = g.sys_samples.len();
         (mic, sys, sample_rate)
+    }
+
+    /// Whether the audio no live pass has read yet is loud enough to be speech.
+    ///
+    /// Non-destructive, and that is the point: the silence guard has to know
+    /// whether somebody started talking after the last drain, and a drain to
+    /// find out would race the stop that takes the tail — under one lock, with
+    /// the cursors left where they were, there is nothing to race.
+    pub fn unread_has_speech(&self) -> bool {
+        let g = self.inner.lock();
+        let mic = &g.mic_samples[g.mic_stt_pos.min(g.mic_samples.len())..];
+        let sys = &g.sys_samples[g.sys_stt_pos.min(g.sys_samples.len())..];
+        has_speech(mic, g.sample_rate) || has_speech(sys, g.sample_rate)
     }
 
     /// Put back what `drain_chunks` just handed out.

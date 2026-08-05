@@ -100,6 +100,14 @@ pub struct AppState {
     /// window loses focus either way, and only one of them is a reason to float
     /// a card over the screen.
     pub modal_open: AtomicBool,
+    /// Where the recording stands with respect to the quiet, and when anybody
+    /// last said anything.
+    ///
+    /// Both live here rather than in the segmenter: it drops silence without
+    /// counting it, which is right for transcription and useless for noticing
+    /// that a room has been empty for three minutes.
+    pub vigil: Mutex<crate::domain::silence::Vigil>,
+    pub last_speech_ms: AtomicU64,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -126,6 +134,8 @@ impl AppState {
             live_stt_passes: Mutex::new(HashSet::new()),
             segmenters: Mutex::new(HashMap::new()),
             modal_open: AtomicBool::new(false),
+            vigil: Mutex::new(crate::domain::silence::Vigil::default()),
+            last_speech_ms: AtomicU64::new(0),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -823,6 +833,17 @@ pub fn start_recording(
         .segmenters
         .lock()
         .insert(id.clone(), (Segmenter::new(16_000), Segmenter::new(16_000)));
+    // A fresh vigil for a fresh clock. Carried over from the last recording, an
+    // unanswered question would stop this one within seconds of it starting.
+    let mut vigil = state.vigil.lock();
+    state.last_speech_ms.store(0, Ordering::SeqCst);
+    *vigil = crate::domain::silence::Vigil::default();
+    drop(vigil);
+    // Said out loud rather than left to the window's own state. The question is
+    // raised and taken down by events, and an event lost to a race — a stop, a
+    // window reload — would otherwise leave it on screen over a meeting it was
+    // never asked about.
+    let _ = app.emit("recording://silent", false);
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
     spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
@@ -906,6 +927,12 @@ pub async fn stop_recording(
     // Before the tail transcription and the summary, which take seconds: the
     // card must not sit there advertising a recording that has already stopped.
     sync_overlay(&app, &state, false);
+    // Here rather than in the window, because the window is not the only thing
+    // that stops a recording: the overlay, the shortcut and the tray all reach
+    // this command directly. A question about a meeting that has ended has to
+    // go with it, or it is waiting on screen when the next one starts.
+    *state.vigil.lock() = crate::domain::silence::answered();
+    let _ = app.emit("recording://silent", false);
     let duration = state.recorder.elapsed_ms();
     // Take the tail here, synchronously, while this is still the only thing that
     // has touched the recorder since it stopped. Draining it later — after the
@@ -1349,6 +1376,14 @@ async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), St
     // than a read-modify-write here: two channels transcribe concurrently and
     // one would overwrite the other.
     bill_chunks(&state.db, &id, &chunks);
+    // Words, not merely a pass. A chunk can come back empty — a cloud provider
+    // charges for the seconds it listened to either way — and treating that as
+    // speech would mean the quiet is never noticed at all.
+    if chunks.iter().any(|c| !c.text.trim().is_empty()) {
+        state
+            .last_speech_ms
+            .store(state.recorder.elapsed_ms(), Ordering::SeqCst);
+    }
     state.live_stt_passes.lock().insert(id.clone());
     let mut guard = state.live.lock();
     let t = guard.entry(id.clone()).or_default();
@@ -1384,8 +1419,99 @@ fn spawn_live_stt_ticker(app: AppHandle, state: Arc<AppState>) {
                 // and must not reach the log this may also be written to.
                 let _ = app.emit("transcript://error", &e);
             }
+            watch_for_silence(&app, &state);
         }
     });
+}
+
+/// The user answered the "still there?" question.
+///
+/// Whatever they clicked, they are there. The clock of quiet restarts too, not
+/// only the state — otherwise the next tick would find three minutes of silence
+/// still on the counter and ask again immediately.
+#[tauri::command]
+pub fn keep_recording(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Both under the vigil lock, which guards the pair: the watcher reads the
+    // clock under it too, and an answer landing between the two would leave the
+    // state reset and the clock stale — the question raised again on the spot,
+    // at the user who just said to keep recording.
+    let mut vigil = state.vigil.lock();
+    state
+        .last_speech_ms
+        .store(state.recorder.elapsed_ms(), Ordering::SeqCst);
+    *vigil = crate::domain::silence::answered();
+    drop(vigil);
+    let _ = app.emit("recording://silent", false);
+    Ok(())
+}
+
+/// Audio that exists and nobody has read.
+///
+/// Three sources, and the reason all three count is the same: a recording must
+/// never end over audio nobody has looked at. A segmenter holding an utterance
+/// is somebody mid-sentence; a segmenter holding one that came back is a
+/// provider that refused it and said nothing about the room; and samples the
+/// last pass did not reach are somebody who started talking after the drain,
+/// which is exactly the person the question was asked about.
+fn has_unread_audio(state: &Arc<AppState>) -> bool {
+    if state
+        .segmenters
+        .lock()
+        .values()
+        .any(|(mine, theirs)| mine.holding() || theirs.holding())
+    {
+        return true;
+    }
+    state.recorder.unread_has_speech()
+}
+
+/// Notice a room that has gone quiet, and eventually stop recording it.
+///
+/// Runs on the ticker rather than inside `drive_live_stt`, which returns early
+/// on every path where nothing was said — which is every path that matters
+/// here. Silence is the absence of the work that function does, so it cannot be
+/// the one to spot it.
+///
+/// A paused recording is not a quiet one. The clock does not advance while
+/// paused, so asking whether anybody is there would be asking about a decision
+/// the user has already made.
+fn watch_for_silence(app: &AppHandle, state: &Arc<AppState>) {
+    use crate::domain::silence::{advance, Act};
+
+    if state.recorder.is_paused() {
+        return;
+    }
+    let now = state.recorder.elapsed_ms();
+    let unread = has_unread_audio(state);
+    // One acquisition, and `last_speech_ms` is read under it: the vigil mutex
+    // guards the pair. Read outside, an answer landing between the two leaves
+    // the state reset and the clock stale, and the question is raised again on
+    // the spot — for a user who just said to keep recording.
+    let mut vigil = state.vigil.lock();
+    let quiet_for = now.saturating_sub(state.last_speech_ms.load(Ordering::SeqCst));
+    // Speech is what the last pass found, not a level meter: a fan, a keyboard
+    // and a television all move a meter, and none of them is somebody talking.
+    let speaking = quiet_for < LIVE_STT_INTERVAL_MS * 2;
+    let (next, act) = advance(*vigil, quiet_for, now, speaking, unread);
+    *vigil = next;
+    drop(vigil);
+    match act {
+        Act::Ask => {
+            let _ = app.emit("recording://silent", true);
+        }
+        Act::Dismiss => {
+            let _ = app.emit("recording://silent", false);
+        }
+        // The window stops it, through the same command a click goes through.
+        // Stopping from here would be a second stop path with none of the
+        // guards that one has — the flight lock, the final transcription, the
+        // summary — and the two would drift.
+        Act::Stop => {
+            let _ = app.emit("recording://silent", false);
+            let _ = app.emit("recording://stop-silent", ());
+        }
+        Act::Nothing => {}
+    }
 }
 
 /// Replace the date label with a title read out of the meeting itself.

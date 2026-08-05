@@ -270,6 +270,7 @@ pub fn run() {
             commands::refine_summary_section,
             commands::restore_summary_version,
             commands::set_overlay_expanded,
+            commands::keep_recording,
             commands::set_record_shortcut,
             commands::set_modal_open,
             commands::chat_meeting,

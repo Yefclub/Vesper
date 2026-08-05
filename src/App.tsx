@@ -201,6 +201,10 @@ function AppShell({
   /// it — in which case the app names the key it listens for and claims nothing
   /// about the OS.
   const [shortcut, setShortcut] = useState<ShortcutStatus | null>(null);
+  /// The room has been quiet long enough that Vesper has asked whether anybody
+  /// is still there. Cleared by an answer, by somebody speaking, or by the stop
+  /// that follows an unanswered question.
+  const [silent, setSilent] = useState(false);
   /// The last phase the backend reported for a meeting being finished. `null`
   /// until the first event, and permanently `null` on a build whose backend
   /// does not emit them — in which case none of the UI below renders and Stop
@@ -492,6 +496,18 @@ function AppShell({
         // id, no credit, a 400 — used to be an empty screen and no explanation.
         await listen<string>("transcript://error", (e) => {
           setLiveSttError(e.payload);
+        }),
+      );
+      track(
+        await listen<boolean>("recording://silent", (e) => setSilent(e.payload)),
+      );
+      track(
+        // The window stops it, through the same command a click goes through.
+        // Stopping from the ticker would be a second stop path with none of the
+        // guards that one has, and the two would drift.
+        await listen("recording://stop-silent", () => {
+          setSilent(false);
+          void handleStop();
         }),
       );
       track(
@@ -1157,6 +1173,32 @@ function AppShell({
                   {t("live.stt_failing")}{" "}
                   <span className="text-fg-muted">{liveSttError}</span>
                 </span>
+              </div>
+            )}
+            {/* A question, not a warning: the answer is a click OR simply
+                speaking again, and the copy says both. It sits with the other
+                banners rather than as a modal — a dialog over a running meeting
+                is a thing to dismiss before you can see the transcript, and the
+                whole point is that the user may not be at the machine. */}
+            {silent && status?.recording && (
+              <div
+                role="status"
+                data-testid="silence-notice"
+                className="flex flex-wrap items-center gap-3 border-b border-warn/30 bg-warn/10 px-6 py-2 text-sm text-warn"
+              >
+                <span className="font-medium">{t("silence.title")}</span>
+                <span className="text-fg-muted">{t("silence.body")}</span>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  className="ml-auto"
+                  onClick={() => {
+                    setSilent(false);
+                    void api.keepRecording();
+                  }}
+                >
+                  {t("silence.keep")}
+                </Button>
               </div>
             )}
             {pendingUpdate && !settings.offline_mode && (
