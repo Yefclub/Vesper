@@ -405,8 +405,25 @@ fn llm_cache() -> &'static Mutex<Option<(String, LlamaModel)>> {
 #[derive(Debug, Clone)]
 pub struct LocalLlm {
     models_dir: PathBuf,
-    /// When true (default in production), missing model → extractive offline fallback.
-    /// Tests can set false to assert hard errors.
+    /// When true, a missing model produces a keyword extract of the transcript
+    /// instead of an error.
+    ///
+    /// **Off in production**, and that is the whole point. The extract is the
+    /// first four sentences of the transcript joined together, with the same
+    /// sentences again as key points and any line containing `todo` or `will`
+    /// as an action item. Returned through the same fields a model's answer
+    /// uses, it reaches the screen with the same badge, and nothing tells the
+    /// user which one they are reading — so the first thing somebody meets
+    /// after installing is an "AI summary" that is the opening of what they
+    /// just said, produced automatically because `auto_summarize` is on.
+    ///
+    /// The speech side has never done this: with no weights, `stt::local`
+    /// errors and transcribes nothing. This is that rule, applied to the side
+    /// that was breaking it.
+    ///
+    /// Kept as a flag rather than deleted because the extract still has a
+    /// defensible future — labelled as what it is, with its own origin and its
+    /// own string, it is a usable stopgap. Unlabelled, it is not.
     pub soft_fallback: bool,
 }
 
@@ -414,14 +431,14 @@ impl LocalLlm {
     pub fn new() -> Self {
         Self {
             models_dir: crate::paths::models_dir(),
-            soft_fallback: true,
+            soft_fallback: false,
         }
     }
 
     pub fn with_models_dir(dir: PathBuf) -> Self {
         Self {
             models_dir: dir,
-            soft_fallback: true,
+            soft_fallback: false,
         }
     }
 
@@ -809,9 +826,13 @@ mod tests {
     use crate::domain::summary::SummaryTemplate;
     use tempfile::tempdir;
 
+    /// The extract still works when something asks for it — but nothing in
+    /// production does, which is what `production_does_not_fabricate_a_summary`
+    /// holds.
     #[test]
     fn soft_fallback_summarize_without_model() {
-        let llm = LocalLlm::with_models_dir(tempdir().unwrap().path().to_path_buf());
+        let mut llm = LocalLlm::with_models_dir(tempdir().unwrap().path().to_path_buf());
+        llm.soft_fallback = true;
         let i = llm
             .summarize(
                 crate::domain::context::SummarySubject {
@@ -846,6 +867,40 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.contains("not installed"));
+    }
+
+    /// The regression this whole change exists for. A user with no model
+    /// downloaded must not be handed the first four sentences of their own
+    /// transcript with a badge saying a model wrote it — and `auto_summarize`
+    /// is on by default, so nobody has to ask for it to happen.
+    #[test]
+    fn production_does_not_fabricate_a_summary() {
+        assert!(
+            !LocalLlm::new().soft_fallback,
+            "the extract is reachable in production"
+        );
+        assert!(
+            !LocalLlm::with_models_dir(tempdir().unwrap().path().to_path_buf()).soft_fallback,
+            "the extract is reachable in production"
+        );
+    }
+
+    /// Chat has the same hole: keyword hits from the transcript, prefixed
+    /// "Based on the transcript:", arriving in the assistant's own bubble.
+    #[test]
+    fn production_does_not_fabricate_a_chat_answer() {
+        let err = LocalLlm::with_models_dir(tempdir().unwrap().path().to_path_buf())
+            .chat(
+                &[ChatMessage {
+                    role: "user".into(),
+                    content: "what did we decide".into(),
+                }],
+                "Me: we decided to ship auth on Friday.",
+                "llama32-1b",
+                "cpu",
+            )
+            .unwrap_err();
+        assert!(err.contains("not installed"), "{err}");
     }
 
     /// How many Portuguese and English function words an answer contains.
