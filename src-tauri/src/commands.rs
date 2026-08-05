@@ -12,6 +12,7 @@ use crate::domain::job::{
     MeetingEvent, MeetingPhase, MeetingProgress, MeetingRecord, MeetingStatus,
 };
 use crate::domain::overlay::{dock_at, footprints, overlay_visible, OverlayPosition};
+use crate::domain::playback::{playable_recording, Unplayable};
 use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, SummaryVersion};
 use crate::domain::search::SearchHit;
 use crate::domain::segmenter::{Segmenter, Utterance};
@@ -412,6 +413,47 @@ pub fn get_transcript(
         return Ok(t.clone());
     }
     state.db.load_transcript(&id)
+}
+
+/// Where this meeting's recording is, once it is proven to be one of ours.
+///
+/// The window asks by id and never by path, because `audio_path` is a string in
+/// a row on the user's disk and the WebView is the other side of the trust
+/// boundary. What comes back is a file the asset protocol has just been told to
+/// serve — the scope in `tauri.conf.json` is empty, and this is the only thing
+/// that ever adds to it, one recording at a time. Naming any other file in the
+/// URL is refused by Tauri before a byte is read, and the refusal re-resolves
+/// the path at request time, so a file swapped for a symlink after this returns
+/// stops matching what was allowed.
+///
+/// `None` for every way there is nothing to play: a meeting still being
+/// recorded, an imported one with no audio retained, a file deleted from under
+/// the app, a row pointing outside the recordings directory. The window shows
+/// the same thing for all of them; only the log tells the last one apart.
+#[tauri::command]
+pub fn meeting_audio_path(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Option<String>, String> {
+    let Some(stored) = state.db.get_meeting(&id)?.and_then(|m| m.audio_path) else {
+        return Ok(None);
+    };
+    match playable_recording(&recordings_dir(), &stored) {
+        Ok(path) => {
+            app.asset_protocol_scope()
+                .allow_file(&path)
+                .map_err(|e| e.to_string())?;
+            Ok(Some(path.display().to_string()))
+        }
+        Err(Unplayable::Missing) => Ok(None),
+        Err(Unplayable::Outside) => {
+            // The path is not repeated: it arrived from a row this refuses to
+            // trust and this line lands in a file on the user's disk.
+            tracing::warn!("refusing to play a recording stored outside the app directory");
+            Ok(None)
+        }
+    }
 }
 
 /// Fold a fresh set of suggestions into the meeting's action items.

@@ -166,6 +166,17 @@ fn en_dict() -> HashMap<&'static str, &'static str> {
         ("notes.placeholder", "A name, a decision, a link…"),
         ("notes.empty", "Nothing written yet. Notes are read back when this meeting is summarized and when you chat with it, and they are believed over the transcript."),
         ("transcript.edit", "Correct this line"),
+        ("transcript.seek", "Play from here"),
+        // Not `record.pause`: that one stops a recording, and a control that
+        // shares its words with the one beside it eventually shares its handler
+        // too.
+        ("player.play", "Play"),
+        ("player.pause", "Pause"),
+        ("player.position", "Position in the recording"),
+        (
+            "player.unavailable",
+            "The recording for this meeting is not on this computer.",
+        ),
         ("context.placeholder", "Add context…"),
         ("context.add", "Add note"),
         ("context.remove", "Remove note"),
@@ -414,6 +425,14 @@ fn pt_dict() -> HashMap<&'static str, &'static str> {
         ("notes.placeholder", "Um nome, uma decisão, um link…"),
         ("notes.empty", "Nada escrito ainda. As notas são lidas de volta quando esta reunião for resumida e quando você conversar com ela, e são acreditadas acima da transcrição."),
         ("transcript.edit", "Corrigir esta linha"),
+        ("transcript.seek", "Reproduzir a partir daqui"),
+        ("player.play", "Reproduzir"),
+        ("player.pause", "Pausar"),
+        ("player.position", "Posição na gravação"),
+        (
+            "player.unavailable",
+            "A gravação desta reunião não está neste computador.",
+        ),
         ("context.placeholder", "Adicionar contexto…"),
         ("context.add", "Adicionar nota"),
         ("context.remove", "Remover nota"),

@@ -45,6 +45,7 @@ import { SummarizeButton } from "./components/SummarizeButton";
 import { ActionItems } from "./components/ActionItems";
 import { NotesPanel } from "./components/NotesPanel";
 import { EditableLine } from "./components/EditableLine";
+import { AudioPlayer } from "./components/AudioPlayer";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { ContextBar } from "./components/ContextBar";
@@ -172,6 +173,18 @@ function AppShell({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<LiveTranscript>({ segments: [] });
   const [transcriptOwner, setTranscriptOwner] = useState<string | null>(null);
+  /// Where the selected meeting's recording is, once the backend has proven the
+  /// row points inside its own directory.
+  ///
+  /// `undefined` while the answer is still in flight, which is a different thing
+  /// from `null`, "there is nothing to play". Without the distinction the note
+  /// about a missing recording flashes over every meeting on the way in.
+  const [audioPath, setAudioPath] = useState<string | null | undefined>(
+    undefined,
+  );
+  /// The player's element, held here because the transcript seeks through it and
+  /// the transcript is rendered by this component rather than by the player.
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const [status, setStatus] = useState<RecorderStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [query, setQuery] = useState("");
@@ -259,6 +272,48 @@ function AppShell({
     () => meetings.find((m) => m.id === selectedId) ?? null,
     [meetings, selectedId],
   );
+
+  /// Ask where this meeting's recording is, whenever which meeting or what it is
+  /// doing changes. The status is a dependency and not decoration: the file is
+  /// written when the recorder stops, so a meeting asked about while it was
+  /// still being captured has to be asked again once it is not.
+  ///
+  /// The late answer to an abandoned request is dropped. Selecting two meetings
+  /// quickly would otherwise leave the first one's recording under the second
+  /// one's transcript, which is the one mistake a player like this must not make.
+  const selectedStatus = selected?.status;
+  useEffect(() => {
+    if (!selectedId) {
+      setAudioPath(null);
+      return;
+    }
+    let live = true;
+    setAudioPath(undefined);
+    api
+      .meetingAudioPath(selectedId)
+      .then((p) => {
+        if (live) setAudioPath(p);
+      })
+      .catch(() => {
+        if (live) setAudioPath(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [selectedId, selectedStatus]);
+
+  /// Play the recording from where a line was said.
+  ///
+  /// Best effort, deliberately: a click landing before the file's metadata has
+  /// arrived has nowhere to seek to, and the honest response is to do nothing
+  /// rather than to queue a jump the user has stopped expecting.
+  const seekTo = useCallback((ms: number) => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.currentTime = ms / 1000;
+    // A click on a line is a request to hear it, not to move a cursor and wait.
+    void el.play().catch(() => {});
+  }, []);
 
   /// The phase the header narrates, or `null` when there is nothing to say.
   /// `ready` is the end of the walk and clears the state; `summary_failed` is
@@ -1364,6 +1419,36 @@ function AppShell({
                       </div>
                     </div>
                   </div>
+                  {/* Under the title rather than in its own strip: this is the
+                      meeting's recording, not a second region, and a rule of its
+                      own directly beneath the header's would read as one.
+                      Nothing is drawn while the answer is in flight — see
+                      `audioPath` — and nothing is drawn for the meeting being
+                      recorded either, where the file does not exist yet because
+                      it is still being captured. Saying "not on this computer"
+                      about audio that is arriving is worse than saying nothing. */}
+                  {audioPath !== undefined &&
+                    selected.status !== "recording" &&
+                    selected.status !== "paused" && (
+                      <div className="mx-auto w-full max-w-pane px-6 pb-3">
+                        {audioPath ? (
+                          <AudioPlayer
+                            // Remounted per recording, so the transport does not
+                            // open the next meeting showing the previous one's
+                            // position.
+                            key={audioPath}
+                            audioRef={audioRef}
+                            path={audioPath}
+                            durationMs={selected.duration_ms}
+                            onUnavailable={() => setAudioPath(null)}
+                          />
+                        ) : (
+                          <p className="text-xs text-fg-muted">
+                            {t("player.unavailable")}
+                          </p>
+                        )}
+                      </div>
+                    )}
                 </div>
 
                 {/* The copy control rides the tab rule rather than the pane:
@@ -1491,9 +1576,30 @@ function AppShell({
                                       <span className="font-medium">
                                         {me ? t("speaker.me") : t("speaker.others")}
                                       </span>
-                                      <span className="tabular-nums">
-                                        {formatDuration(s.start_ms)}
-                                      </span>
+                                      {/* The offset was already the seek target
+                                          in everything but function. It becomes
+                                          the control rather than the bubble
+                                          because the bubble is already a button
+                                          — it opens the correction — and one
+                                          element cannot carry two intents for
+                                          the same click. Plain text again when
+                                          there is nothing to play, so the app
+                                          never offers an action it cannot
+                                          perform. */}
+                                      {audioPath ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => seekTo(s.start_ms)}
+                                          aria-label={t("transcript.seek")}
+                                          className={`rounded-xs tabular-nums hover:text-accent ${FOCUS}`}
+                                        >
+                                          {formatDuration(s.start_ms)}
+                                        </button>
+                                      ) : (
+                                        <span className="tabular-nums">
+                                          {formatDuration(s.start_ms)}
+                                        </span>
+                                      )}
                                     </div>
                                   )}
                                   {/* The corner nearest the speaker's own edge
