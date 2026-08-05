@@ -87,6 +87,49 @@ impl LiveTranscript {
         }
     }
 
+    /// Take a later transcription of the same audio in place of this one, one
+    /// speaker at a time.
+    ///
+    /// Replacement, not a merge. The two passes heard the same words, so a merge
+    /// would have to tell "the same sentence decoded better" from "two different
+    /// things said", and nothing in a transcript carries that — the failure mode
+    /// is every sentence of the meeting appearing twice. The later pass read the
+    /// whole recording in one go, which is the one that keeps its own decoder
+    /// context across the meeting, so it is the better of the two everywhere and
+    /// there is nothing in the earlier one worth keeping beside it.
+    ///
+    /// The clock goes with it. The live pass timestamps an utterance by where
+    /// the segmenter cut it; a whole-recording pass timestamps each line by where
+    /// the engine itself heard it, which is finer and does not inherit our pause
+    /// heuristic. Both count from the start of the recording, so nothing shifts.
+    ///
+    /// Per speaker, because the two channels are transcribed independently and
+    /// either can come back empty. A whole-recording pass that heard the
+    /// microphone and nothing on the system channel is not a statement that
+    /// nobody else spoke — it is one channel's answer, and taking it as the
+    /// whole meeting would delete the other half of a conversation that was
+    /// already on screen. A speaker the later pass has no line for keeps the
+    /// lines it had.
+    ///
+    /// Returns whether anything was replaced.
+    pub fn replace_with(&mut self, better: LiveTranscript) -> bool {
+        if better.segments.is_empty() {
+            return false;
+        }
+        let heard = |speaker| better.segments.iter().any(|s| s.speaker == speaker);
+        let mut merged = LiveTranscript::new();
+        for s in self.segments.drain(..) {
+            if !heard(s.speaker) {
+                merged.append(s);
+            }
+        }
+        for s in better.segments {
+            merged.append(s);
+        }
+        *self = merged;
+        true
+    }
+
     pub fn plain_text(&self) -> String {
         self.segments
             .iter()
@@ -184,6 +227,67 @@ mod tests {
         t.edit_segment("a", "Claude Code");
         assert!(t.plain_text().contains("Claude Code"));
         assert!(!t.plain_text().contains("clode Cote"));
+    }
+
+    /// The final pass is the source of truth once it has words, and it brings
+    /// its own clock — the summary, the export and the search index all read
+    /// what this leaves behind.
+    #[test]
+    fn a_later_pass_with_words_replaces_the_live_one_whole() {
+        let mut t = two_lines();
+        let mut better = LiveTranscript::new();
+        better.append(TranscriptSegment::new(Speaker::Me, "Claude Code", 120, 980));
+        better.append(TranscriptSegment::new(
+            Speaker::Others,
+            "sim, claro",
+            1_100,
+            1_900,
+        ));
+        assert!(t.replace_with(better));
+        assert_eq!(
+            t.segments().len(),
+            2,
+            "the live lines were kept beside the new ones"
+        );
+        assert_eq!(t.segments()[0].text, "Claude Code");
+        assert_eq!(t.segments()[1].text, "sim, claro");
+        assert_eq!(
+            t.segments()[0].start_ms,
+            120,
+            "the later pass brings its clock"
+        );
+    }
+
+    /// A pass that heard nothing is not an improvement, and a meeting whose
+    /// transcript went blank at Stop would be the worst possible outcome of a
+    /// feature sold as better quality.
+    #[test]
+    fn a_later_pass_with_nothing_in_it_never_replaces_words() {
+        let mut t = two_lines();
+        assert!(!t.replace_with(LiveTranscript::new()));
+        assert_eq!(t.segments().len(), 2);
+    }
+
+    /// The same rule, one channel at a time. The two channels are transcribed
+    /// independently and either can come back empty, so a pass that heard the
+    /// microphone and nothing on the system channel must not take the other
+    /// side of the conversation down with it.
+    #[test]
+    fn a_speaker_the_later_pass_did_not_hear_keeps_its_lines() {
+        let mut t = two_lines();
+        let mut better = LiveTranscript::new();
+        better.append(TranscriptSegment::new(Speaker::Me, "Claude Code", 120, 980));
+        assert!(t.replace_with(better));
+        let lines: Vec<_> = t
+            .segments()
+            .iter()
+            .map(|s| (s.speaker, s.text.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![(Speaker::Me, "Claude Code"), (Speaker::Others, "sim")],
+            "the channel nobody re-read lost its words"
+        );
     }
 
     #[test]

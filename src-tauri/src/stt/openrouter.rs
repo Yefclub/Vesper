@@ -39,6 +39,10 @@ impl OpenRouterStt {
         }
     }
 
+    /// `prompt` is the user's vocabulary, already normalised and bounded by
+    /// `domain::vocabulary`. Empty for a user who never filled the field in, and
+    /// then the field is not sent at all — the request is byte-for-byte the one
+    /// this client has always made.
     pub async fn transcribe(
         &self,
         pcm: &[i16],
@@ -46,6 +50,7 @@ impl OpenRouterStt {
         api_key: &str,
         model: &str,
         language: &str,
+        prompt: &str,
     ) -> Result<(String, Option<i64>), String> {
         if api_key.trim().is_empty() {
             return Err("OpenRouter API key required".into());
@@ -60,6 +65,9 @@ impl OpenRouterStt {
             .text("model", model.to_string());
         if language != "auto" && !language.is_empty() {
             form = form.text("language", language.to_string());
+        }
+        if !prompt.is_empty() {
+            form = form.text("prompt", prompt.to_string());
         }
 
         let res = self

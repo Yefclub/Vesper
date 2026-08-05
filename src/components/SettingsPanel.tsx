@@ -601,6 +601,38 @@ export function SettingsPanel({
                     { value: "pt", label: "Português" },
                   ]}
                 />
+                {/* Also outside the provider branch, and for the opposite
+                    reason to the language above: the switch is stored for
+                    everybody, but only the local engine acts on it. Shown
+                    either way so the setting does not vanish when somebody
+                    tries the cloud for an afternoon, with the line underneath
+                    saying which of the two they are looking at. */}
+                <CheckBox
+                  label={t("settings.final_stt_pass")}
+                  checked={draft.final_stt_pass ?? true}
+                  onChange={(v) =>
+                    setDraft((d) => ({ ...d, final_stt_pass: v }))
+                  }
+                />
+                {(draft.final_stt_pass ?? true) && (
+                  <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                    {draft.stt_provider === "local"
+                      ? t("settings.final_stt_pass_on")
+                      : t("settings.final_stt_pass_cloud")}
+                  </p>
+                )}
+                {/* Both providers take it — whisper as its initial prompt, the
+                    cloud transcriber as its `prompt` field — so this is not
+                    inside the provider branch either. */}
+                <FieldArea
+                  label={t("settings.hot_words")}
+                  value={(draft.hot_words ?? []).join("\n")}
+                  onChange={(v) =>
+                    setDraft((d) => ({ ...d, hot_words: v.split("\n") }))
+                  }
+                  placeholder={t("settings.hot_words_placeholder")}
+                  hint={t("settings.hot_words_hint")}
+                />
               </section>
 
               <section className="space-y-3">
@@ -1138,6 +1170,42 @@ function Field({
         onChange={(e) => onChange(e.target.value)}
         className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
       />
+    </label>
+  );
+}
+
+/** A `Field` for something with more than one line in it. The hint sits under
+ *  the box rather than over it: it explains what the list does to a model, which
+ *  is worth reading once and in the way, above, forever after. */
+function FieldArea({
+  label,
+  value,
+  onChange,
+  placeholder,
+  hint,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  hint?: string;
+}) {
+  return (
+    <label className="block text-sm">
+      <span className="mb-1 block text-xs text-fg-subtle">{label}</span>
+      <textarea
+        value={value}
+        placeholder={placeholder}
+        rows={4}
+        spellCheck={false}
+        onChange={(e) => onChange(e.target.value)}
+        className={`w-full resize-y rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
+      />
+      {hint && (
+        <span className="mt-1 block text-xs leading-relaxed text-fg-muted">
+          {hint}
+        </span>
+      )}
     </label>
   );
 }

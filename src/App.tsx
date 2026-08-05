@@ -210,6 +210,14 @@ function AppShell({
   /// does not emit them — in which case none of the UI below renders and Stop
   /// behaves as it did.
   const [progress, setProgress] = useState<MeetingProgress | null>(null);
+  /// The meeting whose re-read failed, kept past the phase that reported it.
+  /// `meeting://progress` is one channel and the walk carries on: the summary
+  /// phases land after this one and would take the outcome off the screen
+  /// before anybody had read it. An id, so it cannot be shown over a different
+  /// meeting the user has opened since.
+  const [finalPassFailedId, setFinalPassFailedId] = useState<string | null>(
+    null,
+  );
   // The meeting being summarised, not a flag. Not `busy` either: that one is
   // also raised by starting, stopping and importing, and it would put the
   // summary pane to work over a recording that has not been transcribed yet.
@@ -261,11 +269,14 @@ function AppShell({
   );
 
   /// The phase the header narrates, or `null` when there is nothing to say.
-  /// `ready` is the end of the walk and clears the state; `summary_failed` is
-  /// an outcome, and it belongs beside the button that retries it rather than
+  /// `ready` is the end of the walk and clears the state; the two failures are
+  /// outcomes, and each belongs beside the thing it happened to rather than
   /// under a spinner that has stopped spinning.
   const working =
-    progress && progress.phase !== "ready" && progress.phase !== "summary_failed"
+    progress &&
+    progress.phase !== "ready" &&
+    progress.phase !== "summary_failed" &&
+    progress.phase !== "final_pass_failed"
       ? progress.phase
       : null;
 
@@ -274,6 +285,8 @@ function AppShell({
   /// screen by the time the user reads this.
   const summaryFailed =
     progress?.phase === "summary_failed" && progress.meeting_id === selectedId;
+
+  const finalPassFailed = finalPassFailedId === selectedId;
 
   const refreshGate = useCallback(async () => {
     try {
@@ -296,13 +309,23 @@ function AppShell({
     }
   }, []);
 
+  /// Which load is the current one. Two of these can be in flight — a click on
+  /// the sidebar and the reload that follows a recording finishing — and the
+  /// slower request resolving last would paint its transcript under the other
+  /// one's title.
+  const loadRequest = useRef(0);
+
   const loadMeeting = useCallback(async (id: string) => {
+    const mine = ++loadRequest.current;
     setSelectedId(id);
     try {
       const [tr, m] = await Promise.all([
         api.getTranscript(id),
         api.getMeeting(id),
       ]);
+      // Somebody asked for a different meeting while this was in flight, and
+      // they asked more recently. This answer is about the previous one.
+      if (loadRequest.current !== mine) return;
       setTranscript(tr);
       // Which meeting the transcript on screen belongs to. `setSelectedId` above
       // ran before this request resolved, so the scroll effect keyed on the id
@@ -516,7 +539,14 @@ function AppShell({
             const rest = prev.filter((m) => m.id !== e.payload.id);
             return [e.payload, ...rest];
           });
-          setSelectedId(e.payload.id);
+          // The transcript comes with the selection. This handler already
+          // moved the selection to the finished meeting, and a stop pressed
+          // on the floating card goes straight to the backend — so nothing
+          // else was reloading the pane, and it went on showing whichever
+          // transcript happened to be up. What the backend last wrote is now
+          // the re-read of the whole recording, which makes the difference
+          // the length of the meeting rather than the last utterance of it.
+          void loadMeeting(e.payload.id);
         }),
       );
       track(
@@ -525,6 +555,13 @@ function AppShell({
           // `ready` is the end of the walk, not a step in it: the meeting is
           // on screen by then and a spinner beside it would be a lie.
           setProgress(p.phase === "ready" ? null : p);
+          // `saving` is the first phase of a walk, so it is where a previous
+          // meeting's note is cleared — the note outlives its own phase and
+          // would otherwise still be there for the next recording.
+          if (p.phase === "saving") setFinalPassFailedId(null);
+          if (p.phase === "final_pass_failed") {
+            setFinalPassFailedId(p.meeting_id);
+          }
           // The sidebar already paints a dot for any status other than
           // `ready`, so re-reading the list here lights it for free.
           if (p.phase === "transcribing") void refreshMeetings();
@@ -550,7 +587,7 @@ function AppShell({
       live = false;
       unsubs.forEach((u) => u());
     };
-  }, [handleStop, requestStart, refreshMeetings]);
+  }, [handleStop, requestStart, refreshMeetings, loadMeeting]);
 
   /// The in-app half of the record shortcut, and the half that actually works.
   ///
@@ -1441,6 +1478,20 @@ function AppShell({
                         className="mx-auto max-w-pane"
                         data-testid="transcript-panel"
                       >
+                        {/* Above the lines, because it says what the lines are:
+                            these came from the live pass and the re-read that
+                            was meant to replace them did not finish. Small and
+                            in the pane rather than a banner across the top —
+                            the recording, the transcript and the summary are
+                            all there, and only the improvement is missing. */}
+                        {finalPassFailed && (
+                          <p
+                            data-testid="final-pass-failed"
+                            className="mb-4 text-xs text-fg-muted"
+                          >
+                            {t("processing.final_pass_failed")}
+                          </p>
+                        )}
                         {transcript.segments?.length ? (
                           // `initial={false}` so opening a past meeting does not
                           // blur-and-fade three hundred rows at once: only the

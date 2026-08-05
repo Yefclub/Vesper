@@ -241,6 +241,11 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
         (wanted_local_weights(&current), current.auto_summarize)
     };
     settings.validate_models().map_err(|e| e.to_string())?;
+    // The only path that writes the whole settings row, so it is the only place
+    // the vocabulary can be bounded — and it has to be bounded here rather than
+    // where it is used, because what is stored is also what the drawer reads
+    // back and what the WebView could otherwise grow without limit.
+    settings.hot_words = crate::domain::vocabulary::normalise(&settings.hot_words);
     // The theme is not this command's to write. `set_theme` owns it, and the
     // drawer's draft carries whatever the theme was when it opened — so a Save
     // of some unrelated field would put that stale value back and silently undo
@@ -1078,6 +1083,106 @@ pub async fn stop_recording(
         .map_err(|e| e.to_string())?;
     state.db.upsert_meeting(&meeting)?;
 
+    // The whole recording, read again from the beginning.
+    //
+    // Where it sits with respect to `stt_flight`: inside it. This command took
+    // that lock above and holds it to the end, and it is what keeps a wipe, an
+    // import or a retranscribe from writing these same rows underneath the pass
+    // — the live ticker is already retired by generation, so nothing else is
+    // competing for the transcript. A recording started meanwhile does queue
+    // behind this rather than transcribing live, and that is the trade taken
+    // knowingly: its audio stays in the recorder and comes out as one backlog
+    // when the lock frees, whereas a transcript two writers disagreed about
+    // cannot be recovered at all.
+    //
+    // And deliberately AFTER the transcript is saved and the row has reached
+    // `Ready`. Whisper over an hour of audio is minutes of work, and a machine
+    // that loses power inside that window must still find a complete transcript
+    // and a meeting nothing is waiting to move on: this improves a finished
+    // meeting rather than being a step it can get stuck before. That is also why
+    // the whole-file fallback above is left in place rather than skipped when
+    // this is going to run — it costs a second reading of a recording nobody
+    // spoke in, and it is what stands if this one fails.
+    if settings.wants_final_stt_pass() {
+        let _ = app.emit(
+            "meeting://progress",
+            &MeetingProgress::new(&id, MeetingPhase::FinalPass),
+        );
+        let replaced = match final_stt_pass(&state, &settings, &path).await {
+            // Replacement is the whole point — see `LiveTranscript::replace_with`
+            // for why the two passes are not merged. A pass that came back with
+            // nothing leaves the live transcript exactly where it was.
+            Ok(better) => live.replace_with(better),
+            // Told to the window and not to the log, the same way a failed
+            // summary is: the message can name the model id, which arrives from
+            // the WebView, and the log is a file on the user's disk. Nothing
+            // else changes — the live transcript is saved and the meeting is
+            // ready, so this is an improvement that did not arrive rather than
+            // a recording that was lost.
+            Err(e) => {
+                tracing::warn!("the final transcription pass failed");
+                let _ = app.emit(
+                    "meeting://progress",
+                    &MeetingProgress::final_pass_failed(&id, &e),
+                );
+                false
+            }
+        };
+        // The row is read back rather than the copy this command has been
+        // holding since before the pass being written over it. Minutes can have
+        // gone by, and `rename_meeting` neither waits for this nor is blocked
+        // while it runs — writing the snapshot would take the name the user
+        // typed in that time straight back off the meeting.
+        //
+        // `None` is a meeting deleted while the pass was decoding, and it ends
+        // the walk here whichever way the pass went. Everything past this point
+        // writes to that row — the transcript, the summary, its cost, the record
+        // handed to the window — and `upsert_meeting` would put the meeting back
+        // on screen. The summary is the worse half: it would send the transcript
+        // of a meeting somebody deleted to whatever model is configured, and on
+        // a cloud provider that is a recording leaving the machine after the
+        // user asked for it to be gone.
+        //
+        // A terminal phase still goes out, or the header narrates a re-read that
+        // nothing will ever finish. Not `meeting://ready` though: that one puts
+        // the record back in the sidebar, which is the thing being avoided.
+        let Some(mut fresh) = state.db.get_meeting(&id)? else {
+            let _ = app.emit(
+                "meeting://progress",
+                &MeetingProgress::new(&id, MeetingPhase::Ready),
+            );
+            return Ok(meeting);
+        };
+        if replaced {
+            fresh.transcript_text = live.plain_text();
+            fresh.updated_at = chrono::Utc::now().to_rfc3339();
+            // Status untouched: it is already `Ready`, and the upsert is what
+            // rebuilds the search index over the new words.
+            //
+            // Failure is not propagated, unlike the identical pair further up.
+            // By here the recording is saved, the transcript is stored and the
+            // row is `Ready`; the way these fail is a delete landing in the
+            // moment between the read above and the write, and reporting that as
+            // an error would tell somebody their meeting failed to stop because
+            // they deleted it. Nothing is lost either way — what could not be
+            // written is an improvement to a meeting that is gone.
+            match state
+                .db
+                .save_transcript(&id, &live)
+                .and_then(|()| state.db.upsert_meeting(&fresh))
+            {
+                Ok(()) => {
+                    state.live.lock().insert(id.clone(), live.clone());
+                    // Carried forward, so the summary below and the record the
+                    // window receives are the row that was just written —
+                    // including a title renamed while the pass was running.
+                    meeting = fresh;
+                }
+                Err(e) => tracing::warn!("the re-read transcript could not be stored: {e}"),
+            }
+        }
+    }
+
     let mut done = MeetingProgress::new(&id, MeetingPhase::Ready);
     if settings.auto_summarize && !meeting.transcript_text.is_empty() {
         // The same flight every other whole-set replacement takes. A refinement
@@ -1142,6 +1247,28 @@ pub async fn stop_recording(
     let _ = app.emit("meeting://progress", &done);
     let _ = app.emit("meeting://ready", &meeting);
     Ok(meeting)
+}
+
+/// Transcribe the saved recording from the beginning, both channels.
+///
+/// A separate job over the whole file, not a bigger tail: it reads what is on
+/// disk rather than what is left in the recorder, and the engine keeps its own
+/// decoding context across the meeting instead of restarting at every pause the
+/// segmenter found. Nothing is billed here — the pass is local by construction,
+/// which is what `wants_final_stt_pass` decides.
+async fn final_stt_pass(
+    state: &Arc<AppState>,
+    settings: &AppSettings,
+    path: &std::path::Path,
+) -> Result<LiveTranscript, String> {
+    let (mic, sys, sr) = read_dual_wav(path).map_err(|e| e.to_string())?;
+    let chunks = state
+        .stt
+        .transcribe_whole_dual(settings, mic, sys, sr)
+        .await?;
+    let mut t = LiveTranscript::new();
+    apply_stt_chunks(&mut t, &chunks);
+    Ok(t)
 }
 
 /// Cadence of the backend live-STT ticker.
