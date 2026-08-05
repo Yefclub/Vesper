@@ -9,7 +9,8 @@ import {
 } from "react";
 import { motion } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
-import { Check, TriangleAlert, X } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { Check, Download, Trash2, TriangleAlert, X } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -23,6 +24,7 @@ import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
 import { applyTheme, currentTheme } from "../lib/theme";
 import { Button, FOCUS } from "./Button";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { ModelPicker } from "./ModelPicker";
 import { LLM_PROVIDERS, LOCALES, PROVIDERS, Segmented } from "./Segmented";
 import { Tabs } from "./Tabs";
@@ -44,6 +46,10 @@ interface Props {
   /// be told separately or its own toggle keeps showing the previous one.
   onThemeChange: (theme: string) => void;
   onRefreshModels: () => Promise<void>;
+  /// Every meeting has just been deleted. The shell owns the list, the open
+  /// meeting and the search box, and a drawer that reached into all three would
+  /// be a second place deciding what is on screen.
+  onWiped: () => void;
 }
 
 export function SettingsPanel({
@@ -53,6 +59,7 @@ export function SettingsPanel({
   onSave,
   onThemeChange,
   onRefreshModels,
+  onWiped,
 }: Props) {
   const { t, setLocale } = useI18n();
   const [draft, setDraft] = useState<AppSettings>({ ...settings });
@@ -281,6 +288,64 @@ export function SettingsPanel({
       ? draft.theme
       : currentTheme();
 
+  /// Read from the draft, not from the saved settings: the switch is on this
+  /// same screen, and a cloud picker that only disappears after Save leaves the
+  /// user looking at options the mode they just chose refuses.
+  const offline = draft.offline_mode;
+
+  /// The export/delete pair. One flag for both, so neither can run while the
+  /// other is: a wipe racing an export would delete meetings out from under the
+  /// loop writing them out.
+  const [dataBusy, setDataBusy] = useState(false);
+  const [dataMessage, setDataMessage] = useState<string | null>(null);
+  const [confirmWipe, setConfirmWipe] = useState(false);
+
+  const exportEverything = async () => {
+    const dir = await open({ directory: true, multiple: false });
+    if (typeof dir !== "string") return;
+    setDataBusy(true);
+    setDataMessage(null);
+    try {
+      const n = await api.exportAll(dir);
+      setDataMessage(t("data.exported").replace("{count}", String(n)));
+    } catch (e) {
+      setDataMessage(String(e));
+    } finally {
+      setDataBusy(false);
+    }
+  };
+
+  const wipeEverything = async () => {
+    setConfirmWipe(false);
+    setDataBusy(true);
+    setDataMessage(null);
+    try {
+      const n = await api.wipeAll();
+      setDataMessage(t("data.wiped").replace("{count}", String(n)));
+      // The list, the open meeting and the search index all still hold what was
+      // just deleted. Telling the app to reload is the caller's job — it owns
+      // the meeting list, and a settings drawer that reached into it would be
+      // two places deciding what is on screen.
+      onWiped();
+    } catch (e) {
+      setDataMessage(String(e));
+      // Partially deleted is still deleted. The list has to be re-read either
+      // way, or it goes on offering meetings that are gone.
+      onWiped();
+    } finally {
+      setDataBusy(false);
+    }
+  };
+  /// The choices left once nothing may leave the machine. `openai_compatible`
+  /// survives — `validate_endpoint_url` already holds it to a loopback or
+  /// private address, so that server is on this machine or this network.
+  const sttProviders = offline
+    ? PROVIDERS.filter((p) => p.value !== "openrouter")
+    : PROVIDERS;
+  const llmProviders = offline
+    ? LLM_PROVIDERS.filter((p) => p.value !== "openrouter")
+    : LLM_PROVIDERS;
+
   return (
     <motion.div
       {...backdropFade}
@@ -358,8 +423,14 @@ export function SettingsPanel({
                   single account and the same string authenticates transcription
                   and text. It only appears when a section is actually pointed at
                   it. */}
-              {(draft.stt_provider === "openrouter" ||
-                draft.llm_provider === "openrouter") && (
+              {offline && (
+                <p className="rounded-md border border-border bg-surface-2 px-3 py-2 text-xs leading-relaxed text-fg-muted">
+                  {t("settings.offline_hides")}
+                </p>
+              )}
+              {!offline &&
+                (draft.stt_provider === "openrouter" ||
+                  draft.llm_provider === "openrouter") && (
                 <Field
                   label={t("onboarding.api_key")}
                   value={draft.openrouter_api_key ?? ""}
@@ -389,9 +460,18 @@ export function SettingsPanel({
                       stt_provider: v as AppSettings["stt_provider"],
                     }))
                   }
-                  options={PROVIDERS}
+                  options={sttProviders}
                 />
-                {draft.stt_provider === "local" ? (
+                {draft.stt_provider !== "local" && offline ? (
+                  // Saved before the switch was thrown. The setting is not
+                  // rewritten from under the user — it is named, with the one
+                  // move that makes this section work again.
+                  <OfflineCloudNotice
+                    onUseLocal={() =>
+                      setDraft((d) => ({ ...d, stt_provider: "local" }))
+                    }
+                  />
+                ) : draft.stt_provider === "local" ? (
                   <>
                     {/* Bound to the catalog rather than free text. Typing the id
                         by hand meant downloading "Whisper Base" from the list
@@ -416,11 +496,20 @@ export function SettingsPanel({
                         text={t("settings.no_local_stt")}
                         partial={partialStt ?? null}
                         busy={progress !== null && progress.error == null}
+                        offline={offline}
                         onDownload={download}
                       />
                     )}
+                    {/* The catalogue is a shop, and the shop is shut: every row
+                        in it is a download, which offline mode refuses. The
+                        models already on disk stay selectable above. */}
                     <div className="space-y-2">
-                      {models
+                      {offline && (
+                        <p className="text-xs leading-relaxed text-fg-subtle">
+                          {t("settings.offline_no_download")}
+                        </p>
+                      )}
+                      {!offline && models
                         .filter((m) => m.kind === "stt")
                         .map((m) => (
                           <ModelRow
@@ -513,8 +602,15 @@ export function SettingsPanel({
                       llm_provider: v as AppSettings["llm_provider"],
                     }))
                   }
-                  options={LLM_PROVIDERS}
+                  options={llmProviders}
                 />
+                {draft.llm_provider === "openrouter" && offline && (
+                  <OfflineCloudNotice
+                    onUseLocal={() =>
+                      setDraft((d) => ({ ...d, llm_provider: "local" }))
+                    }
+                  />
+                )}
                 {draft.llm_provider === "openai_compatible" && (
                   <>
                     <Field
@@ -559,11 +655,17 @@ export function SettingsPanel({
                         text={t("settings.no_local_llm")}
                         partial={partialLlm ?? null}
                         busy={progress !== null && progress.error == null}
+                        offline={offline}
                         onDownload={download}
                       />
                     )}
                     <div className="space-y-2">
-                      {models
+                      {offline && (
+                        <p className="text-xs leading-relaxed text-fg-subtle">
+                          {t("settings.offline_no_download")}
+                        </p>
+                      )}
+                      {!offline && models
                         .filter((m) => m.kind === "llm")
                         .map((m) => (
                           <ModelRow
@@ -578,7 +680,12 @@ export function SettingsPanel({
                         ))}
                     </div>
                   </>
-                ) : (
+                ) : draft.llm_provider === "openrouter" && !offline ? (
+                  // `=== "openrouter"`, not "anything but local". With
+                  // `openai_compatible` chosen this branch was rendering the
+                  // OpenRouter picker and its reasoning box underneath the
+                  // server fields — a cloud control on a screen configured for
+                  // a server on this machine.
                   <>
                     <ModelPicker
                       id="settings-or-llm"
@@ -607,7 +714,7 @@ export function SettingsPanel({
                       }
                     />
                   </>
-                )}
+                ) : null}
                 {/* Local models only. A cloud provider runs on someone else's
                     hardware, so the choice has nothing to act on there. */}
                 <FieldSelect
@@ -634,6 +741,20 @@ export function SettingsPanel({
                     setDraft((d) => ({ ...d, auto_summarize: v }))
                   }
                 />
+                {/* Above the summary switch on purpose: it decides whether
+                    any of the cloud choices above are even reachable, and a
+                    control that overrides three others belongs where they can
+                    still be seen. */}
+                <CheckBox
+                  label={t("settings.offline_mode")}
+                  checked={draft.offline_mode}
+                  onChange={(v) => setDraft((d) => ({ ...d, offline_mode: v }))}
+                />
+                {draft.offline_mode && (
+                  <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                    {t("settings.offline_mode_on")}
+                  </p>
+                )}
                 {/* Only while it is off. A promise about what the app does not
                     do is worth reading in the state where it applies, and is
                     noise in the state where it does not. */}
@@ -644,13 +765,50 @@ export function SettingsPanel({
                 )}
               </section>
 
+              {/* Export first, then delete, in that order and in that place.
+                  Offering the delete without the export is offering somebody
+                  the choice between keeping years of meetings on a machine they
+                  are handing over and losing them. */}
+              <section className="space-y-3">
+                <h3 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+                  {t("data.title")}
+                </h3>
+                <p className="text-xs leading-relaxed text-fg-muted">
+                  {t("data.body")}
+                </p>
+                {dataMessage && (
+                  <p className="text-xs leading-relaxed text-fg">{dataMessage}</p>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={dataBusy}
+                    onClick={() => void exportEverything()}
+                  >
+                    <Download size={14} /> {t("data.export_all")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={dataBusy}
+                    onClick={() => setConfirmWipe(true)}
+                  >
+                    <Trash2 size={14} /> {t("data.wipe")}
+                  </Button>
+                </div>
+              </section>
+
               {/* Only where there is an NVIDIA card the current build cannot
                   reach. `cuda_device_name` comes from `nvidia-smi`, which
                   answers "there is one" even when this binary has no CUDA
                   backend — which is exactly the machine this offer is for.
                   Hidden once it is installed: the row would then be an
                   invitation to download something already downloaded. */}
-              {cudaPack && caps?.cuda_device_name && !cudaPack.ready && (
+              {/* `!offline` too: the pack is a 636 MB download like any other,
+                  and an offer that is refused the moment it is accepted is
+                  worse than no offer. */}
+              {cudaPack && caps?.cuda_device_name && !cudaPack.ready && !offline && (
                 <div className="rounded-md border border-border bg-surface-2 p-3">
                   <div className="mb-1 text-sm font-medium text-fg">
                     {t("cuda.title")}
@@ -849,6 +1007,19 @@ export function SettingsPanel({
           </Button>
         </div>
       </motion.div>
+
+      {/* Outside the drawer's own scroller, so the question is not something the
+          user can scroll away from while it is being asked. */}
+      {confirmWipe && (
+        <ConfirmDialog
+          title={t("data.confirm_title")}
+          body={t("data.confirm_body")}
+          confirmLabel={t("data.wipe")}
+          danger
+          onConfirm={() => void wipeEverything()}
+          onCancel={() => setConfirmWipe(false)}
+        />
+      )}
     </motion.div>
   );
 }
@@ -1023,6 +1194,7 @@ function FieldEmpty({
   text,
   partial,
   busy,
+  offline,
   onDownload,
 }: {
   label: string;
@@ -1031,6 +1203,8 @@ function FieldEmpty({
   partial: ModelInfo | null;
   /** Some row — possibly the other section's — is transferring. */
   busy: boolean;
+  /** Offline mode is on, so no transfer may start — including this resume. */
+  offline: boolean;
   onDownload: (id: string) => void;
 }) {
   const { t } = useI18n();
@@ -1044,18 +1218,47 @@ function FieldEmpty({
       {partial && line && (
         <div className="mt-2 flex items-center justify-between gap-3">
           <span className="text-2xs tabular-nums text-fg-subtle">{line}</span>
-          {/* The same call the catalog row makes, so the two buttons cannot
-              start two writers on one `.part`: `busy` closes both. */}
-          <Button
-            variant="secondary"
-            size="xs"
-            disabled={busy}
-            onClick={() => onDownload(partial.id)}
-          >
-            {t("model.continue")}
-          </Button>
+          {/* The bytes on disk stay on screen while offline — they are a fact
+              about this machine. Resuming is not: it is the same transfer the
+              catalogue above is hidden for, and a button whose only outcome is
+              the refusal sentence is worse than no button. */}
+          {offline ? (
+            <span className="text-2xs text-fg-subtle">
+              {t("settings.offline_no_download")}
+            </span>
+          ) : (
+            /* The same call the catalog row makes, so the two buttons cannot
+               start two writers on one `.part`: `busy` closes both. */
+            <Button
+              variant="secondary"
+              size="xs"
+              disabled={busy}
+              onClick={() => onDownload(partial.id)}
+            >
+              {t("model.continue")}
+            </Button>
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** A section still pointed at OpenRouter with offline mode on.
+ *
+ *  The setting is left alone and named instead of rewritten: coercing it would
+ *  mean turning the switch off later silently restores a cloud provider the
+ *  user never re-chose. The button is the whole fix, one click, in place. */
+function OfflineCloudNotice({ onUseLocal }: { onUseLocal: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div className="rounded-md border border-warn/30 bg-warn/10 p-3">
+      <p className="mb-2 text-xs leading-relaxed text-fg">
+        {t("settings.offline_cloud_picked")}
+      </p>
+      <Button size="xs" variant="secondary" onClick={onUseLocal}>
+        {t("settings.offline_use_local")}
+      </Button>
     </div>
   );
 }

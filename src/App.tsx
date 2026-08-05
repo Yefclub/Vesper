@@ -34,16 +34,21 @@ import { formatMeetingDateTime } from "./lib/datetime";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise, segmentArrive, transition } from "./lib/motion";
 import { applyTheme } from "./lib/theme";
-import { Button, FOCUS } from "./components/Button";
+import { Button, FOCUS, PANEL } from "./components/Button";
 import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CopyButton } from "./components/CopyButton";
 import { SummaryHistory } from "./components/SummaryHistory";
 import { ChatPanel } from "./components/ChatPanel";
+import { SummarizeButton } from "./components/SummarizeButton";
+import { ActionItems } from "./components/ActionItems";
+import { NotesPanel } from "./components/NotesPanel";
+import { EditableLine } from "./components/EditableLine";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { ContextBar } from "./components/ContextBar";
+import { EgressBadge } from "./components/EgressBadge";
 import { RecordTransport } from "./components/RecordTransport";
 import { Sidebar } from "./components/Sidebar";
 import { WindowControls } from "./components/WindowControls";
@@ -51,7 +56,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
 
-type Tab = "transcript" | "summary" | "chat";
+type Tab = "transcript" | "summary" | "notes" | "chat";
 
 /** Move the window, restoring it first if it is maximised.
  *
@@ -395,6 +400,12 @@ function AppShell({
         setError(String(e));
       }
       try {
+        // Not while offline mode is on. An update check is a request to a
+        // server that learns this installation exists, which is exactly what
+        // the switch is for — and a "fully offline" mode that phones home
+        // about versions would be the kind of small lie that makes the rest of
+        // the promise unbelievable.
+        if (settings.offline_mode) return;
         // Offered, never applied on its own: installing relaunches the app, and
         // relaunching can throw away a recording in progress. Deciding that for
         // someone is not ours to do.
@@ -960,6 +971,12 @@ function AppShell({
             every pixel to their left was a place the window could not be
             dragged from. The buttons opt back in. */}
         <div className="pointer-events-none flex items-center justify-end gap-1 [&>*]:pointer-events-auto">
+          {/* Renders only while something is actually leaving the machine, which
+              is what makes it worth reading when it appears. */}
+          <EgressBadge
+            settings={settings}
+            onOpenSettings={() => setShowSettings(true)}
+          />
           {/* The theme is one click from anywhere, not four (gear → Appearance →
               pick → close). It applies immediately and writes straight through
               to settings, because there is no draft out here to be dirty and
@@ -1079,7 +1096,7 @@ function AppShell({
                 </span>
               </div>
             )}
-            {pendingUpdate && (
+            {pendingUpdate && !settings.offline_mode && (
               <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
                 <span>{t("update.available").replace("{version}", pendingUpdate.version)}</span>
                 <Button
@@ -1099,7 +1116,16 @@ function AppShell({
                       // `install` alone when the bytes are already here, which
                       // is the usual case — `downloadAndInstall` would fetch
                       // them a second time.
+                      //
+                      // And never fetch them at all while offline mode is on.
+                      // An update discovered before the switch was thrown
+                      // leaves this offer behind it, and accepting it would
+                      // reach the network on a click the user thinks is local.
+                      // Installing bytes already on disk is not egress and
+                      // stays allowed.
                       if (updateReady) await update.install();
+                      else if (settings.offline_mode)
+                        throw new Error(t("update.offline"));
                       else await update.downloadAndInstall();
                       setUpdateNote(t("update.relaunching"));
                       await relaunch();
@@ -1215,9 +1241,10 @@ function AppShell({
                         the flex algorithm resolves the overflow by squeezing the
                         buttons instead of truncating the heading. */}
                     <div className="flex shrink-0 items-center gap-2">
-                      <Button size="xs" onClick={() => handleSummarize("general")}>
-                        <Sparkles size={16} /> {t("action.summarize")}
-                      </Button>
+                      <SummarizeButton
+                        disabled={busy}
+                        onSummarize={handleSummarize}
+                      />
                       <div className="flex items-center gap-1 rounded-md border border-border px-1">
                         {(["md", "pdf", "docx"] as const).map((format) => (
                           <Button
@@ -1247,6 +1274,7 @@ function AppShell({
                     items={[
                       { id: "transcript", label: t("tab.transcript") },
                       { id: "summary", label: t("tab.summary") },
+                      { id: "notes", label: t("tab.notes") },
                       { id: "chat", label: t("tab.chat") },
                     ]}
                   />
@@ -1284,10 +1312,14 @@ function AppShell({
                   // the foot of the pane, and a scroller wrapping a scroller
                   // puts it wherever the conversation happens to end. The other
                   // two tabs are documents and scroll as one.
-                  className={`min-h-0 flex-1 px-6 pb-6 pt-4 ${
+                  // The document padding is for the documents. Chat carries its
+                  // own — a scroller with `px-4 py-5` and a composer with
+                  // `pb-4` — and taking this pane's `px-6 pb-6` on top of it
+                  // floated the composer 40px above the foot of the card.
+                  className={`min-h-0 flex-1 ${
                     tab === "chat"
                       ? "flex flex-col overflow-hidden"
-                      : "overflow-y-auto"
+                      : "overflow-y-auto px-6 pb-6 pt-4"
                   }`}
                 >
                   <AnimatePresence mode="wait">
@@ -1365,16 +1397,30 @@ function AppShell({
                                       because `--color-me` is the accent, and a
                                       second accent fill would compete with the
                                       one on screen. */}
-                                  <p
-                                    className={clsx(
-                                      "max-w-reading rounded-lg border px-4 py-3 text-base leading-relaxed",
-                                      me
-                                        ? "rounded-br-sm border-me/30 bg-me/10"
-                                        : "rounded-bl-sm border-border bg-surface-2",
-                                    )}
-                                  >
-                                    {s.text}
-                                  </p>
+                                  <EditableLine
+                                    text={s.text}
+                                    mine={me}
+                                    // Only the meeting being recorded is off
+                                    // limits — the transcription ticker writes
+                                    // its whole set back, so an edit there
+                                    // would be overwritten by the next chunk.
+                                    // Every other meeting is a finished
+                                    // recording and correctable.
+                                    editable={
+                                      !status?.recording ||
+                                      status.meeting_id !== selected.id
+                                    }
+                                    label={t("transcript.edit")}
+                                    onSave={async (next) => {
+                                      const updated =
+                                        await api.editTranscriptSegment(
+                                          selected.id,
+                                          s.id,
+                                          next,
+                                        );
+                                      setTranscript(updated);
+                                    }}
+                                  />
                                 </motion.div>
                               );
                             })}
@@ -1408,19 +1454,26 @@ function AppShell({
                       >
                         {selected.summary ||
                         selected.key_points ||
-                        selected.action_items ? (
-                          // Three sections, two kinds of content: one is prose
-                          // that needs a measure, two are lists that do not.
-                          // `xl:` and not `lg:` because the grid measures the
-                          // viewport while the card is ~312px narrower — at
-                          // 1024px the right column would resolve to 130px.
-                          // Below the breakpoint it stacks, summary first.
-                          <div className="grid gap-6 xl:grid-cols-[minmax(0,36rem)_minmax(18rem,1fr)]">
-                            {/* Prose gets the reading measure and no box:
-                                boxing it is what makes the product's headline
-                                output read as a widget instead of as the
-                                answer. */}
-                            <section className="group">
+                        selected.action_items ||
+                        // A template whose sections are none of those three —
+                        // a client call with Requirements and Risks and a model
+                        // that skipped the summary — is still a summarised
+                        // meeting, and without this it showed the empty state.
+                        selected.sections?.length ? (
+                          // One column of panels, full width, in the order the
+                          // meeting is read: what happened, the points, the
+                          // work, then the record of previous runs. It was a
+                          // two-column grid, which spent a third of a wide
+                          // screen on a rail while the prose stayed at 36rem
+                          // and everything below the fold was in the narrow
+                          // side. Down the page each panel gets the whole
+                          // measure and nothing has to be hunted for.
+                          <div className="space-y-4">
+                            {/* The summary keeps its own shape inside the
+                                panel: reading measure on the prose, and a
+                                heavier weight than the panels under it, because
+                                it is the answer and they are its parts. */}
+                            <section className={`group ${PANEL}`}>
                               <div className="mb-2 flex items-start justify-between gap-2">
                                 <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
                                   {t("section.summary")}
@@ -1431,33 +1484,74 @@ function AppShell({
                                   className="-mt-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
                                 />
                               </div>
-                              <Markdown text={selected.summary || "—"} />
+                              <div className="max-w-reading">
+                                <Markdown text={selected.summary || "—"} />
+                              </div>
                             </section>
-                            {/* The two lists become a right-hand rail and keep
-                                the box — that is what makes short lines
-                                scannable blocks rather than more prose. */}
-                            <div className="space-y-6">
+                            {/* Whatever else this template asked for, in its
+                                order. `summary` is drawn above and `action_items`
+                                below — one is the answer and the other is a list
+                                of work with owners and a done flag, and neither
+                                is a card of prose.
+
+                                A meeting with no sections is one summarised
+                                before templates had shapes of their own: it
+                                falls back to Key points, which is what it has. */}
+                            {selected.sections?.length ? (
+                              selected.sections
+                                .filter(
+                                  (s) =>
+                                    s.key !== "summary" &&
+                                    s.key !== "action_items",
+                                )
+                                .map((s) => (
+                                  <Section
+                                    key={s.key}
+                                    title={t(`section.${s.key}`)}
+                                    body={s.body || "—"}
+                                    onImprove={
+                                      s.key === "key_points"
+                                        ? () => improve("key_points")
+                                        : undefined
+                                    }
+                                    improving={improving === "key_points"}
+                                  />
+                                ))
+                            ) : (
                               <Section
                                 title={t("section.key_points")}
                                 body={selected.key_points || "—"}
                                 onImprove={() => improve("key_points")}
                                 improving={improving === "key_points"}
                               />
-                              <Section
-                                title={t("section.action_items")}
-                                body={selected.action_items || "—"}
-                                onImprove={() => improve("action_items")}
-                                improving={improving === "action_items"}
-                              />
-                              <SummaryHistory
+                            )}
+                            {/* Not a `Section`: this one is work rather than
+                                prose. It ticks off, carries an owner and a
+                                deadline, and survives the meeting being
+                                summarised again — which the free-text card
+                                could not, because every run replaced it. The
+                                panel chrome is out here so the three below the
+                                summary read as one family. */}
+                            <div className={PANEL}>
+                              <ActionItems
+                                key={selected.id}
                                 meetingId={selected.id}
                                 reloadKey={versionsKey}
-                                onRestored={() => {
-                                  setVersionsKey((k) => k + 1);
-                                  void loadMeeting(selected.id);
-                                }}
                               />
                             </div>
+                            {/* Chrome inside this one, not out here: it returns
+                                null once a meeting has a single version, and a
+                                wrapper drawn around nothing is an empty bordered
+                                box. Only the thing that knows it has content can
+                                decide to draw a panel. */}
+                            <SummaryHistory
+                              meetingId={selected.id}
+                              reloadKey={versionsKey}
+                              onRestored={() => {
+                                setVersionsKey((k) => k + 1);
+                                void loadMeeting(selected.id);
+                              }}
+                            />
                           </div>
                         ) : summarizingId === selected.id ||
                           (progress?.phase === "summarizing" &&
@@ -1494,6 +1588,17 @@ function AppShell({
                             }
                           />
                         )}
+                      </motion.div>
+                    )}
+
+                    {tab === "notes" && (
+                      <motion.div
+                        key="notes"
+                        {...fadeRise}
+                        className="mx-auto max-w-pane"
+                        data-testid="notes-panel"
+                      >
+                        <NotesPanel key={selected.id} meetingId={selected.id} />
                       </motion.div>
                     )}
 
@@ -1575,17 +1680,6 @@ function AppShell({
                 true the instant recording begins — which is precisely when the
                 control has to still be there. It changes into pause and stop
                 instead of vanishing. */}
-            {/* Above the dock and only while recording: it is context about
-                what is being said now, and after Stop the meeting's own screen
-                is where notes belong. */}
-            {status?.recording && status.meeting_id && (
-              // The meeting being recorded, not the one on screen. The sidebar
-              // stays live during a recording, so those are not the same thing
-              // — and a note stamped with this recording's clock, filed against
-              // a meeting from last week, would be evidence of something that
-              // never happened.
-              <ContextBar meetingId={status.meeting_id} />
-            )}
             <AnimatePresence>
               {(!selected || status?.recording) && (
                 <RecordDock
@@ -1603,7 +1697,24 @@ function AppShell({
                   }
                   onStop={handleStop}
                   onPauseResume={handlePauseResume}
-                />
+                >
+                  {/* Above the transport and only while recording: it is context
+                      about what is being said now, and after Stop the meeting's
+                      own screen is where notes belong.
+
+                      Inside the dock rather than beside it — the dock is
+                      absolutely positioned and this was in the card's flow, so
+                      the bar sat against the sidebar while the transport it
+                      belongs to was centred. */}
+                  {status?.recording && status.meeting_id && (
+                    // The meeting being recorded, not the one on screen. The
+                    // sidebar stays live during a recording, so those are not
+                    // the same thing — and a note stamped with this recording's
+                    // clock, filed against a meeting from last week, would be
+                    // evidence of something that never happened.
+                    <ContextBar meetingId={status.meeting_id} />
+                  )}
+                </RecordDock>
               )}
             </AnimatePresence>
           </div>
@@ -1681,6 +1792,14 @@ function AppShell({
             settings={settings}
             models={models}
             onClose={() => setShowSettings(false)}
+            onWiped={() => {
+              // Everything the shell is holding is about to be about meetings
+              // that no longer exist: the list, whatever is open, and the search
+              // term that filtered it.
+              setSelectedId(null);
+              setQuery("");
+              void refreshMeetings();
+            }}
             onThemeChange={(theme) =>
               setSettings((prev) => ({ ...prev, theme }))
             }
@@ -1727,7 +1846,7 @@ function Section({
     // copies. A control that is always lit competes with the text it sits on;
     // one that only exists on hover is unreachable — `focus-within` keeps it for
     // the keyboard.
-    <section className="group rounded-lg border border-border bg-surface-2 p-4">
+    <section className={`group ${PANEL}`}>
       <div className="mb-2 flex items-start justify-between gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
           {title}

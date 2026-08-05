@@ -15,7 +15,12 @@
     var t = localStorage.getItem("vesper-theme");
     if (t !== "dark" && t !== "light") return; // absent -> light default, correct
     document.documentElement.setAttribute("data-theme", t);
-    if (t === "dark") document.documentElement.style.background = "#0b090c";
+    // Not in the overlay document. An inline style beats every stylesheet, so
+    // this line painted the floating card's window opaque in dark mode however
+    // transparent the CSS said it was — a black rectangle behind the rounded
+    // corners. `overlay.html` sets the class; this script runs in both.
+    if (t === "dark" && !document.documentElement.classList.contains("overlay"))
+      document.documentElement.style.background = "#0b090c";
   } catch (e) {
     /* storage blocked or cleared: light is the safe default */
   }

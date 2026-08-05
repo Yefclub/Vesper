@@ -2,9 +2,10 @@ use crate::audio::capture::{read_dual_wav, DualChannelRecorder};
 use crate::audio::decode::decode_audio_file;
 use crate::audio::devices::{list_audio_devices, AudioDevice};
 use crate::db::{Database, KeyHome};
+use crate::domain::actions::ActionItem;
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::chat::ChatMessage;
-use crate::domain::export::{export_meeting, safe_file_stem, ExportFormat};
+use crate::domain::export::{build_markdown, export_meeting, safe_file_stem, ExportFormat};
 use crate::domain::gate::{can_start_recording_with, StartGate};
 use crate::domain::i18n::{catalog, t, Locale};
 use crate::domain::job::{
@@ -13,8 +14,10 @@ use crate::domain::job::{
 use crate::domain::overlay::{dock_right_center, overlay_visible, COLLAPSED, EXPANDED};
 use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, SummaryVersion};
 use crate::domain::search::SearchHit;
+use crate::domain::segmenter::{Segmenter, Utterance};
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
 use crate::domain::shortcut::ShortcutStatus;
+use crate::domain::speaker::Speaker;
 use crate::domain::summary::{MeetingInsights, SummaryTemplate};
 use crate::domain::title::{fallback_title, is_fallback_title, parse_title};
 use crate::domain::transcript::LiveTranscript;
@@ -78,6 +81,18 @@ pub struct AppState {
     /// the first one's completion answer for the second, and the second then
     /// skipped a fallback it needed.
     pub live_stt_passes: Mutex<HashSet<String>>,
+    /// Where each channel's live audio is cut into utterances.
+    ///
+    /// One per channel, not one for both: two people pause in different places,
+    /// and a boundary found in the microphone means nothing in what the speakers
+    /// are playing. `.0` is the microphone, `.1` the system.
+    ///
+    /// Keyed by meeting, like `live`, and for the same reason. A single global
+    /// pair is a thing two recordings can both reach: a stop racing a live pass
+    /// that is still transcribing would take the buffer out from under it, and
+    /// the utterance that pass then failed to transcribe would be put back into
+    /// whatever pair had replaced it — the next meeting's, or nobody's.
+    pub segmenters: Mutex<HashMap<String, (Segmenter, Segmenter)>>,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -102,6 +117,7 @@ impl AppState {
             live_stt_generation: AtomicU64::new(0),
             refine_flight: tokio::sync::Mutex::new(()),
             live_stt_passes: Mutex::new(HashSet::new()),
+            segmenters: Mutex::new(HashMap::new()),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -374,6 +390,209 @@ pub fn get_transcript(
     state.db.load_transcript(&id)
 }
 
+/// Fold a fresh set of suggestions into the meeting's action items.
+///
+/// The model may replace its own untouched suggestions and nothing else — the
+/// rule lives in `domain::actions::merge_suggestions` and is tested there. This
+/// is the plumbing: read what is stored, merge, write both the rows and the
+/// text column that export and search read.
+///
+/// Errors are swallowed on purpose. A summary that arrived is worth keeping
+/// even if the task list could not be updated, and the alternative — failing
+/// the whole summarise — would throw away the expensive half over the cheap one.
+fn apply_action_items(state: &AppState, id: &str, insights: &MeetingInsights) {
+    let mut existing = state.db.list_action_items(id).unwrap_or_default();
+    if existing.is_empty() {
+        // A meeting summarised before this existed has its items only in the
+        // text column. Read them back rather than letting the first merge write
+        // over a list somebody may have been relying on.
+        //
+        // Marked as touched, because there is no way to know which of them a
+        // person had already corrected — the old column kept no such record.
+        // The cost is that a stale suggestion survives until it is deleted by
+        // hand; the alternative is deleting work nobody agreed to lose.
+        existing = state
+            .db
+            .get_meeting(id)
+            .ok()
+            .flatten()
+            .and_then(|m| m.action_items)
+            .map(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .map(|l| l.trim_start_matches('-').trim())
+                    .filter(|l| !l.is_empty())
+                    .map(|l| crate::domain::actions::ActionItem {
+                        id: 0,
+                        text: l.to_string(),
+                        owner: None,
+                        due: None,
+                        status: crate::domain::actions::ActionStatus::Open,
+                        source: crate::domain::actions::ActionSource::Ai,
+                        edited: true,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    let merged = crate::domain::actions::merge_suggestions(&existing, &insights.action_items);
+    if let Err(e) = state.db.save_action_items(id, &merged) {
+        tracing::warn!("action items could not be updated: {e}");
+    }
+}
+
+#[tauri::command]
+pub fn list_action_items(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<crate::domain::actions::ActionItem>, String> {
+    state.db.list_action_items(&id)
+}
+
+/// One item at a time, never the whole list.
+///
+/// A client that sends the list sends its idea of every *other* item with it,
+/// and that idea is stale the moment anything else writes — a summary merging
+/// in the background, or the same panel a second earlier. Every way this could
+/// lose somebody's work went through exactly that, so the list is not something
+/// the client is allowed to state.
+fn validated(mut item: ActionItem) -> Result<ActionItem, String> {
+    item.text = item.text.trim().to_string();
+    if item.text.is_empty() {
+        return Err("a task needs something in it".into());
+    }
+    if item.text.chars().count() > 2_000 {
+        return Err("that task is too long".into());
+    }
+    let tidy = |v: &Option<String>| {
+        v.as_ref().and_then(|x| {
+            let x = x.trim();
+            (!x.is_empty()).then(|| x.to_string())
+        })
+    };
+    item.owner = tidy(&item.owner);
+    item.due = tidy(&item.due);
+    Ok(item)
+}
+
+#[tauri::command]
+pub async fn add_action_item(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    text: String,
+) -> Result<Vec<ActionItem>, String> {
+    let _flight = state.refine_flight.lock().await;
+    if state.db.get_meeting(&id)?.is_none() {
+        return Err("meeting not found".into());
+    }
+    let item = validated(ActionItem {
+        id: 0,
+        text,
+        owner: None,
+        due: None,
+        status: crate::domain::actions::ActionStatus::Open,
+        // A person wrote it, so no summary may take it away.
+        source: crate::domain::actions::ActionSource::User,
+        edited: true,
+    })?;
+    state.db.insert_action_item(&id, &item)?;
+    state.db.list_action_items(&id)
+}
+
+/// Change one item. The source is not taken from the caller — an existing row
+/// keeps whose it was, so nothing can promote the model's suggestion into
+/// something a person is supposed to have said.
+#[tauri::command]
+pub async fn update_action_item(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    item: ActionItem,
+) -> Result<Vec<ActionItem>, String> {
+    let _flight = state.refine_flight.lock().await;
+    let item = validated(item)?;
+    state.db.update_action_item(&id, &item)?;
+    state.db.list_action_items(&id)
+}
+
+#[tauri::command]
+pub async fn delete_action_item(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    item_id: i64,
+) -> Result<Vec<ActionItem>, String> {
+    let _flight = state.refine_flight.lock().await;
+    state.db.delete_action_item(&id, item_id)?;
+    state.db.list_action_items(&id)
+}
+
+/// Correct one line of a transcript.
+///
+/// Local speech-to-text mishears names, acronyms and one-word answers, and a
+/// person fixing the line is the fastest route to notes worth trusting. The
+/// timing is not editable: it came from the audio, and the summary, the search
+/// index and any future alignment all read it.
+///
+/// Refused while that meeting is recording. The live transcript is being
+/// appended to by the transcription ticker, which writes the whole set back —
+/// an edit made in that window would be silently overwritten by the next chunk,
+/// which is worse than not offering it.
+#[tauri::command]
+pub async fn edit_transcript_segment(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    segment_id: String,
+    text: String,
+) -> Result<LiveTranscript, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("a line cannot be emptied — delete is a different action".into());
+    }
+    // Bounded for the same reason a note is: this reaches the summary prompt.
+    if text.chars().count() > 4_000 {
+        return Err("that line is too long".into());
+    }
+    let recording_this = state
+        .active_meeting
+        .lock()
+        .as_deref()
+        .is_some_and(|active| active == id)
+        && state.recorder.is_recording();
+    if recording_this {
+        return Err("the transcript can be corrected once the recording has stopped".into());
+    }
+    // The same lock the final pass and a retranscription take. Without it the
+    // recorder stopping is not enough: `stop_recording` is still awaiting the
+    // last chunk with a transcript it cloned before this edit existed, and it
+    // writes that clone back — so a correction made in the window between the
+    // capture closing and that write would vanish with no sign it had been
+    // made. Held across the whole read-modify-write below, because the value
+    // being protected is the transcript, not any one statement about it.
+    let _flight = state.stt_flight.lock().await;
+
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    let mut transcript = match state.live.lock().get(&id) {
+        Some(t) => t.clone(),
+        None => state.db.load_transcript(&id)?,
+    };
+    if !transcript.edit_segment(&segment_id, text) {
+        return Err("that line is no longer in this transcript".into());
+    }
+
+    // The summary reads `transcript_text`, not the segments, so the correction
+    // has to land there or it would be visible on screen and invisible to the
+    // model. All three writes — segments, that field, and the search index —
+    // commit together or not at all.
+    meeting.transcript_text = transcript.plain_text();
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    state.db.save_corrected_transcript(&meeting, &transcript)?;
+    // The cache is what `get_transcript` answers from while it is warm.
+    state.live.lock().insert(id.clone(), transcript.clone());
+    Ok(transcript)
+}
+
 #[tauri::command]
 pub fn delete_meeting(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.db.delete_meeting(&id)
@@ -447,13 +666,18 @@ pub async fn get_capabilities() -> Result<CapabilityReport, String> {
 pub async fn list_openrouter_stt_models(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<OrModel>, String> {
-    let key = state
-        .settings
-        .lock()
-        .openrouter_api_key
-        .clone()
-        .unwrap_or_default();
-    if key.is_empty() || key.contains('…') {
+    let (key, offline) = {
+        let s = state.settings.lock();
+        (
+            s.openrouter_api_key.clone().unwrap_or_default(),
+            s.offline_mode,
+        )
+    };
+    // The built-in list rather than a refusal: this only fills a dropdown, and
+    // an empty picker with an error beside it is a worse answer than the names
+    // that ship with the app. The request itself carries the API key, which is
+    // exactly the kind of quiet egress the switch exists to stop.
+    if offline || key.is_empty() || key.contains('…') {
         return Ok(default_stt_models());
     }
     fetch_openrouter_stt_models(&key).await
@@ -463,13 +687,18 @@ pub async fn list_openrouter_stt_models(
 pub async fn list_openrouter_llm_models(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<OrModel>, String> {
-    let key = state
-        .settings
-        .lock()
-        .openrouter_api_key
-        .clone()
-        .unwrap_or_default();
-    if key.is_empty() || key.contains('…') {
+    let (key, offline) = {
+        let s = state.settings.lock();
+        (
+            s.openrouter_api_key.clone().unwrap_or_default(),
+            s.offline_mode,
+        )
+    };
+    // The built-in list rather than a refusal: this only fills a dropdown, and
+    // an empty picker with an error beside it is a worse answer than the names
+    // that ship with the app. The request itself carries the API key, which is
+    // exactly the kind of quiet egress the switch exists to stop.
+    if offline || key.is_empty() || key.contains('…') {
         return Ok(default_llm_models());
     }
     fetch_openrouter_llm_models(&key).await
@@ -557,6 +786,7 @@ pub fn start_recording(
         id: id.clone(),
         title,
         status,
+        sections: Vec::new(),
         created_at: now.clone(),
         updated_at: now,
         duration_ms: 0,
@@ -572,6 +802,13 @@ pub fn start_recording(
     };
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
+    // This meeting's own pair, under this meeting's id. 16 kHz until capture
+    // opens and says otherwise — `set_sample_rate` on the first drain is what
+    // makes the milliseconds real.
+    state
+        .segmenters
+        .lock()
+        .insert(id.clone(), (Segmenter::new(16_000), Segmenter::new(16_000)));
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
     spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
@@ -598,6 +835,12 @@ pub fn pause_recording(state: State<'_, Arc<AppState>>) -> Result<RecorderStatus
         state.db.upsert_meeting(&m)?;
     }
     state.recorder.pause();
+    // The boundary is not marked here. Pressing Pause does end the sentence, but
+    // the recorder still holds samples captured before it, and sealing now would
+    // put those on the far side of the break — leaving them to be merged with
+    // whatever is said after the resume. `drive_live_stt` seals instead, once a
+    // drain comes back empty, which is the first moment everything captured
+    // before the pause is in the segmenter.
     Ok(status_of(&state))
 }
 
@@ -693,6 +936,12 @@ pub async fn stop_recording(
     // writes its result into the in-memory map only. Reopening the meeting shows
     // the transcript with the last chunk gone.
     let _flight = state.stt_flight.lock().await;
+    // Taken past that await, not before it. A live pass still transcribing holds
+    // that lock, so by here it has finished and put back whatever it could not
+    // transcribe — into this meeting's own entry, which is what the map is keyed
+    // for. Removed rather than borrowed: this recording is over, and nothing may
+    // add to it after this point.
+    let mut segmenters = state.segmenters.lock().remove(&id);
 
     let settings = state.settings.lock().clone();
     let mut live = state.live.lock().get(&id).cloned().unwrap_or_default();
@@ -724,20 +973,58 @@ pub async fn stop_recording(
         // the buffer. Skipping it — which is what happened whenever any live
         // segment existed — silently dropped the end of every meeting.
         let (mic, sys, sr) = tail;
-        if !mic.is_empty() || !sys.is_empty() {
-            let tail_ms = duration
-                .saturating_sub((mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64);
-            match state
-                .stt
-                .transcribe_dual(&settings, &mic, &sys, sr, tail_ms)
-                .await
-            {
-                Ok(chunks) => {
-                    bill_chunks(&state.db, &id, &chunks);
-                    apply_stt_chunks(&mut live, &chunks)
-                }
-                // Same reason as the summary above: the error names the model.
-                Err(_) => tracing::warn!("final chunk could not be transcribed"),
+        // Through the segmenters, and then emptied. They are holding the
+        // sentence that had not reached a pause yet, and the last sentence of a
+        // meeting never does — it is followed by somebody pressing Stop.
+        // `None` only if this meeting never had an entry — a recording that
+        // started before this build, or one whose start failed after claiming.
+        // The tail is still transcribed, just without a buffer in front of it.
+        let (mine, theirs) = match segmenters.as_mut() {
+            Some(seg) => {
+                seg.0.set_sample_rate(sr);
+                seg.1.set_sample_rate(sr);
+                let mut mine = seg.0.push(&mic);
+                let mut theirs = seg.1.push(&sys);
+                mine.extend(seg.0.flush());
+                theirs.extend(seg.1.flush());
+                (mine, theirs)
+            }
+            None => {
+                let mut fresh = (Segmenter::new(sr), Segmenter::new(sr));
+                let mut mine = fresh.0.push(&mic);
+                let mut theirs = fresh.1.push(&sys);
+                mine.extend(fresh.0.flush());
+                theirs.extend(fresh.1.flush());
+                (mine, theirs)
+            }
+        };
+        if !mine.is_empty() || !theirs.is_empty() {
+            // `Skip`, not `StopAndReturn`: there is no later pass to put an
+            // utterance back for, so stopping at the first failure would throw
+            // away every utterance behind it untried. Out of order is fine here
+            // — `apply_stt_chunks` files each one by its own timestamp.
+            let (me, others) = tokio::join!(
+                run_utterances(&state, &settings, &id, Speaker::Me, mine, sr, OnError::Skip),
+                run_utterances(
+                    &state,
+                    &settings,
+                    &id,
+                    Speaker::Others,
+                    theirs,
+                    sr,
+                    OnError::Skip
+                ),
+            );
+            let mut chunks = me.0;
+            chunks.extend(others.0);
+            // Same reason as the summary above: the error names the model, so it
+            // is logged rather than shown.
+            if me.2.is_some() || others.2.is_some() {
+                tracing::warn!("an utterance of the last chunk could not be transcribed");
+            }
+            if !chunks.is_empty() {
+                bill_chunks(&state.db, &id, &chunks);
+                apply_stt_chunks(&mut live, &chunks);
             }
         }
     }
@@ -781,10 +1068,19 @@ pub async fn stop_recording(
                 meeting.summary = Some(insights.summary.clone());
                 meeting.action_items = Some(insights.action_items_text());
                 meeting.key_points = Some(insights.key_points_text());
+                // Carried onto the record because `upsert_meeting` is what
+                // rebuilds the search index, and it indexes what the record
+                // holds — a stale list here means a section nobody can find.
+                meeting.sections = insights.sections.clone();
                 meeting.status = MeetingStatus::Ready;
                 name_meeting(&state, &settings, &mut meeting, &insights.summary).await;
                 meeting.updated_at = chrono::Utc::now().to_rfc3339();
                 state.db.upsert_meeting(&meeting)?;
+                // Last, because the upsert above writes the model's list into
+                // `action_items` and this writes the merged one over it. The
+                // other order left every protected item out of exports and
+                // search while the rows still held them.
+                apply_action_items(&state, &id, &insights);
             }
             // The transcript is already saved and the meeting is already Ready,
             // so propagating this told the user their recording was lost when
@@ -810,6 +1106,101 @@ pub async fn stop_recording(
 /// Cadence of the backend live-STT ticker.
 const LIVE_STT_INTERVAL_MS: u64 = 1200;
 
+/// How much of the previous utterance is handed to the model as context.
+///
+/// whisper decodes each call from nothing unless told otherwise, which is why
+/// the same name came back spelled three ways across three chunks. The tail of
+/// what was just said is the cheapest fix there is — no state to keep, because
+/// the transcript already holds it.
+const PROMPT_TAIL_CHARS: usize = 200;
+
+/// The last `PROMPT_TAIL_CHARS` of a line.
+fn prompt_tail(text: &str) -> String {
+    let text = text.trim();
+    // On a character boundary, not a byte one: this is Portuguese as often as
+    // English, and slicing an accented letter in half panics.
+    let start = text
+        .char_indices()
+        .rev()
+        .nth(PROMPT_TAIL_CHARS)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    text[start..].to_string()
+}
+
+/// The end of what this speaker last said, for the model to continue from.
+fn context_tail(state: &Arc<AppState>, id: &str, speaker: Speaker) -> String {
+    let live = state.live.lock();
+    let Some(t) = live.get(id) else {
+        return String::new();
+    };
+    let Some(last) = t.segments().iter().rev().find(|s| s.speaker == speaker) else {
+        return String::new();
+    };
+    prompt_tail(&last.text)
+}
+
+/// What a failed utterance means for the ones behind it.
+#[derive(Clone, Copy, PartialEq)]
+enum OnError {
+    /// Give up the rest of the channel and hand it back for the segmenter.
+    ///
+    /// For the live pass. `put_back` winds the buffer to where the failed
+    /// utterance began, so transcribing the ones behind it first would leave the
+    /// segmenter's clock ahead of its own audio.
+    StopAndReturn,
+    /// Carry on with the next one and lose only this.
+    ///
+    /// For stop, where nothing can be put back because there is no later pass —
+    /// so stopping would discard every utterance behind the failure untried.
+    Skip,
+}
+
+/// Transcribe one channel's utterances, oldest first.
+///
+/// Returns what landed, what must go back to the segmenter, and the first error.
+async fn run_utterances(
+    state: &Arc<AppState>,
+    settings: &AppSettings,
+    id: &str,
+    speaker: Speaker,
+    utterances: Vec<Utterance>,
+    sample_rate: u32,
+    on_error: OnError,
+) -> (Vec<SttChunkResult>, Vec<Utterance>, Option<String>) {
+    let mut done = Vec::new();
+    let mut failed = None;
+    let mut prompt = context_tail(state, id, speaker);
+    let mut left = utterances.into_iter();
+    for u in left.by_ref() {
+        match state
+            .stt
+            .transcribe_channel(settings, speaker, &u.pcm, sample_rate, u.start_ms, &prompt)
+            .await
+        {
+            Ok(chunk) => {
+                if !chunk.text.is_empty() {
+                    // Trimmed like the one read from the transcript. A backlog
+                    // chains several utterances through here, and handing each
+                    // the whole of the last would grow the prompt without bound
+                    // — fifteen seconds of speech is a lot of characters.
+                    prompt = prompt_tail(&chunk.text);
+                }
+                done.push(chunk);
+            }
+            Err(e) => {
+                if on_error == OnError::StopAndReturn {
+                    let mut back = vec![u];
+                    back.extend(left);
+                    return (done, back, Some(e));
+                }
+                failed.get_or_insert(e);
+            }
+        }
+    }
+    (done, Vec::new(), failed)
+}
+
 /// Drain whatever audio has arrived and transcribe it.
 ///
 /// No longer a command. It used to be driven by a `setInterval` in the window,
@@ -819,14 +1210,15 @@ const LIVE_STT_INTERVAL_MS: u64 = 1200;
 /// stalled transcription itself for anyone who minimized the app during a
 /// meeting, which is precisely when they would.
 async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), String> {
-    let id = state
-        .active_meeting
-        .lock()
-        .clone()
-        .ok_or_else(|| "no active meeting".to_string())?;
-    if !state.recorder.is_recording() || state.recorder.is_paused() {
+    if !state.recorder.is_recording() {
         return Ok(());
     }
+    // A pause no longer stops this pass — it changes what it is for. The
+    // recorder still holds whatever it captured before the button, and that
+    // audio has to reach the segmenter before the boundary is marked, or the end
+    // of the sentence lands after the break and merges with what is said on the
+    // far side of it.
+    let paused = state.recorder.is_paused();
     // Single-flight. The UI polls every 1200ms and a chunk can take longer than
     // that to transcribe, so without this the next poll drains a second slice of
     // audio while the first is still running. Both then timestamp their slice from
@@ -836,31 +1228,109 @@ async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), St
     let Ok(_flight) = state.stt_flight.try_lock() else {
         return Ok(());
     };
+    // Read past the lock, never before it. A stop and a start can both land while
+    // this pass waits for the flight, and an id taken beforehand would be the old
+    // meeting's while the recorder underneath has already become the new one's —
+    // so the drain below would take the new meeting's opening seconds and file
+    // them, or on failure buffer them, against the meeting that just ended.
+    let id = state
+        .active_meeting
+        .lock()
+        .clone()
+        .ok_or_else(|| "no active meeting".to_string())?;
     let (mic, sys, sr) = state.recorder.drain_chunks();
     if mic.is_empty() && sys.is_empty() {
+        // Empty while paused is the moment the boundary becomes safe: everything
+        // captured before the button is in the segmenter, and nothing more is
+        // coming until the resume. Idempotent, so the ticks that follow while
+        // the recording sits paused cost a flag write and nothing else.
+        //
+        // Bounded, and knowingly: a pause and a resume that both land inside one
+        // 1200ms tick are never observed here, so that utterance spans the
+        // break. Closing it needs a mark inside the captured stream, since a
+        // drain after such a resume carries both sides in one buffer with
+        // nothing between them. Not a regression — cutting on the clock spanned
+        // the break too — and a one-second pause is not a boundary anybody means.
+        if paused {
+            if let Some(seg) = state.segmenters.lock().get_mut(&id) {
+                seg.0.seal();
+                seg.1.seal();
+            }
+        }
         return Ok(());
     }
-    let start_ms = state
-        .recorder
-        .elapsed_ms()
-        .saturating_sub((mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64);
-    let settings = state.settings.lock().clone();
-    let chunks = match state
-        .stt
-        .transcribe_dual(&settings, &mic, &sys, sr, start_ms)
-        .await
-    {
-        Ok(chunks) => chunks,
-        Err(e) => {
-            // The audio was drained before the call. Propagating without putting
-            // it back threw a slice of the meeting away every 1200ms — so a cloud
-            // provider rejecting every chunk silently shredded the live
-            // transcript while the window showed nothing at all. The cursor goes
-            // back by what was taken and the next poll tries the same audio again.
+    // The drain is no longer the unit of transcription. What comes out of the
+    // recorder goes into the segmenters, and only a whole utterance — bounded by
+    // a pause — is sent to a model. A poll that lands mid-sentence now adds to
+    // the buffer instead of cutting the word in half.
+    let (mine, theirs) = {
+        let mut all = state.segmenters.lock();
+        // Looked up, never inserted. A ticker that outlives its stop by a beat
+        // would otherwise create an entry nobody is left to flush, and the audio
+        // in it would sit there until the process ended. The recorder takes its
+        // samples back instead, so nothing is dropped on the way out.
+        let Some(seg) = all.get_mut(&id) else {
             state.recorder.rewind_chunks(mic.len(), sys.len());
+            return Ok(());
+        };
+        seg.0.set_sample_rate(sr);
+        seg.1.set_sample_rate(sr);
+        (seg.0.push(&mic), seg.1.push(&sys))
+    };
+    if mine.is_empty() && theirs.is_empty() {
+        return Ok(());
+    }
+    let settings = state.settings.lock().clone();
+    // The two channels are independent, so waiting for one before starting the
+    // other would double the latency of every utterance for no reason.
+    let (me, others) = tokio::join!(
+        run_utterances(
+            state,
+            &settings,
+            &id,
+            Speaker::Me,
+            mine,
+            sr,
+            OnError::StopAndReturn
+        ),
+        run_utterances(
+            state,
+            &settings,
+            &id,
+            Speaker::Others,
+            theirs,
+            sr,
+            OnError::StopAndReturn
+        ),
+    );
+    // Put back before propagating, and in reverse so the oldest ends up at the
+    // head. Audio dropped here is a slice of a meeting nobody can get back — the
+    // reason the recorder already rewinds its own cursor when a provider rejects
+    // a chunk.
+    {
+        let mut all = state.segmenters.lock();
+        if let Some(seg) = all.get_mut(&id) {
+            for u in me.1.into_iter().rev() {
+                seg.0.put_back(u);
+            }
+            for u in others.1.into_iter().rev() {
+                seg.1.put_back(u);
+            }
+        }
+    }
+    let mut chunks = me.0;
+    chunks.extend(others.0);
+    if let Some(e) = me.2.or(others.2) {
+        // Whatever did land is still merged below on the next poll; this pass
+        // reports the failure so the window can say transcription is failing.
+        if chunks.is_empty() {
             return Err(e);
         }
-    };
+        tracing::warn!("an utterance could not be transcribed: {e}");
+    }
+    if chunks.is_empty() {
+        return Ok(());
+    }
     // Charged before the transcript is merged. The sum goes through SQL rather
     // than a read-modify-write here: two channels transcribe concurrently and
     // one would overwrite the other.
@@ -1001,11 +1471,15 @@ pub async fn summarize_meeting(
     m.summary = Some(insights.summary.clone());
     m.action_items = Some(insights.action_items_text());
     m.key_points = Some(insights.key_points_text());
+    m.sections = insights.sections.clone();
     // Re-summarising is also the way an old meeting still carrying its date
     // label gets a real name.
     name_meeting(&state, &settings, &mut m, &insights.summary).await;
     m.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&m)?;
+    // After the upsert, which wrote the model's list; this writes the merged
+    // one over it.
+    apply_action_items(&state, &id, &insights);
     Ok(insights)
 }
 
@@ -1071,18 +1545,28 @@ pub fn add_context_note(
     if text.chars().count() > 2_000 {
         return Err("that note is too long".into());
     }
-    // The note goes to the meeting being recorded, and to no other. The id
-    // arrives from the WebView while the stamp comes from the recorder, so
-    // without this a caller could attach a note carrying this recording's
-    // timestamp to any meeting in the database — and notes are told to win over
-    // the transcript, which makes that a way to write authoritative context
-    // into somebody else's meeting.
-    let active = state.active_meeting.lock().clone();
-    match active {
-        Some(active) if active == id && state.recorder.is_recording() => {}
-        _ => return Err("context notes belong to the meeting being recorded".into()),
+    // The stamp is the thing that has to be earned, not the note. A note about
+    // the meeting being recorded gets the recorder's position; a note about any
+    // other meeting gets none.
+    //
+    // That distinction is the security boundary. The id arrives from the
+    // WebView while the stamp comes from the recorder, so handing this
+    // recording's timestamp to an arbitrary meeting would let a caller write
+    // evidence of a position the audio never had — and notes are told to win
+    // over the transcript. A note with no position claims nothing.
+    let recording_this = state
+        .active_meeting
+        .lock()
+        .as_deref()
+        .is_some_and(|active| active == id)
+        && state.recorder.is_recording();
+    let at_ms = recording_this.then(|| state.recorder.elapsed_ms() as i64);
+    // The meeting still has to exist. Without this the foreign key would be the
+    // only thing refusing, and it would do it with a SQLite error rather than a
+    // sentence.
+    if state.db.get_meeting(&id)?.is_none() {
+        return Err("meeting not found".into());
     }
-    let at_ms = Some(state.recorder.elapsed_ms() as i64);
     state.db.add_context_note(&id, text, at_ms)
 }
 
@@ -1114,6 +1598,12 @@ pub async fn import_audio(
     path: String,
     title: Option<String>,
 ) -> Result<MeetingRecord, String> {
+    // The transcription single-flight, held for the whole job. Not for the
+    // recorder's sake — this reads a file — but so a wipe cannot delete the row
+    // this is about to write. `wipe_all_cmd` takes the same lock, and without it
+    // a confirmed wipe finishes while an import is mid-transcription and the
+    // meeting appears afterwards, pointing at a WAV that is already gone.
+    let _flight = state.stt_flight.lock().await;
     let path = PathBuf::from(path);
     // Multi-format: wav/mp3/m4a/ogg/flac/webm via decode layer.
     // The length ceiling lives in the decoder, where it can stop before the
@@ -1136,6 +1626,7 @@ pub async fn import_audio(
         id: id.clone(),
         title,
         status: MeetingStatus::Transcribing,
+        sections: Vec::new(),
         created_at: now.clone(),
         updated_at: now,
         duration_ms: (pcm.len() as u64 * 1000) / sr.max(1) as u64,
@@ -1174,6 +1665,9 @@ pub async fn retranscribe(
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<MeetingRecord, String> {
+    // Same reason as `import_audio`: this writes a meeting, so it has to be a
+    // thing a wipe waits for rather than a thing that outlives one.
+    let _flight = state.stt_flight.lock().await;
     let mut meeting = state
         .db
         .get_meeting(&id)?
@@ -1226,7 +1720,7 @@ pub fn export_meeting_cmd(
         .get_meeting(&id)?
         .ok_or_else(|| "meeting not found".to_string())?;
     let transcript = state.db.load_transcript(&id)?;
-    let insights = MeetingInsights {
+    let mut insights = MeetingInsights {
         summary: meeting.summary.clone().unwrap_or_default(),
         key_points: meeting
             .key_points
@@ -1244,7 +1738,16 @@ pub fn export_meeting_cmd(
             .map(|l| l.trim_start_matches('-').trim().to_string())
             .filter(|l| !l.is_empty())
             .collect(),
+        // The export writes every section it is given, so a client call leaves
+        // with its Requirements and Risks rather than with the three the
+        // general template happens to share.
+        sections: meeting.sections.clone(),
     };
+    // The stored section bodies were frozen when the model answered. The action
+    // items have moved since: the merge, the checkbox and every edit write the
+    // rows and the column, never the JSON — so exporting the frozen copy would
+    // omit the tasks the user added and keep the ones they deleted.
+    insights.sync_sections();
     let fmt = ExportFormat::from_ext(&format).ok_or_else(|| "unsupported format".to_string())?;
     export_meeting(
         std::path::Path::new(&path),
@@ -1253,6 +1756,141 @@ pub fn export_meeting_cmd(
         &transcript,
         Some(&insights),
     )
+}
+
+/// Every meeting, written into a folder the user chose.
+///
+/// The half of a wipe that has to happen first. Deleting years of meetings is
+/// only a reasonable thing to offer if the user can take them with them, and
+/// "export each of the two hundred by hand" is not an offer.
+///
+/// Markdown, and only markdown. It is the one format that is readable without
+/// this application, and a PDF of a transcript is a thing you cannot search
+/// with the tools someone will actually have in five years.
+#[tauri::command]
+pub fn export_all_cmd(state: State<'_, Arc<AppState>>, dir: String) -> Result<usize, String> {
+    let dir = std::path::Path::new(&dir);
+    // The WebView chose this path. It is a folder picker today, and a folder
+    // picker is still the WebView — a string that is not a directory would have
+    // `join` build file names beside it instead of inside it.
+    if !dir.is_dir() {
+        return Err("that is not a folder".into());
+    }
+    let meetings = state.db.list_meetings()?;
+    let mut written = 0usize;
+    let mut used: HashSet<String> = HashSet::new();
+    for m in meetings {
+        let transcript = state.db.load_transcript(&m.id)?;
+        let mut insights = MeetingInsights {
+            summary: m.summary.clone().unwrap_or_default(),
+            key_points: bullets(m.key_points.as_deref()),
+            action_items: bullets(m.action_items.as_deref()),
+            sections: m.sections.clone(),
+        };
+        // Same as the single-meeting export: the stored section bodies were
+        // frozen when the model answered, and the action items have moved since.
+        insights.sync_sections();
+        // `safe_file_stem`, never the title: it is user text and it reaches a
+        // filesystem here.
+        //
+        // The name has to be free twice over — unused by this run AND absent
+        // from the folder. Two meetings can carry the same title; so can a file
+        // the user exported last month, and the markdown writer truncates, so
+        // the second would replace the first with no sign it had. Compared
+        // lowercased because on Windows two names differing only in case are one
+        // file.
+        let base = safe_file_stem(&m.title);
+        let mut stem = base.clone();
+        let mut n = 2;
+        let file = loop {
+            let candidate = dir.join(format!("{stem}.md"));
+            // `create_new` rather than `exists`, and it does the reserving as
+            // well as the asking. `exists()` follows links, so a dangling
+            // `<stem>.md` symlink pointing somewhere else reads as absent and
+            // the writer follows it — an export outside the folder the user
+            // chose. This fails on a symlink, dangling or not, and fails on a
+            // file that appeared between the question and the answer.
+            if used.insert(stem.to_lowercase()) {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&candidate)
+                {
+                    Ok(file) => break file,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(format!("could not write into that folder: {e}")),
+                }
+            }
+            stem = format!("{base} ({n})");
+            n += 1;
+        };
+        // Written through the handle that reserved the name, never reopened by
+        // path. Closing it and calling the exporter would leave a gap in which
+        // the empty file could be swapped for a symlink, and the reopen would
+        // follow it out of the folder the user chose. `build_markdown` is what
+        // the single-meeting export writes anyway.
+        let md = build_markdown(&m.title, &transcript, Some(&insights));
+        {
+            use std::io::Write;
+            let mut file = file;
+            file.write_all(md.as_bytes())
+                .map_err(|e| format!("could not write that meeting: {e}"))?;
+        }
+        written += 1;
+    }
+    Ok(written)
+}
+
+/// Delete every meeting on this computer.
+///
+/// Transcripts, summaries, notes, tasks, chat and the audio recordings. Not the
+/// settings and not the API key: this is the "take my meetings off this machine"
+/// button, and a user who presses it still has an application to use afterwards.
+///
+/// No confirmation here. The window asks, because the window is where a person
+/// can be shown what they are about to lose; a command that asked twice would
+/// be asking the same WebView that already answered.
+#[tauri::command]
+pub async fn wipe_all_cmd(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+    // Not while the microphone is open.
+    if state.recorder.is_recording() {
+        return Err("stop the recording first".into());
+    }
+    // And not while anything else is still writing a meeting. `is_recording` is
+    // already false the moment Stop is pressed, but `stop_recording` goes on for
+    // seconds afterwards — final transcription, then the summary — and it holds
+    // a `MeetingRecord` it upserts at the end. Wiping in that window deletes the
+    // row and the audio, and then that upsert puts the meeting back: the user
+    // watches everything vanish and one thing return. Both locks, in the order
+    // every other caller takes them.
+    let _stt = state.stt_flight.lock().await;
+    let _refine = state.refine_flight.lock().await;
+    // The recorder's claim, held across the whole delete. `start_recording`
+    // takes this before it opens capture and treats it as the mutual exclusion,
+    // so holding it is what stops a recording beginning between the check and
+    // the delete — a status flag read twice cannot, and the meeting it created
+    // would either be deleted while its WAV was still being written or survive
+    // a wipe the user had confirmed.
+    //
+    // An import can hold `stt_flight` for a minute, so this window is not
+    // theoretical: it is however long the user waits after pressing Delete.
+    let claim = state.active_meeting.lock();
+    if claim.is_some() || state.recorder.is_recording() {
+        return Err("stop the recording first".into());
+    }
+    let removed = state.db.delete_all_meetings();
+    drop(claim);
+    // The in-memory transcripts, whatever the rows did. `get_transcript` answers
+    // from this map before it consults the database, so leaving it populated
+    // means a deleted meeting's words are still readable until the app restarts
+    // — which is the one thing this button exists to prevent.
+    //
+    // Cleared even when the delete reported a failure: what did get deleted must
+    // not stay readable because something else did not.
+    state.live.lock().clear();
+    state.live_stt_passes.lock().clear();
+    state.segmenters.lock().clear();
+    removed
 }
 
 #[tauri::command]
@@ -1269,6 +1907,14 @@ pub async fn download_model_cmd(
     state: State<'_, Arc<AppState>>,
     model_id: String,
 ) -> Result<String, String> {
+    // A model download is egress like any other — the catalogue lives on the
+    // internet, and the switch says nothing leaves.
+    if let Some(refusal) = crate::domain::offline::refuse(
+        state.settings.lock().offline_mode,
+        crate::domain::offline::Egress::Download,
+    ) {
+        return Err(refusal);
+    }
     // `try_lock`, not `lock().await`: a queued second download is a click the user
     // has forgotten about by the time it starts. Refusing is the honest answer, and
     // the drawer's disabled buttons make this unreachable in the ordinary case —
@@ -1454,6 +2100,10 @@ fn current_insights(m: &MeetingRecord) -> MeetingInsights {
         summary: m.summary.clone().unwrap_or_default(),
         key_points: bullets(m.key_points.as_deref()),
         action_items: bullets(m.action_items.as_deref()),
+        // Carried, not rebuilt: a client call has Requirements and Risks that
+        // no field above holds, and dropping them here would erase them from
+        // the meeting the moment anything else was improved.
+        sections: m.sections.clone(),
     }
 }
 
@@ -1550,15 +2200,21 @@ pub async fn refine_summary_section(
         Section::KeyPoints => insights.key_points = improved,
         Section::ActionItems => insights.action_items = improved,
     }
+    // The sections carry a second copy of the field just improved. Without this
+    // the version, the row and the export would all keep the body from before
+    // the improvement — the stored copy is the one the screen reads.
+    insights.sync_sections();
     let version = state
         .db
         .push_summary_version(&id, section.as_str(), &insights)?;
     state.db.save_insights(&id, &insights)?;
     meeting.summary = Some(insights.summary.clone());
     meeting.key_points = Some(insights.key_points_text());
+    meeting.sections = insights.sections.clone();
     meeting.action_items = Some(insights.action_items_text());
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
+    apply_action_items(&state, &id, &insights);
     Ok(version)
 }
 
@@ -1590,14 +2246,27 @@ pub async fn restore_summary_version(
         summary: wanted.summary.clone(),
         key_points: parse_refined_list(&wanted.key_points),
         action_items: parse_refined_list(&wanted.action_items),
+        // The version's own sections, not the meeting's current ones: a restore
+        // that kept today's Risks beside a summary from last week would be a set
+        // that never existed.
+        sections: wanted
+            .sections_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default(),
     };
     let created = state.db.push_summary_version(&id, "restore", &insights)?;
     state.db.save_insights(&id, &insights)?;
     meeting.summary = Some(insights.summary.clone());
     meeting.key_points = Some(insights.key_points_text());
+    meeting.sections = insights.sections.clone();
     meeting.action_items = Some(insights.action_items_text());
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
+    // A restore is the user asking for an older set, and it still goes through
+    // the merge: what they have edited or ticked since is theirs, and a restore
+    // of the prose is not a request to undo their task list.
+    apply_action_items(&state, &id, &insights);
     Ok(created)
 }
 

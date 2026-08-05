@@ -286,6 +286,16 @@ body,
   font-family: var(--font-sans);
 }
 
+/* The overlay window paints nothing of its own — it is a card over other
+   applications and the fill above is what put a square behind its rounded
+   corners. Here rather than in `overlay.html`, whose own `<style>` sits in the
+   `<head>` this file is injected into and lost the rule on order alone. */
+html.overlay,
+html.overlay body,
+html.overlay #root {
+  background: transparent;
+}
+
 /* A 4px visible thumb inside a 10px grab area: the transparent border plus
    background-clip does the inset, so the pointer target stays wide while the
    stripe stays thin. Trap: do not set the standard `scrollbar-color` alongside

@@ -79,6 +79,12 @@ impl OpenRouterLlm {
         } else {
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                // No proxy, ever, for an address the user configured. The
+                // allowlist checks the host in the URL, but a proxy makes the
+                // peer somebody else entirely — `HTTP_PROXY` set in the
+                // environment would carry a transcript bound for 127.0.0.1
+                // straight out to a public host, with the check having passed.
+                .no_proxy()
                 .build()
                 .map_err(|e| e.to_string())?
         };
@@ -147,7 +153,7 @@ impl OpenRouterLlm {
             },
         ];
         let (raw, cost) = self.complete(api_key, model, &messages, reasoning).await?;
-        Ok((MeetingInsights::from_model_text(&raw), cost))
+        Ok((MeetingInsights::from_model_text_for(template, &raw), cost))
     }
 }
 

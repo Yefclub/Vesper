@@ -31,7 +31,21 @@ export interface MeetingRecord {
   summary?: string | null;
   action_items?: string | null;
   key_points?: string | null;
+  /// Every section the template asked for, in order.
+  ///
+  /// Empty for a meeting summarised before templates had shapes of their own,
+  /// and for one never summarised — the summary tab falls back to the three
+  /// fields above, which are still written for the templates that have them.
+  sections?: SummarySection[];
   project?: string | null;
+}
+
+/** One section of a summary, as the template declared it. `key` is stable and
+ *  titles the panel from the catalog; `body` is markdown — prose as written, a
+ *  list as `- ` lines. */
+export interface SummarySection {
+  key: string;
+  body: string;
 }
 
 export interface AppSettings {
@@ -50,6 +64,8 @@ export interface AppSettings {
   local_llm_model: string;
   reasoning_enabled: boolean;
   auto_summarize: boolean;
+  /// Nothing this application does may reach the network.
+  offline_mode: boolean;
   language: string;
   ui_locale: string;
   /** `light` | `dark`. Optional because the field lands with the backend change;
@@ -122,6 +138,18 @@ export interface ContextNote {
   /// stopped, which has no position to hold against the transcript.
   at_ms: number | null;
   created_at: string;
+}
+
+export interface ActionItem {
+  id: number;
+  text: string;
+  owner: string | null;
+  due: string | null;
+  status: "open" | "done";
+  /// Who put it there. The next summary may replace what the model said and
+  /// never what a person said.
+  source: "ai" | "user";
+  edited: boolean;
 }
 
 export interface MeetingInsights {
@@ -288,6 +316,12 @@ export const api = {
     invoke<string>("suggested_export_name", { id, format }),
   exportMeeting: (id: string, path: string, format: string) =>
     invoke<string>("export_meeting_cmd", { id, path, format }),
+  /// Every meeting as markdown into one folder, and how many were written.
+  exportAll: (dir: string) => invoke<number>("export_all_cmd", { dir }),
+  /// Delete every meeting on this computer, and how many were removed. Settings
+  /// and the API key survive — this is "take my meetings off this machine", not
+  /// a factory reset.
+  wipeAll: () => invoke<number>("wipe_all_cmd"),
   /// Ask a question about one meeting. The answer is the whole answer — this
   /// path does not stream, so the wait is silent and the caller owns saying so.
   chatMeeting: (id: string, question: string) =>
@@ -301,6 +335,22 @@ export const api = {
     invoke<ContextNote[]>("list_context_notes", { id }),
   deleteContextNote: (id: string, noteId: number) =>
     invoke<void>("delete_context_note", { id, noteId }),
+  listActionItems: (id: string) =>
+    invoke<ActionItem[]>("list_action_items", { id }),
+  /// One item at a time. Each returns the whole list as stored, because a
+  /// summary may have merged in between — but none of them *sends* a list, so
+  /// none can carry a stale idea of the items it did not touch.
+  addActionItem: (id: string, text: string) =>
+    invoke<ActionItem[]>("add_action_item", { id, text }),
+  updateActionItem: (id: string, item: ActionItem) =>
+    invoke<ActionItem[]>("update_action_item", { id, item }),
+  deleteActionItem: (id: string, itemId: number) =>
+    invoke<ActionItem[]>("delete_action_item", { id, itemId }),
+  /// Correct one line. Returns the whole transcript, because the summary text
+  /// and the search index are rewritten from it and the caller has to show what
+  /// was actually stored rather than what it hoped for.
+  editTranscriptSegment: (id: string, segmentId: string, text: string) =>
+    invoke<LiveTranscript>("edit_transcript_segment", { id, segmentId, text }),
   listModels: () => invoke<ModelInfo[]>("list_models_cmd"),
   // No URL parameter: the backend resolves it from its own catalog and verifies
   // the artifact's checksum before it reaches whisper.cpp / llama.cpp.

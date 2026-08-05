@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod backend;
 pub mod capabilities;
 pub mod chat;
@@ -9,9 +10,11 @@ pub mod export;
 pub mod gate;
 pub mod i18n;
 pub mod job;
+pub mod offline;
 pub mod overlay;
 pub mod refine;
 pub mod search;
+pub mod segmenter;
 pub mod settings;
 pub mod shortcut;
 pub mod speaker;

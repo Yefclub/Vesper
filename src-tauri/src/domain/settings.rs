@@ -36,6 +36,13 @@ pub struct AppSettings {
     pub local_llm_model: String,
     pub reasoning_enabled: bool,
     pub auto_summarize: bool,
+    /// Nothing this application does may reach the network.
+    ///
+    /// Default off — turning it on for everybody would break the cloud
+    /// providers of people who chose them. The switch exists so the promise can
+    /// be enforced by somebody who wants it enforced.
+    #[serde(default)]
+    pub offline_mode: bool,
     /// Base URL of the OpenAI-compatible server, e.g. `http://localhost:11434/v1`.
     /// Checked by `domain::endpoint` before it is used, never on the way in: a
     /// settings file written by an older build must still load.
@@ -105,6 +112,7 @@ impl Default for AppSettings {
             local_llm_model: "qwen2.5-0.5b".into(),
             reasoning_enabled: false,
             auto_summarize: true,
+            offline_mode: false,
             // Ollama's own default, which is the server most people already
             // have running.
             endpoint_base_url: "http://localhost:11434/v1".into(),

@@ -169,6 +169,27 @@ impl Database {
                 FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_context_meeting ON context_notes(meeting_id);
+            -- What the meeting decided somebody would do.
+            --
+            -- The `meetings.action_items` text column stays: it is what export
+            -- and the search index read, and it is rewritten from these rows.
+            -- Two representations of one truth is a cost, and the alternative
+            -- was rewriting both of those readers in the same change.
+            CREATE TABLE IF NOT EXISTS action_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                owner TEXT,
+                due TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                source TEXT NOT NULL DEFAULT 'ai',
+                -- Touched by a person. Never cleared: it is what stops the next
+                -- summary from replacing their words with the model's.
+                edited INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_actions_meeting ON action_items(meeting_id);
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -219,6 +240,33 @@ impl Database {
                 return Err(message);
             }
         }
+        // Every section the template asked for, in order, as JSON.
+        //
+        // A column and not a table: the sections of one meeting are always read
+        // and written together, as a whole ordered list, and a table would buy
+        // per-section queries nobody has asked for at the price of a join on
+        // every open. NULL means a meeting summarised before templates had
+        // shapes of their own — the screen falls back to the three columns
+        // beside this one, which are still written and still what the search
+        // index and the exporter read.
+        if let Err(e) = conn.execute("ALTER TABLE meetings ADD COLUMN sections_json TEXT", []) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
+        // And on a version, for the same reason a version is the whole set
+        // rather than a delta: restoring one that carried only the three
+        // columns would erase a client call's Requirements and Risks.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE summary_versions ADD COLUMN sections_json TEXT",
+            [],
+        ) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
         drop(conn);
         self.backfill_search_index()
     }
@@ -260,6 +308,269 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn list_action_items(
+        &self,
+        meeting_id: &str,
+    ) -> Result<Vec<crate::domain::actions::ActionItem>, String> {
+        use crate::domain::actions::{ActionItem, ActionSource, ActionStatus};
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, text, owner, due, status, source, edited FROM action_items
+                 WHERE meeting_id=?1 ORDER BY position, id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![meeting_id], |r| {
+                let status: String = r.get(4)?;
+                let source: String = r.get(5)?;
+                Ok(ActionItem {
+                    id: r.get(0)?,
+                    text: r.get(1)?,
+                    owner: r.get(2)?,
+                    due: r.get(3)?,
+                    status: if status == "done" {
+                        ActionStatus::Done
+                    } else {
+                        ActionStatus::Open
+                    },
+                    source: if source == "user" {
+                        ActionSource::User
+                    } else {
+                        ActionSource::Ai
+                    },
+                    edited: r.get::<_, i64>(6)? != 0,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Rewrite the text column that export and search read, from the rows.
+    ///
+    /// Called inside whatever transaction just changed a row, so the two views
+    /// of the list cannot be seen disagreeing.
+    fn project_action_text(tx: &rusqlite::Transaction<'_>, meeting_id: &str) -> Result<(), String> {
+        let mut stmt = tx
+            .prepare("SELECT text FROM action_items WHERE meeting_id=?1 ORDER BY position, id")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![meeting_id], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut lines = Vec::new();
+        for r in rows {
+            lines.push(format!("- {}", r.map_err(|e| e.to_string())?));
+        }
+        drop(stmt);
+        tx.execute(
+            "UPDATE meetings SET action_items=?2 WHERE id=?1",
+            params![
+                meeting_id,
+                lines.join(
+                    "
+"
+                )
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Add one item. Returns its row.
+    ///
+    /// One item rather than a list, because a client that sends the whole list
+    /// sends its idea of every *other* item too — and that idea is stale the
+    /// moment anything else writes. Every way that could lose somebody's work
+    /// went through exactly that.
+    pub fn insert_action_item(
+        &self,
+        meeting_id: &str,
+        item: &crate::domain::actions::ActionItem,
+    ) -> Result<i64, String> {
+        use crate::domain::actions::{ActionSource, ActionStatus};
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let next: i64 = tx
+            .query_row(
+                "SELECT coalesce(max(position), -1) + 1 FROM action_items WHERE meeting_id=?1",
+                params![meeting_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO action_items
+               (meeting_id, text, owner, due, status, source, edited, position)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                meeting_id,
+                item.text,
+                item.owner,
+                item.due,
+                match item.status {
+                    ActionStatus::Done => "done",
+                    ActionStatus::Open => "open",
+                },
+                match item.source {
+                    ActionSource::User => "user",
+                    ActionSource::Ai => "ai",
+                },
+                item.edited as i64,
+                next
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        let id = tx.last_insert_rowid();
+        Self::project_action_text(&tx, meeting_id)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    /// Change one item, by id and meeting. Marks it touched, which is what
+    /// stops the next summary from replacing it.
+    pub fn update_action_item(
+        &self,
+        meeting_id: &str,
+        item: &crate::domain::actions::ActionItem,
+    ) -> Result<(), String> {
+        use crate::domain::actions::ActionStatus;
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        // The count matters. A summary running alongside this can remove an
+        // untouched suggestion while its field is being edited, and an UPDATE
+        // that matches nothing is not a success — reporting one would hand back
+        // a list without the correction and no sign it had been dropped.
+        let changed = tx
+            .execute(
+                "UPDATE action_items SET text=?3, owner=?4, due=?5, status=?6, edited=1
+             WHERE id=?1 AND meeting_id=?2",
+                params![
+                    item.id,
+                    meeting_id,
+                    item.text,
+                    item.owner,
+                    item.due,
+                    match item.status {
+                        ActionStatus::Done => "done",
+                        ActionStatus::Open => "open",
+                    }
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err("that task is no longer in this meeting's list".into());
+        }
+        Self::project_action_text(&tx, meeting_id)?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn delete_action_item(&self, meeting_id: &str, item_id: i64) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM action_items WHERE id=?1 AND meeting_id=?2",
+            params![item_id, meeting_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Self::project_action_text(&tx, meeting_id)?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Replace a meeting's action items with this list, and rewrite the text
+    /// column that export and search read from it.
+    ///
+    /// Only the merge uses this — it genuinely owns the whole list, because it
+    /// has just computed it from what was stored.
+    ///
+    /// One transaction: the rows and the text are two views of one answer, and
+    /// a failure between them would leave the list showing one thing and every
+    /// export of it showing another.
+    pub fn save_action_items(
+        &self,
+        meeting_id: &str,
+        items: &[crate::domain::actions::ActionItem],
+    ) -> Result<(), String> {
+        use crate::domain::actions::{ActionSource, ActionStatus};
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM action_items WHERE meeting_id=?1",
+            params![meeting_id],
+        )
+        .map_err(|e| e.to_string())?;
+        for (position, item) in items.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO action_items
+                   (meeting_id, text, owner, due, status, source, edited, position)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    meeting_id,
+                    item.text,
+                    item.owner,
+                    item.due,
+                    match item.status {
+                        ActionStatus::Done => "done",
+                        ActionStatus::Open => "open",
+                    },
+                    match item.source {
+                        ActionSource::User => "user",
+                        ActionSource::Ai => "ai",
+                    },
+                    item.edited as i64,
+                    position as i64
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Self::project_action_text(&tx, meeting_id)?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Write a corrected transcript, the text the summary reads, and the search
+    /// index — as one write or none of them.
+    ///
+    /// These were three statements in two transactions. A failure between them
+    /// left the segments corrected while `transcript_text` still held the old
+    /// words, which is the field the model reads: the fix would have been
+    /// visible on screen and invisible to every consumer of it. Or it left the
+    /// correction saved and unindexed, so search kept answering with what was
+    /// misheard.
+    pub fn save_corrected_transcript(
+        &self,
+        m: &MeetingRecord,
+        transcript: &LiveTranscript,
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM transcript_segments WHERE meeting_id=?1",
+            params![m.id],
+        )
+        .map_err(|e| e.to_string())?;
+        for s in transcript.segments() {
+            tx.execute(
+                "INSERT INTO transcript_segments (id, meeting_id, speaker, text, start_ms, end_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    s.id,
+                    m.id,
+                    speaker_str(s.speaker),
+                    s.text,
+                    s.start_ms as i64,
+                    s.end_ms as i64
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "UPDATE meetings SET transcript_text=?2, updated_at=?3 WHERE id=?1",
+            params![m.id, m.transcript_text, m.updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+        Self::index_meeting(&tx, m)?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn upsert_meeting(&self, m: &MeetingRecord) -> Result<(), String> {
@@ -306,7 +617,7 @@ impl Database {
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
                         transcript_text, summary, action_items, key_points, project, title_locked,
-                        cost_nano_usd
+                        cost_nano_usd, sections_json
                  FROM meetings WHERE id=?1",
             )
             .map_err(|e| e.to_string())?;
@@ -328,7 +639,7 @@ impl Database {
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
                         '' AS transcript_text, summary, action_items, key_points, project, title_locked,
-                        cost_nano_usd
+                        cost_nano_usd, sections_json
                  FROM meetings ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -380,6 +691,41 @@ impl Database {
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Every meeting, removed one at a time through the path a single delete
+    /// takes.
+    ///
+    /// Not `DELETE FROM meetings`: that empties the tables and leaves every
+    /// recording on disk, which is the half of a wipe that actually matters.
+    /// Going one by one reuses the ordering that refuses to drop a row whose
+    /// audio could not be removed, so a locked file costs that meeting and
+    /// nothing else.
+    ///
+    /// Returns how many were removed. A partial wipe is reported as an error
+    /// naming what is left rather than as success: a user who asked for
+    /// everything to be gone has to be told when some of it is not.
+    pub fn delete_all_meetings(&self) -> Result<usize, String> {
+        let ids: Vec<String> = self.list_meetings()?.into_iter().map(|m| m.id).collect();
+        let total = ids.len();
+        let mut done = 0usize;
+        let mut first_error = None;
+        for id in ids {
+            match self.delete_meeting(&id) {
+                Ok(()) => done += 1,
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+            }
+        }
+        match first_error {
+            None => Ok(done),
+            Some(e) => Err(format!(
+                "{done} of {total} meetings were deleted. The rest are still on this computer: {e}"
+            )),
+        }
     }
 
     pub fn save_transcript(
@@ -467,10 +813,15 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let created_at = chrono::Utc::now().to_rfc3339();
         let (key_points, action_items) = (insights.key_points_text(), insights.action_items_text());
+        let sections_json = if insights.sections.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&insights.sections).map_err(|e| e.to_string())?)
+        };
         conn.execute(
             "INSERT INTO summary_versions
-                (meeting_id, version, origin, created_at, summary, key_points, action_items)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                (meeting_id, version, origin, created_at, summary, key_points, action_items, sections_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 meeting_id,
                 next,
@@ -478,7 +829,8 @@ impl Database {
                 created_at,
                 insights.summary,
                 key_points,
-                action_items
+                action_items,
+                sections_json
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -489,6 +841,7 @@ impl Database {
             summary: insights.summary.clone(),
             key_points,
             action_items,
+            sections_json,
         })
     }
 
@@ -496,7 +849,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT version, origin, created_at, summary, key_points, action_items
+                "SELECT version, origin, created_at, summary, key_points, action_items, sections_json
                  FROM summary_versions WHERE meeting_id = ?1 ORDER BY version ASC",
             )
             .map_err(|e| e.to_string())?;
@@ -509,6 +862,7 @@ impl Database {
                     summary: r.get(3)?,
                     key_points: r.get(4)?,
                     action_items: r.get(5)?,
+                    sections_json: r.get(6)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -522,12 +876,21 @@ impl Database {
         insights: &MeetingInsights,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // NULL rather than `[]` when there are none, so a meeting summarised by
+        // a path that has no sections is indistinguishable from one summarised
+        // before they existed — both fall back to the three columns.
+        let sections = if insights.sections.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&insights.sections).map_err(|e| e.to_string())?)
+        };
         conn.execute(
-            "UPDATE meetings SET summary=?1, action_items=?2, key_points=?3, updated_at=?4 WHERE id=?5",
+            "UPDATE meetings SET summary=?1, action_items=?2, key_points=?3, sections_json=?4, updated_at=?5 WHERE id=?6",
             params![
                 insights.summary,
                 insights.action_items_text(),
                 insights.key_points_text(),
+                sections,
                 chrono::Utc::now().to_rfc3339(),
                 meeting_id
             ],
@@ -678,11 +1041,22 @@ impl Database {
                 m.id,
                 m.title,
                 format!(
-                    "{}\n{}\n{}\n{}",
+                    "{}\n{}\n{}\n{}\n{}",
                     m.transcript_text,
                     m.summary.clone().unwrap_or_default(),
                     m.action_items.clone().unwrap_or_default(),
-                    m.key_points.clone().unwrap_or_default()
+                    m.key_points.clone().unwrap_or_default(),
+                    // The template's own sections. Without them a client call's
+                    // Requirements and Risks are stored, rendered and exported
+                    // but cannot be found — and search is how a meeting from
+                    // three weeks ago is reached at all. Bodies only: the keys
+                    // are `action_items`, and indexing those would match every
+                    // meeting on a search for "action".
+                    m.sections
+                        .iter()
+                        .map(|s| s.body.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 )
             ],
         )
@@ -823,6 +1197,16 @@ fn row_to_meeting(row: &rusqlite::Row<'_>) -> Result<MeetingRecord, String> {
         summary: row.get(8).map_err(|e| e.to_string())?,
         action_items: row.get(9).map_err(|e| e.to_string())?,
         key_points: row.get(10).map_err(|e| e.to_string())?,
+        // A row written before the column existed reads NULL; one written by a
+        // build whose section shapes have since changed reads JSON this build
+        // may not recognise. Both answer with an empty list, and the screen
+        // falls back to the three columns above — the alternative is failing to
+        // open a meeting over the shape of its headings.
+        sections: row
+            .get::<_, Option<String>>(14)
+            .map_err(|e| e.to_string())?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
         project: row.get(11).map_err(|e| e.to_string())?,
         title_locked: row.get::<_, i64>(12).map_err(|e| e.to_string())? != 0,
         cost_nano_usd: row.get(13).map_err(|e| e.to_string())?,
@@ -857,6 +1241,7 @@ mod tests {
             summary: Some("hi".into()),
             action_items: None,
             key_points: None,
+            sections: Vec::new(),
             project: Some("Core".into()),
             title_locked: false,
             cost_nano_usd: None,
@@ -1092,11 +1477,13 @@ mod tests {
             summary: "s1".into(),
             key_points: vec!["a".into()],
             action_items: vec![],
+            sections: Vec::new(),
         };
         let second = MeetingInsights {
             summary: "s1".into(),
             key_points: vec!["a".into(), "b".into()],
             action_items: vec![],
+            sections: Vec::new(),
         };
         let v1 = db.push_summary_version("m1", "summarize", &first).unwrap();
         let v2 = db
@@ -1139,6 +1526,7 @@ mod tests {
             summary: None,
             action_items: None,
             key_points: None,
+            sections: Vec::new(),
             title_locked: false,
             cost_nano_usd: None,
             cost_label: None,

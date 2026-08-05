@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
 import { Check, Mic, MonitorSpeaker, Pause, Play, Settings, Square } from "lucide-react";
@@ -37,6 +38,13 @@ interface Props {
   onPauseResume?: () => void;
   onOpenSettings: () => void;
   onPickDevice: (kind: DeviceKind, id: string | null) => void;
+  /// Sits directly above the transport, inside the same centred column.
+  ///
+  /// The context bar used to be a sibling in the card's normal flow while this
+  /// dock is absolutely positioned — two coordinate systems, so the bar hugged
+  /// the sidebar while the transport stayed centred. Passing it through here
+  /// makes the pair one stack with one gutter.
+  children?: ReactNode;
 }
 
 /**
@@ -100,6 +108,7 @@ export function RecordDock({
   recording,
   onStop,
   onPauseResume,
+  children,
 }: Props) {
   const { t } = useI18n();
   // Hover and focus are tracked apart: moving the mouse away while a control
@@ -204,6 +213,11 @@ export function RecordDock({
           )}
         </AnimatePresence>
       </div>
+
+      {/* Whatever belongs above the transport — today the context bar, while a
+          recording is running. In the column, so it shares the centre line and
+          the bottom gutter with the control it sits over. */}
+      {children}
 
       {/* One pill, one border, one fill: the gear used to be a second pill 12px
           to the right of this one, which is the "separado da caixa" complaint,

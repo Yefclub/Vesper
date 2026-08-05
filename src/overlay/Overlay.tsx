@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Pause, Play, Square } from "lucide-react";
+import { transition } from "../lib/motion";
 import {
   api,
   formatDuration,
@@ -44,6 +46,11 @@ export function Overlay() {
 function Card() {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
+  /// Whether the pointer is still on the card. A ref, not state: nothing
+  /// renders from it — it only has to be readable by the resize callback that
+  /// resolves after the pointer may already have gone.
+  const inside = useRef(false);
+  const reduced = useReducedMotion();
   const [status, setStatus] = useState<RecorderStatus | null>(null);
   const [transcript, setTranscript] = useState<LiveTranscript>({ segments: [] });
   const [busy, setBusy] = useState(false);
@@ -100,18 +107,78 @@ function Card() {
       // absent: this window never takes focus — it must not steal it from the
       // meeting the user is in — so there is no keyboard path here to serve.
       onMouseEnter={() => {
-        setExpanded(true);
-        void api.setOverlayExpanded(true);
+        inside.current = true;
+        // The window grows FIRST, and the card only animates once it has: a
+        // card sliding into a 14px window is clipped to a sliver of itself for
+        // the whole arc. `finally`, so a failed resize still opens rather than
+        // leaving a card that never appears.
+        void api
+          .setOverlayExpanded(true)
+          .catch(() => {})
+          .finally(() => {
+            // The pointer may already have left while that was in flight, and
+            // opening behind it would leave the card up with nobody on it.
+            if (inside.current) {
+              setExpanded(true);
+              return;
+            }
+            // Gone. The window is enlarged and nothing will ever animate out of
+            // it, so `onExitComplete` will not fire — a pointer flicking across
+            // the strip would leave a 340x268 invisible always-on-top rectangle
+            // sitting over the user's screen until the next hover.
+            void api.setOverlayExpanded(false);
+          });
       }}
       onMouseLeave={() => {
+        inside.current = false;
         setExpanded(false);
-        void api.setOverlayExpanded(false);
       }}
-      className="flex h-screen w-screen items-center justify-end"
+      className="relative flex h-screen w-screen items-center justify-end"
     >
-      <div className="flex h-full w-full flex-col overflow-hidden rounded-l-lg border border-r-0 border-border bg-surface-1 shadow-lift">
-        {expanded ? (
-          <>
+      {/* The collapsed sliver, always mounted, at its own fixed footprint
+          rather than at the window's. The window is 340×268 for as long as the
+          card is animating out, and a sliver sized to the window would be seen
+          at that size for those 200ms and then snap.
+
+          `dock_right_center` centres both footprints on the monitor, so 132px
+          centred inside 268px lands on the same pixels as a 132px window and
+          the collapse is invisible — on any display tall enough to hold the
+          expanded card, which is every display this ships to. Below 268px of
+          height that function clamps to the top and only the collapsed window
+          is still centred, so the sliver would step on the way down.
+
+          132 and 14 mirror `COLLAPSED` in domain/overlay.rs, which says so. */}
+      <div className="absolute right-0 top-1/2 flex h-[132px] w-[14px] -translate-y-1/2 items-center justify-center rounded-l-lg border border-r-0 border-border bg-surface-1 shadow-lift">
+        <span
+          aria-hidden
+          className={`h-2 w-2 rounded-full ${
+            paused ? "bg-fg-subtle" : "animate-pulse bg-danger"
+          }`}
+        />
+      </div>
+
+      <AnimatePresence
+        // The window shrinks only once the card has finished leaving. Doing it
+        // on `onMouseLeave` cut the exit off at its first frame.
+        onExitComplete={() => void api.setOverlayExpanded(false)}
+      >
+        {expanded && (
+          <motion.div
+            key="card"
+            // Out to the edge it lives on, and back from it. `x` and `opacity`
+            // only, both composite-only: this window floats over whatever the
+            // user is actually working in, and a layout-animating card here
+            // would take frames from that.
+            initial={reduced ? { opacity: 0 } : { opacity: 0, x: "100%" }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={
+              reduced
+                ? { opacity: 0, transition: transition.exit }
+                : { opacity: 0, x: "100%", transition: transition.panelExit }
+            }
+            transition={transition.panel}
+            className="relative flex h-full w-full flex-col overflow-hidden rounded-l-lg border border-r-0 border-border bg-surface-1 shadow-lift"
+          >
             <div className="flex items-center gap-2 border-b border-border px-3 py-2">
               <span
                 aria-hidden
@@ -188,20 +255,9 @@ function Card() {
                 <Square size={12} /> {t("record.stop")}
               </button>
             </div>
-          </>
-        ) : (
-          // Collapsed: a sliver with a pulsing dot. Enough to say a recording is
-          // running and to give the pointer something to find.
-          <div className="flex h-full w-full items-center justify-center">
-            <span
-              aria-hidden
-              className={`h-2 w-2 rounded-full ${
-                paused ? "bg-fg-subtle" : "animate-pulse bg-danger"
-              }`}
-            />
-          </div>
+          </motion.div>
         )}
-      </div>
+      </AnimatePresence>
     </div>
   );
 }

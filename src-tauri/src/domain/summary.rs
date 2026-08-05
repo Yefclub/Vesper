@@ -30,6 +30,55 @@ impl SummaryTemplate {
         }
     }
 
+    /// What this kind of meeting is made of, in the order it is read.
+    ///
+    /// The sections are data, not three fields. A standup and a client call
+    /// were being asked for Summary / Key points / Action items alike, because
+    /// the prompt named those three literally and the parser knew no others —
+    /// so picking a template changed the instruction and never the shape of the
+    /// answer.
+    ///
+    /// Every template keeps `summary` first and `action_items` last. The first
+    /// is what a person reads when they open the meeting; the last is the one
+    /// section that is not text at all — it feeds the action-item list, which
+    /// carries owners, deadlines and a done flag of its own.
+    pub fn sections(self) -> &'static [SectionSpec] {
+        // Named consts, because a slice built inside the `match` is a temporary
+        // and cannot be returned as `'static`.
+        const SUMMARY: SectionSpec = SectionSpec::prose("summary", "Summary");
+        const ACTIONS: SectionSpec = SectionSpec::list("action_items", "Action items");
+        const GENERAL: &[SectionSpec] = &[
+            SUMMARY,
+            SectionSpec::list("key_points", "Key points"),
+            ACTIONS,
+        ];
+        const STANDUP: &[SectionSpec] = &[
+            SUMMARY,
+            SectionSpec::list("done", "Done since last time"),
+            SectionSpec::list("next", "Next"),
+            ACTIONS,
+        ];
+        const ONE_ON_ONE: &[SectionSpec] = &[
+            SUMMARY,
+            SectionSpec::list("goals", "Goals"),
+            SectionSpec::list("feedback", "Feedback"),
+            ACTIONS,
+        ];
+        const CLIENT_CALL: &[SectionSpec] = &[
+            SUMMARY,
+            SectionSpec::list("requirements", "Requirements"),
+            SectionSpec::list("decisions", "Decisions"),
+            SectionSpec::list("risks", "Risks"),
+            ACTIONS,
+        ];
+        match self {
+            SummaryTemplate::General => GENERAL,
+            SummaryTemplate::Standup => STANDUP,
+            SummaryTemplate::OneOnOne => ONE_ON_ONE,
+            SummaryTemplate::ClientCall => CLIENT_CALL,
+        }
+    }
+
     pub fn system_prompt(self) -> &'static str {
         match self {
             SummaryTemplate::General => {
@@ -48,11 +97,71 @@ impl SummaryTemplate {
     }
 }
 
+/// One section of a summary, declared rather than hardcoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionSpec {
+    /// Stable id. Stored with the section and used by the screen to title it
+    /// from the catalog, so the heading the model wrote is never shown and
+    /// never has to be translated.
+    pub key: &'static str,
+    /// The heading the model is told to write, in English. English because the
+    /// prompt already pins the headings that way and lets the prose follow the
+    /// user's language — a model asked for `## Pontos principais` returns three
+    /// spellings of it across four runs.
+    pub heading: &'static str,
+    /// Prose joins its lines into a paragraph; a list keeps them apart and
+    /// strips the bullet.
+    pub prose: bool,
+}
+
+impl SectionSpec {
+    const fn prose(key: &'static str, heading: &'static str) -> Self {
+        Self {
+            key,
+            heading,
+            prose: true,
+        }
+    }
+    const fn list(key: &'static str, heading: &'static str) -> Self {
+        Self {
+            key,
+            heading,
+            prose: false,
+        }
+    }
+}
+
+/// `- ` lines, which is how a list section's body is stored.
+fn bullets(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|i| format!("- {i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A section as the model answered it, ready to store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SummarySection {
+    pub key: String,
+    /// Markdown. Prose as written; a list as `- ` lines, which is what the
+    /// renderer and the exporter both already read.
+    pub body: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct MeetingInsights {
     pub summary: String,
     pub key_points: Vec<String>,
     pub action_items: Vec<String>,
+    /// Every section the template asked for, in order.
+    ///
+    /// The three fields above are the general template's own sections, kept
+    /// because the search index, the export, the chat context and the
+    /// action-item merge all read them by name. They are filled from here when
+    /// the keys match rather than parsed twice.
+    #[serde(default)]
+    pub sections: Vec<SummarySection>,
 }
 
 /// Split a reasoning model's thinking from its answer.
@@ -106,7 +215,10 @@ pub fn split_thinking(raw: &str) -> (Option<String>, String) {
 ///
 /// Bold (`**Resumo**`) and trailing colons appear about as often as plain ones,
 /// and cost a line each to accept.
-fn section_of(line: &str) -> Option<Section> {
+/// A heading line reduced to a comparable label, and whether it was hashed.
+///
+/// `None` when the line is not a heading at all.
+fn heading_label(line: &str) -> (String, bool) {
     let hashed = line.starts_with('#');
     // Looped, because the decoration nests in either order: `**Key points:**`
     // puts the colon inside the bold and `**Key points**:` puts it outside.
@@ -126,87 +238,216 @@ fn section_of(line: &str) -> Option<Section> {
         }
         label = stripped.to_string();
     }
-    let label = label.to_lowercase();
+    (label.to_lowercase(), hashed)
+}
 
+/// The Portuguese a model reaches for when it translates a heading it was told
+/// to keep in English.
+///
+/// Every section has them, not just the shipped three. The better a model
+/// writes the target language the likelier it is to translate the headings too
+/// — that is why the legacy three needed aliases in the first place — and a
+/// `## Riscos` nobody recognises does not come back empty, it pours its lines
+/// into whichever section came before it.
+///
+/// `próximos passos` appears under `next` as well as `action_items`. Order
+/// decides: `next` sits earlier in the standup's list, so a standup files it as
+/// what happens next, and every other template still reads it as a task. That
+/// is the right answer for both — a standup's next steps are its own section.
+fn aliases(key: &str) -> &'static [&'static str] {
+    match key {
+        "summary" => &["resumo"],
+        "key_points" => &["pontos-chave", "pontos chave", "pontos principais"],
+        "action_items" => &["itens de ação", "ações", "próximos passos"],
+        "done" => &["feito", "feito desde a última vez", "concluído"],
+        "next" => &["próximos", "próximos passos", "a seguir"],
+        "goals" => &["objetivos", "metas"],
+        "feedback" => &["retorno", "devolutiva"],
+        "requirements" => &["requisitos"],
+        "decisions" => &["decisões"],
+        "risks" => &["riscos"],
+        _ => &[],
+    }
+}
+
+/// Which of `specs` a line opens, if it opens one.
+fn heading_index(specs: &[SectionSpec], line: &str) -> Option<usize> {
+    let (label, hashed) = heading_label(line);
+    if label.is_empty() {
+        return None;
+    }
     // A bare word only opens a section when it is the whole line. Without that,
     // a summary whose first sentence starts "Resumo da reunião…" would be eaten
     // as a heading.
-    let opens = |names: &[&str]| {
-        names.iter().any(|n| {
-            if hashed {
-                label.starts_with(n)
-            } else {
-                label == *n
-            }
-        })
+    let opens = |name: &str| {
+        if hashed {
+            label.starts_with(name)
+        } else {
+            label == name
+        }
     };
+    specs.iter().position(|spec| {
+        let heading = spec.heading.to_lowercase();
+        // The singular too: a model with one item to report writes `## Action
+        // item` about as often as not.
+        let singular = heading.strip_suffix('s').unwrap_or(&heading).to_string();
+        opens(&heading) || opens(&singular) || aliases(spec.key).iter().any(|a| opens(a))
+    })
+}
 
-    if opens(&["summary", "resumo"]) {
-        return Some(Section::Summary);
-    }
-    if opens(&[
-        "key points",
-        "key point",
-        "pontos-chave",
-        "pontos chave",
-        "pontos principais",
-    ]) {
-        return Some(Section::KeyPoints);
-    }
-    if opens(&[
-        "action items",
-        "action item",
-        "itens de ação",
-        "ações",
-        "próximos passos",
-    ]) {
-        return Some(Section::ActionItems);
-    }
-    None
+/// Strip a bullet or a numbered prefix from a list line.
+fn strip_bullet(line: &str) -> &str {
+    line.trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .trim_start_matches('.')
+        .trim()
 }
 
 impl MeetingInsights {
-    pub fn from_model_text(raw: &str) -> Self {
-        let mut summary = String::new();
-        let mut key_points = Vec::new();
-        let mut action_items = Vec::new();
-        let mut section = Section::Summary;
+    /// Parse an answer against the sections its template asked for.
+    ///
+    /// The heading is matched on the spec's own text, so a template that asks
+    /// for Risks gets a Risks section without anything here knowing what a risk
+    /// is. The legacy three keep their Portuguese aliases — a model writing
+    /// `## Resumo` was collapsing the whole answer into one field, and that is
+    /// the shipped catalogue's behaviour, not a template's.
+    pub fn from_model_text_for(template: SummaryTemplate, raw: &str) -> Self {
+        let specs = template.sections();
+        let mut bodies: Vec<Vec<String>> = vec![Vec::new(); specs.len()];
+        // Anything before the first heading belongs to the opening section,
+        // which is the summary in every template: a model that answers with a
+        // paragraph and then starts using headings is common, and dropping that
+        // paragraph loses the only part most people read.
+        let mut at = 0usize;
+        let mut saw_heading = false;
 
         for line in raw.lines() {
             let trimmed = line.trim();
-            if let Some(heading) = section_of(trimmed) {
-                section = heading;
+            if let Some(i) = heading_index(specs, trimmed) {
+                at = i;
+                saw_heading = true;
                 continue;
             }
             if trimmed.is_empty() {
                 continue;
             }
-            let bullet = trimmed
-                .trim_start_matches('-')
-                .trim_start_matches('*')
-                .trim_start_matches(|c: char| c.is_ascii_digit())
-                .trim_start_matches('.')
-                .trim();
-            match section {
-                Section::Summary => {
-                    if !summary.is_empty() {
-                        summary.push(' ');
-                    }
-                    summary.push_str(trimmed);
-                }
-                Section::KeyPoints => key_points.push(bullet.to_string()),
-                Section::ActionItems => action_items.push(bullet.to_string()),
+            if specs[at].prose {
+                bodies[at].push(trimmed.to_string());
+            } else {
+                bodies[at].push(strip_bullet(trimmed).to_string());
             }
         }
 
-        if summary.is_empty() && key_points.is_empty() && action_items.is_empty() {
+        let sections: Vec<SummarySection> = specs
+            .iter()
+            .zip(bodies.iter())
+            .filter(|(_, lines)| !lines.is_empty())
+            .map(|(spec, lines)| SummarySection {
+                key: spec.key.to_string(),
+                body: if spec.prose {
+                    lines.join(" ")
+                } else {
+                    lines
+                        .iter()
+                        .map(|l| format!("- {l}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                },
+            })
+            .collect();
+
+        let list_of = |key: &str| -> Vec<String> {
+            specs
+                .iter()
+                .position(|s| s.key == key)
+                .map(|i| bodies[i].clone())
+                .unwrap_or_default()
+        };
+        let mut summary = specs
+            .iter()
+            .position(|s| s.key == "summary")
+            .map(|i| bodies[i].join(" "))
+            .unwrap_or_default();
+        // No heading anywhere and nothing recognised: the answer is the summary.
+        // Better than an empty screen beside a model that did reply.
+        if !saw_heading && summary.is_empty() && sections.is_empty() {
             summary = raw.trim().to_string();
         }
 
         Self {
             summary,
-            key_points,
-            action_items,
+            key_points: list_of("key_points"),
+            action_items: list_of("action_items"),
+            sections,
+        }
+    }
+
+    /// The general template's three, for callers that have no template to hand
+    /// — the extractive fallback and the tests that predate the others.
+    pub fn from_model_text(raw: &str) -> Self {
+        Self::from_model_text_for(SummaryTemplate::General, raw)
+    }
+
+    /// Push the three legacy fields back into the sections that mirror them.
+    ///
+    /// The sections carry a second copy of the same text. Refinement improves
+    /// one field by name and knows nothing about the list, so without this the
+    /// screen and the export would both keep showing the body from before the
+    /// improvement — the copy that is stored wins over the copy that changed.
+    ///
+    /// Only the three that have a field. A client call's Risks are not mirrored
+    /// anywhere and are left exactly as they are.
+    pub fn sync_sections(&mut self) {
+        if self.sections.is_empty() {
+            return;
+        }
+        for section in &mut self.sections {
+            match section.key.as_str() {
+                "summary" => section.body = self.summary.clone(),
+                "key_points" => section.body = bullets(&self.key_points),
+                "action_items" => section.body = bullets(&self.action_items),
+                _ => {}
+            }
+        }
+        // A field with no section is not nothing to say. The model can answer a
+        // client call without an Action items heading, and the user then adds
+        // three tasks in the panel — which writes the rows and the column and
+        // never this list, so an export built from the list alone would drop
+        // them. The same holds for a Key points improved into a section the
+        // model never wrote.
+        //
+        // Positions are the ones every template declares: summary opens and
+        // action items close.
+        let missing = |list: &Vec<SummarySection>, key: &str| !list.iter().any(|s| s.key == key);
+        if !self.summary.is_empty() && missing(&self.sections, "summary") {
+            self.sections.insert(
+                0,
+                SummarySection {
+                    key: "summary".into(),
+                    body: self.summary.clone(),
+                },
+            );
+        }
+        if !self.key_points.is_empty() && missing(&self.sections, "key_points") {
+            let at = self
+                .sections
+                .iter()
+                .position(|s| s.key == "action_items")
+                .unwrap_or(self.sections.len());
+            self.sections.insert(
+                at,
+                SummarySection {
+                    key: "key_points".into(),
+                    body: bullets(&self.key_points),
+                },
+            );
+        }
+        if !self.action_items.is_empty() && missing(&self.sections, "action_items") {
+            self.sections.push(SummarySection {
+                key: "action_items".into(),
+                body: bullets(&self.action_items),
+            });
         }
     }
 
@@ -225,13 +466,6 @@ impl MeetingInsights {
             .collect::<Vec<_>>()
             .join("\n")
     }
-}
-
-#[derive(Clone, Copy)]
-enum Section {
-    Summary,
-    KeyPoints,
-    ActionItems,
 }
 
 /// The language the model is told to write in, named in English.
@@ -271,10 +505,26 @@ pub fn build_summary_prompt_with(
     locale: Locale,
     notes: &[crate::domain::context::ContextNote],
 ) -> String {
+    // The headings come from the template rather than from this string. Naming
+    // them here is what made every template answer in the same three sections
+    // however differently it was introduced.
+    let specs = template.sections();
+    let headings = specs
+        .iter()
+        .map(|s| format!("## {}", s.heading))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let names = specs
+        .iter()
+        .map(|s| format!("## {}", s.heading))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "{}\n\nRespond in markdown with sections:\n## Summary\n## Key points\n## Action items\n\nWrite all prose in {}.\nKeep the three headings exactly as written, in English: ## Summary, ## Key points, ## Action items.\n\nTranscript:\n{}{}",
+        "{}\n\nRespond in markdown with sections:\n{}\n\nWrite all prose in {}.\nKeep the headings exactly as written, in English: {}.\n\nTranscript:\n{}{}",
         template.system_prompt(),
+        headings,
         language_name(locale),
+        names,
         transcript.trim(),
         crate::domain::context::notes_block(notes)
     )
@@ -322,6 +572,10 @@ pub fn extractive_summary(transcript: &str, max_sentences: usize) -> MeetingInsi
         },
         key_points,
         action_items,
+        // No sections. This runs when there is no model at all, and the three
+        // fields are exactly what it can produce — leaving the list empty is
+        // what puts the screen on its fallback, which renders those three.
+        sections: Vec::new(),
     }
 }
 
@@ -426,8 +680,125 @@ We discussed the roadmap.
             assert!(p.contains("## Summary"));
             assert!(p.contains("## Key points"));
             assert!(p.contains("## Action items"));
-            assert!(p.contains("Keep the three headings exactly as written, in English"));
+            assert!(p.contains("Keep the headings exactly as written, in English"));
         }
+    }
+
+    /// The prompt names the template's own sections, not three fixed ones.
+    /// Picking a template used to change the instruction and never the shape of
+    /// the answer.
+    #[test]
+    fn each_template_asks_for_its_own_sections() {
+        let p = build_summary_prompt(SummaryTemplate::ClientCall, "Me: hi", Locale::En);
+        for heading in ["## Summary", "## Requirements", "## Decisions", "## Risks"] {
+            assert!(p.contains(heading), "missing {heading}");
+        }
+        assert!(
+            !p.contains("## Key points"),
+            "a client call is not a general one"
+        );
+    }
+
+    #[test]
+    fn a_template_parses_into_its_own_sections() {
+        let raw = "## Summary\nThe call went well.\n## Requirements\n- SSO\n- Audit log\n## Risks\n- Timeline\n## Action items\n- Send the quote";
+        let out = MeetingInsights::from_model_text_for(SummaryTemplate::ClientCall, raw);
+        let keys: Vec<&str> = out.sections.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, ["summary", "requirements", "risks", "action_items"]);
+        assert_eq!(out.summary, "The call went well.");
+        // Decisions was never written, so it is absent rather than empty: a card
+        // holding one em-dash is worse than no card.
+        assert!(out.sections.iter().all(|s| s.key != "decisions"));
+        // And the legacy field the action list feeds is still filled.
+        assert_eq!(out.action_items, ["Send the quote"]);
+    }
+
+    /// A model that writes good Portuguese translates the headings it was told
+    /// to keep in English. Unrecognised, `## Riscos` does not come back empty —
+    /// its lines pour into whatever section came before it.
+    #[test]
+    fn a_translated_heading_still_finds_its_section() {
+        let raw = "## Resumo\nA chamada foi boa.\n## Requisitos\n- SSO\n## Riscos\n- Prazo";
+        let out = MeetingInsights::from_model_text_for(SummaryTemplate::ClientCall, raw);
+        let keys: Vec<&str> = out.sections.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, ["summary", "requirements", "risks"]);
+        assert_eq!(out.summary, "A chamada foi boa.");
+    }
+
+    /// `Próximos passos` is a standup's own section and a task list everywhere
+    /// else. Order in the template decides, and both readings are right.
+    #[test]
+    fn next_steps_belong_to_the_standup_and_to_the_tasks_elsewhere() {
+        let raw = "## Resumo\nOk.\n## Próximos passos\n- Revisar o PR";
+        let standup = MeetingInsights::from_model_text_for(SummaryTemplate::Standup, raw);
+        assert!(standup.sections.iter().any(|s| s.key == "next"));
+        assert!(standup.action_items.is_empty(), "not a task in a standup");
+        let general = MeetingInsights::from_model_text_for(SummaryTemplate::General, raw);
+        assert_eq!(general.action_items, ["Revisar o PR"]);
+    }
+
+    /// Improving one field has to reach the copy of it that is stored, or the
+    /// screen keeps showing the body from before the improvement.
+    #[test]
+    fn refining_a_field_reaches_its_section() {
+        let raw = "## Summary\nWe met.\n## Requirements\n- SSO\n## Action items\n- Old";
+        let mut out = MeetingInsights::from_model_text_for(SummaryTemplate::ClientCall, raw);
+        out.action_items = vec!["New".into()];
+        out.sync_sections();
+        let actions = out
+            .sections
+            .iter()
+            .find(|s| s.key == "action_items")
+            .expect("the section survived");
+        assert_eq!(actions.body, "- New");
+        // And a section with no field of its own is left exactly as it was.
+        let reqs = out
+            .sections
+            .iter()
+            .find(|s| s.key == "requirements")
+            .unwrap();
+        assert_eq!(reqs.body, "- SSO");
+    }
+
+    /// The model can answer without an Action items heading, and the user then
+    /// adds tasks in the panel. Those write the rows and the column, never this
+    /// list — so a sync that only replaced what was already there would export
+    /// a meeting with the user's tasks missing.
+    #[test]
+    fn a_field_with_no_section_gains_one() {
+        let raw = "## Summary\nWe met.\n## Requirements\n- SSO";
+        let mut out = MeetingInsights::from_model_text_for(SummaryTemplate::ClientCall, raw);
+        assert!(out.sections.iter().all(|s| s.key != "action_items"));
+        out.action_items = vec!["Send the quote".into()];
+        out.sync_sections();
+        let keys: Vec<&str> = out.sections.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, ["summary", "requirements", "action_items"]);
+        assert_eq!(out.sections.last().unwrap().body, "- Send the quote");
+    }
+
+    /// And a meeting that predates sections keeps none: an empty list is what
+    /// puts the screen and the export on the legacy columns.
+    #[test]
+    fn a_meeting_without_sections_does_not_grow_them() {
+        let mut out = MeetingInsights {
+            summary: "Old".into(),
+            action_items: vec!["Task".into()],
+            ..Default::default()
+        };
+        out.sync_sections();
+        assert!(out.sections.is_empty());
+    }
+
+    /// The general template still answers exactly as it did, because every
+    /// meeting already summarised was summarised by it.
+    #[test]
+    fn the_general_template_is_unchanged() {
+        let raw = "## Summary\nWe met.\n## Key points\n- One\n## Action items\n- Two";
+        let out = MeetingInsights::from_model_text(raw);
+        assert_eq!(out.summary, "We met.");
+        assert_eq!(out.key_points, ["One"]);
+        assert_eq!(out.action_items, ["Two"]);
+        assert_eq!(out.sections.len(), 3);
     }
 
     /// Bold and a colon nest in either order, and both orders occur.

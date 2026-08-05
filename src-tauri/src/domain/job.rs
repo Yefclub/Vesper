@@ -79,6 +79,15 @@ pub struct MeetingRecord {
     pub summary: Option<String>,
     pub action_items: Option<String>,
     pub key_points: Option<String>,
+    /// Every section the template asked for, in order.
+    ///
+    /// Empty for a meeting summarised before templates had shapes of their own,
+    /// and for one never summarised at all. The screen falls back to the three
+    /// fields above in that case, which are still written for every template
+    /// that has them — the search index, the exporter and the chat context all
+    /// read those by name.
+    #[serde(default)]
+    pub sections: Vec<crate::domain::summary::SummarySection>,
     pub project: Option<String>,
     /// The user named this meeting, so nothing generated may replace it.
     ///

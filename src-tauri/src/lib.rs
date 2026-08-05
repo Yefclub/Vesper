@@ -132,6 +132,11 @@ pub fn run() {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &rec_i, &quit_i])?;
 
+            // The only tray icon. `tauri.conf.json` used to carry a `trayIcon`
+            // block as well, and Tauri builds one from that at startup — so the
+            // notification area held two Vespers, the config's with no menu at
+            // all and this one with all the behaviour. The config block is gone;
+            // putting it back puts the second icon back.
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
@@ -217,6 +222,11 @@ pub fn run() {
             commands::list_meetings,
             commands::get_meeting,
             commands::get_transcript,
+            commands::list_action_items,
+            commands::add_action_item,
+            commands::update_action_item,
+            commands::delete_action_item,
+            commands::edit_transcript_segment,
             commands::delete_meeting,
             commands::search_meetings_cmd,
             commands::recorder_status,
@@ -247,6 +257,8 @@ pub fn run() {
             commands::retranscribe,
             commands::rename_meeting,
             commands::export_meeting_cmd,
+            commands::export_all_cmd,
+            commands::wipe_all_cmd,
             commands::suggested_export_name,
             commands::list_models_cmd,
             commands::download_model_cmd,
