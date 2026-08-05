@@ -17,6 +17,13 @@ function inline(text: string): ReactNode[] {
     );
 }
 
+/** The inline subset on its own, for the places that hold one line rather than
+ *  a document — an action item, where a `##` or a bullet has nowhere to go and
+ *  the model's `**owner**` was reaching the screen as four asterisks. */
+export function MarkdownInline({ text }: { text: string }) {
+  return <>{inline(text)}</>;
+}
+
 /**
  * The summariser's markdown, and nothing wider.
  *

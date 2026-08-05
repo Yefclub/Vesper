@@ -132,6 +132,11 @@ pub fn run() {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &rec_i, &quit_i])?;
 
+            // The only tray icon. `tauri.conf.json` used to carry a `trayIcon`
+            // block as well, and Tauri builds one from that at startup — so the
+            // notification area held two Vespers, the config's with no menu at
+            // all and this one with all the behaviour. The config block is gone;
+            // putting it back puts the second icon back.
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)

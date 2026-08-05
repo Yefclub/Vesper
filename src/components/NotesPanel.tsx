@@ -106,7 +106,12 @@ export function NotesPanel({ meetingId }: { meetingId: string }) {
                 type="button"
                 onClick={() => void remove(n.id)}
                 aria-label={t("context.remove")}
-                className={`shrink-0 text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS}`}
+                // A box the height of the row's first line, with the icon
+                // centred in it. The row is `items-start`, so a bare 14px icon
+                // sat 3px above the 20px line of `text-sm` beside it — which is
+                // the same 20px the timestamp's `pt-0.5` is already centring
+                // its 16px into.
+                className={`flex h-5 w-5 shrink-0 items-center justify-center text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS}`}
               >
                 <X size={14} />
               </button>

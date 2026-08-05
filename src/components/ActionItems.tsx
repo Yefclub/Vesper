@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { Plus, X } from "lucide-react";
 import { api, type ActionItem } from "../lib/api";
 import { useI18n } from "../lib/i18n";
+import { MarkdownInline } from "./Markdown";
 import { FOCUS } from "./Button";
 
 /// What the meeting decided somebody would do.
@@ -30,6 +31,10 @@ export function ActionItems({
   const [items, setItems] = useState<ActionItem[]>([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  /// Which row's text is open as a field. State rather than the ref below,
+  /// because this one has to redraw the row; the ref only has to be read.
+  const [open, setOpen] = useState<number | null>(null);
 
   /// The item being typed in, if any. A refresh must not replace the field
   /// under someone's cursor — losing a half-typed correction to a background
@@ -120,18 +125,42 @@ export function ActionItems({
               className={clsx("mt-1 shrink-0 accent-accent", FOCUS)}
             />
             <div className="min-w-0 flex-1">
-              <input
-                value={item.text}
-                onFocus={() => (editing.current = item.id)}
-                onChange={(e) => patch(item.id, { text: e.target.value })}
-                // On blur, not on every keystroke: one write per character
-                // would be one write per character.
-                onBlur={() => leave(item)}
-                className={clsx(
-                  "w-full bg-transparent text-sm outline-none",
-                  item.status === "done" && "text-fg-subtle line-through",
-                )}
-              />
+              {/* Rendered until clicked, an input once it is. The model writes
+                  `**bold**` into these lines and a permanent input has no way
+                  to show it — the asterisks were on screen. Editing still ends
+                  the same way, on blur, so the write path below is untouched. */}
+              {open === item.id ? (
+                <input
+                  value={item.text}
+                  autoFocus
+                  onFocus={() => (editing.current = item.id)}
+                  onChange={(e) => patch(item.id, { text: e.target.value })}
+                  // On blur, not on every keystroke: one write per character
+                  // would be one write per character.
+                  onBlur={() => {
+                    setOpen(null);
+                    leave(item);
+                  }}
+                  className={clsx(
+                    "w-full bg-transparent text-sm outline-none",
+                    item.status === "done" && "text-fg-subtle line-through",
+                  )}
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setOpen(item.id)}
+                  className={clsx(
+                    // `min-h-5` is the input's own height, so switching between
+                    // the two does not move the row under the pointer.
+                    "block min-h-5 w-full text-left text-sm",
+                    item.status === "done" && "text-fg-subtle line-through",
+                    FOCUS,
+                  )}
+                >
+                  <MarkdownInline text={item.text} />
+                </button>
+              )}
               <div className="mt-0.5 flex gap-2 text-xs text-fg-subtle">
                 <input
                   value={item.owner ?? ""}
@@ -160,7 +189,10 @@ export function ActionItems({
               }
               aria-label={t("actions.remove")}
               className={clsx(
-                "shrink-0 text-fg-subtle opacity-0 transition-opacity",
+                // 20px box for the 20px first line beside it, icon centred —
+                // the row is `items-start` and a bare 14px icon rode 3px high.
+                "flex h-5 w-5 shrink-0 items-center justify-center",
+                "text-fg-subtle opacity-0 transition-opacity",
                 "group-hover:opacity-100 group-focus-within:opacity-100",
                 FOCUS,
               )}

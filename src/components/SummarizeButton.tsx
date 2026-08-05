@@ -83,7 +83,11 @@ export function SummarizeButton({
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         className={clsx(
-          "flex h-7 items-center rounded-r-md border-y border-r border-accent",
+          // `h-6` and `rounded-xs` are `SIZE.xs` restated, because this half is
+          // not a `Button` and nothing else keeps the two in step. It was `h-7
+          // rounded-r-md`: four pixels taller than the half beside it and twice
+          // its radius, so the control read as two controls stuck together.
+          "flex h-6 items-center rounded-r-xs border-y border-r border-accent",
           "bg-accent px-1 text-background hover:bg-accent-hover",
           "disabled:cursor-not-allowed disabled:opacity-50",
           FOCUS,
