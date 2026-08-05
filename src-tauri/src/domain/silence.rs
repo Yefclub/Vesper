@@ -20,6 +20,17 @@ pub const ASK_AFTER_MS: u64 = 3 * 60 * 1000;
 /// window has to be wide enough for them to come back to it.
 pub const ANSWER_WINDOW_MS: u64 = 5 * 60 * 1000;
 
+/// How long audio nobody has read may hold the stop back.
+///
+/// A recording must never end over audio nobody has looked at — somebody
+/// speaking in the last seconds of the window, or an utterance a failing
+/// provider handed back. But a grace period rather than a gate: a room with a
+/// fan in it is above the segmenter's threshold forever, and a gate there would
+/// mean the stop never comes at all. Thirty seconds is twice the segmenter's
+/// own ceiling — long enough for anything actually spoken to have been cut,
+/// transcribed, and to have answered the question by itself.
+pub const UNREAD_GRACE_MS: u64 = 30_000;
+
 /// The wait for an answer outlasts the wait that raised the question. Somebody
 /// who stepped out of the room is the person this is about, and the window has
 /// to be wide enough for them to come back to it.
@@ -54,15 +65,22 @@ pub enum Act {
 
 /// Advance the vigil.
 ///
-/// `quiet_for_ms` is how long it has been since the last speech, and `now_ms`
-/// is the recording's own clock. Both come from the caller because both are
-/// facts about audio, and this module is the policy over them.
+/// `quiet_for_ms` is how long it has been since the last speech, `now_ms` is the
+/// recording's own clock, and `unread` says whether audio exists that nobody has
+/// transcribed yet. All three come from the caller because all three are facts
+/// about audio, and this module is the policy over them.
 ///
 /// Speech resets everything, in either state. That is the whole reason the
 /// question exists: it is not a countdown the user has to beat, it is a check
 /// that somebody is there, and somebody speaking IS the answer — they do not
 /// have to find a button.
-pub fn advance(state: Vigil, quiet_for_ms: u64, now_ms: u64, speaking: bool) -> (Vigil, Act) {
+pub fn advance(
+    state: Vigil,
+    quiet_for_ms: u64,
+    now_ms: u64,
+    speaking: bool,
+    unread: bool,
+) -> (Vigil, Act) {
     if speaking {
         return match state {
             Vigil::Listening => (Vigil::Listening, Act::Nothing),
@@ -74,14 +92,21 @@ pub fn advance(state: Vigil, quiet_for_ms: u64, now_ms: u64, speaking: bool) -> 
             (Vigil::Asking { since_ms: now_ms }, Act::Ask)
         }
         Vigil::Listening => (Vigil::Listening, Act::Nothing),
-        // Saturating, and it matters: `now_ms` is the recorder's elapsed clock,
-        // which does not advance while paused, so a pause during the question
-        // can leave `now` behind `since`. A wrapping subtraction there would
-        // read as an enormous elapsed time and stop the recording instantly.
-        Vigil::Asking { since_ms } if now_ms.saturating_sub(since_ms) >= ANSWER_WINDOW_MS => {
-            (Vigil::Listening, Act::Stop)
+        Vigil::Asking { since_ms } => {
+            // Saturating, and it matters: `now_ms` is the recorder's elapsed
+            // clock, which does not advance while paused, so a pause during the
+            // question can leave `now` behind `since`. A wrapping subtraction
+            // there would read as an enormous elapsed time and stop the
+            // recording instantly.
+            let waited = now_ms.saturating_sub(since_ms);
+            if waited >= ANSWER_WINDOW_MS
+                && !(unread && waited < ANSWER_WINDOW_MS + UNREAD_GRACE_MS)
+            {
+                (Vigil::Listening, Act::Stop)
+            } else {
+                (state, Act::Nothing)
+            }
         }
-        asking => (asking, Act::Nothing),
     }
 }
 
@@ -96,14 +121,14 @@ mod tests {
 
     #[test]
     fn quiet_under_the_threshold_says_nothing() {
-        let (state, act) = advance(Vigil::Listening, ASK_AFTER_MS - 1, 10_000, false);
+        let (state, act) = advance(Vigil::Listening, ASK_AFTER_MS - 1, 10_000, false, false);
         assert_eq!(state, Vigil::Listening);
         assert_eq!(act, Act::Nothing);
     }
 
     #[test]
     fn three_minutes_of_quiet_raises_the_question() {
-        let (state, act) = advance(Vigil::Listening, ASK_AFTER_MS, 200_000, false);
+        let (state, act) = advance(Vigil::Listening, ASK_AFTER_MS, 200_000, false, false);
         assert_eq!(state, Vigil::Asking { since_ms: 200_000 });
         assert_eq!(act, Act::Ask);
     }
@@ -112,12 +137,13 @@ mod tests {
     /// on each of them would be a notification storm rather than a question.
     #[test]
     fn the_question_is_raised_once() {
-        let (state, _) = advance(Vigil::Listening, ASK_AFTER_MS, 200_000, false);
+        let (state, _) = advance(Vigil::Listening, ASK_AFTER_MS, 200_000, false, false);
         for tick in 1..=5 {
             let (next, act) = advance(
                 state,
                 ASK_AFTER_MS + tick * 1_200,
                 200_000 + tick * 1_200,
+                false,
                 false,
             );
             assert_eq!(next, state, "the question moved");
@@ -131,14 +157,14 @@ mod tests {
     #[test]
     fn speech_answers_the_question_without_a_click() {
         let asking = Vigil::Asking { since_ms: 200_000 };
-        let (state, act) = advance(asking, 0, 260_000, true);
+        let (state, act) = advance(asking, 0, 260_000, true, false);
         assert_eq!(state, Vigil::Listening);
         assert_eq!(act, Act::Dismiss);
     }
 
     #[test]
     fn speech_while_listening_changes_nothing() {
-        let (state, act) = advance(Vigil::Listening, 0, 5_000, true);
+        let (state, act) = advance(Vigil::Listening, 0, 5_000, true, false);
         assert_eq!(state, Vigil::Listening);
         assert_eq!(act, Act::Nothing);
     }
@@ -146,14 +172,26 @@ mod tests {
     #[test]
     fn an_unanswered_question_stops_the_recording() {
         let asking = Vigil::Asking { since_ms: 200_000 };
-        let (_, act) = advance(asking, ASK_AFTER_MS, 200_000 + ANSWER_WINDOW_MS, false);
+        let (_, act) = advance(
+            asking,
+            ASK_AFTER_MS,
+            200_000 + ANSWER_WINDOW_MS,
+            false,
+            false,
+        );
         assert_eq!(act, Act::Stop);
     }
 
     #[test]
     fn the_window_has_to_elapse_in_full() {
         let asking = Vigil::Asking { since_ms: 200_000 };
-        let (state, act) = advance(asking, ASK_AFTER_MS, 200_000 + ANSWER_WINDOW_MS - 1, false);
+        let (state, act) = advance(
+            asking,
+            ASK_AFTER_MS,
+            200_000 + ANSWER_WINDOW_MS - 1,
+            false,
+            false,
+        );
         assert_eq!(state, asking);
         assert_eq!(act, Act::Nothing);
     }
@@ -164,7 +202,7 @@ mod tests {
     #[test]
     fn a_clock_that_went_backwards_does_not_stop_anything() {
         let asking = Vigil::Asking { since_ms: 200_000 };
-        let (state, act) = advance(asking, ASK_AFTER_MS, 100_000, false);
+        let (state, act) = advance(asking, ASK_AFTER_MS, 100_000, false, false);
         assert_eq!(state, asking);
         assert_eq!(act, Act::Nothing);
     }
@@ -173,8 +211,40 @@ mod tests {
     /// the user just said to keep.
     #[test]
     fn answering_clears_the_question() {
-        let (state, act) = advance(answered(), ASK_AFTER_MS - 1, 400_000, false);
+        let (state, act) = advance(answered(), ASK_AFTER_MS - 1, 400_000, false, false);
         assert_eq!(state, Vigil::Listening);
         assert_eq!(act, Act::Nothing);
+    }
+
+    /// Ending a recording over audio nobody has read is the one outcome this
+    /// whole feature must not produce — somebody speaking in the last seconds
+    /// of the window, or an utterance a failing provider handed back.
+    #[test]
+    fn unread_audio_holds_the_stop_back() {
+        let asking = Vigil::Asking { since_ms: 200_000 };
+        let (state, act) = advance(
+            asking,
+            ASK_AFTER_MS,
+            200_000 + ANSWER_WINDOW_MS,
+            false,
+            true,
+        );
+        assert_eq!(state, asking, "the question was taken down");
+        assert_eq!(act, Act::Nothing);
+    }
+
+    /// Grace, not veto. A room with a fan in it is above the segmenter's
+    /// threshold forever, and a veto there would mean the stop never comes.
+    #[test]
+    fn audio_that_never_becomes_words_stops_it_anyway() {
+        let asking = Vigil::Asking { since_ms: 200_000 };
+        let (_, act) = advance(
+            asking,
+            ASK_AFTER_MS,
+            200_000 + ANSWER_WINDOW_MS + UNREAD_GRACE_MS,
+            false,
+            true,
+        );
+        assert_eq!(act, Act::Stop);
     }
 }

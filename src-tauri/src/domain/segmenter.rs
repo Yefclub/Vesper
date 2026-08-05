@@ -16,6 +16,19 @@
 //! constantly, so a per-sample threshold finds "silence" inside every vowel and
 //! would cut more often than the clock it replaces.
 
+/// Whether a buffer holds a frame loud enough to be speech, by the same measure
+/// the segmenter cuts on.
+///
+/// For audio that has not reached a segmenter yet. Loud is not the same as
+/// spoken — a fan clears this — so the answer is only ever worth "do not call
+/// this silence", never "somebody talked".
+pub fn has_speech(samples: &[i16], sample_rate: u32) -> bool {
+    let frame = ((sample_rate.max(1) as u64 * FRAME_MS) / 1000).max(1) as usize;
+    samples
+        .chunks_exact(frame)
+        .any(|f| f.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0) >= QUIET_PEAK as u16)
+}
+
 /// One stretch of speech, bounded by pauses, ready to transcribe.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Utterance {

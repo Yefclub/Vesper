@@ -14,7 +14,7 @@ use crate::domain::job::{
 use crate::domain::overlay::{dock_at, footprints, overlay_visible, OverlayPosition};
 use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, SummaryVersion};
 use crate::domain::search::SearchHit;
-use crate::domain::segmenter::{Segmenter, Utterance};
+use crate::domain::segmenter::{has_speech, Segmenter, Utterance};
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
 use crate::domain::shortcut::ShortcutStatus;
 use crate::domain::speaker::Speaker;
@@ -920,6 +920,12 @@ pub async fn stop_recording(
     // Before the tail transcription and the summary, which take seconds: the
     // card must not sit there advertising a recording that has already stopped.
     sync_overlay(&app, &state, false);
+    // Here rather than in the window, because the window is not the only thing
+    // that stops a recording: the overlay, the shortcut and the tray all reach
+    // this command directly. A question about a meeting that has ended has to
+    // go with it, or it is waiting on screen when the next one starts.
+    *state.vigil.lock() = crate::domain::silence::answered();
+    let _ = app.emit("recording://silent", false);
     let duration = state.recorder.elapsed_ms();
     // Take the tail here, synchronously, while this is still the only thing that
     // has touched the recorder since it stopped. Draining it later — after the
@@ -1426,6 +1432,30 @@ pub fn keep_recording(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result
     Ok(())
 }
 
+/// Audio that exists and nobody has read.
+///
+/// Three sources, and the reason all three count is the same: a recording must
+/// never end over audio nobody has looked at. A segmenter holding an utterance
+/// is somebody mid-sentence; a segmenter holding one that came back is a
+/// provider that refused it and said nothing about the room; and samples the
+/// last pass did not reach are somebody who started talking after the drain,
+/// which is exactly the person the question was asked about.
+fn has_unread_audio(state: &Arc<AppState>) -> bool {
+    if state
+        .segmenters
+        .lock()
+        .values()
+        .any(|(mine, theirs)| mine.holding() || theirs.holding())
+    {
+        return true;
+    }
+    // Drained and put straight back. Draining only advances a cursor, and the
+    // next pass has to transcribe these samples rather than find them gone.
+    let (mic, sys, sr) = state.recorder.drain_chunks();
+    state.recorder.rewind_chunks(mic.len(), sys.len());
+    has_speech(&mic, sr) || has_speech(&sys, sr)
+}
+
 /// Notice a room that has gone quiet, and eventually stop recording it.
 ///
 /// Runs on the ticker rather than inside `drive_live_stt`, which returns early
@@ -1437,7 +1467,7 @@ pub fn keep_recording(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result
 /// paused, so asking whether anybody is there would be asking about a decision
 /// the user has already made.
 fn watch_for_silence(app: &AppHandle, state: &Arc<AppState>) {
-    use crate::domain::silence::{advance, Act};
+    use crate::domain::silence::{advance, Act, Vigil};
 
     if state.recorder.is_paused() {
         return;
@@ -1447,9 +1477,12 @@ fn watch_for_silence(app: &AppHandle, state: &Arc<AppState>) {
     // Speech is what the last pass found, not a level meter: a fan, a keyboard
     // and a television all move a meter, and none of them is somebody talking.
     let speaking = quiet_for < LIVE_STT_INTERVAL_MS * 2;
+    // Only while the question is up, because that is the only decision it feeds
+    // and it copies the undrained tail to answer.
+    let asking = matches!(*state.vigil.lock(), Vigil::Asking { .. });
+    let unread = asking && has_unread_audio(state);
     let mut guard = state.vigil.lock();
-    let was = *guard;
-    let (next, act) = advance(was, quiet_for, now, speaking);
+    let (next, act) = advance(*guard, quiet_for, now, speaking, unread);
     *guard = next;
     drop(guard);
     match act {
@@ -1464,24 +1497,6 @@ fn watch_for_silence(app: &AppHandle, state: &Arc<AppState>) {
         // guards that one has — the flight lock, the final transcription, the
         // summary — and the two would drift.
         Act::Stop => {
-            // Audio nobody has transcribed yet cannot be called silence. A
-            // segmenter holds either somebody speaking right now — the answer,
-            // arriving in the last seconds of the window — or an utterance a
-            // failing provider handed back, which says nothing about the room.
-            //
-            // The question is left standing rather than restarted, so the stop
-            // lands on the next tick after the buffer clears: speech resolves
-            // to words and dismisses it, and noise resolves to nothing and does
-            // not hold a recording open forever.
-            if state
-                .segmenters
-                .lock()
-                .values()
-                .any(|(mine, theirs)| mine.holding() || theirs.holding())
-            {
-                *state.vigil.lock() = was;
-                return;
-            }
             let _ = app.emit("recording://silent", false);
             let _ = app.emit("recording://stop-silent", ());
         }
