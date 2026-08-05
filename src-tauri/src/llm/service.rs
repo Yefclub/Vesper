@@ -135,7 +135,11 @@ impl LlmService {
         summary: &str,
         transcript: &str,
     ) -> Result<(String, Option<i64>), String> {
-        let prompt = build_title_prompt(summary, transcript);
+        // The user's language, not the one the model guesses the meeting was in.
+        // Guessing is what named a Portuguese meeting in English: the speech was
+        // full of product names that are English nouns, and the model went with
+        // those over the words around them.
+        let prompt = build_title_prompt(summary, transcript, settings.locale());
         match settings.llm_provider {
             // Loading a GGUF and generating from it takes seconds of pure CPU. On
             // a runtime worker that stalls every other task on the executor —

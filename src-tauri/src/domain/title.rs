@@ -53,16 +53,22 @@ pub fn is_fallback_title(title: &str) -> bool {
 ///
 /// The excerpt is cut by chars — a byte slice of a transcript panics the moment
 /// the cut lands inside an accented character.
-pub fn build_title_prompt(summary: &str, transcript: &str) -> String {
+pub fn build_title_prompt(
+    summary: &str,
+    transcript: &str,
+    locale: crate::domain::i18n::Locale,
+) -> String {
     let excerpt: String = transcript.trim().chars().take(EXCERPT_CHARS).collect();
     format!(
         "Name this meeting.\n\nRules:\n\
          - at most 6 words\n\
          - answer with the title alone: no quotes, no `Title:` prefix, no trailing punctuation, no explanation\n\
-         - write it in the language the meeting was held in, which the transcript below shows\n\n\
-         Summary:\n{}\n\nTranscript excerpt:\n{}",
+         - write it in {}\n\n\
+         Summary:\n{}\n\nTranscript excerpt:\n{}\n\n{}",
+        crate::domain::summary::language_name(locale),
         summary.trim(),
-        excerpt
+        excerpt,
+        crate::domain::summary::write_in_language(locale)
     )
 }
 
@@ -255,11 +261,34 @@ mod tests {
     #[test]
     fn the_prompt_carries_both_the_summary_and_the_meetings_own_words() {
         let transcript = "Me: então vamos falar da migração. ".repeat(40);
-        let p = build_title_prompt("Migration planning", &transcript);
+        let p = build_title_prompt(
+            "Migration planning",
+            &transcript,
+            crate::domain::i18n::Locale::En,
+        );
         assert!(p.contains("Migration planning"));
         assert!(p.contains("migração"));
         assert!(p.contains("at most 6 words"));
         // Excerpt, not the whole transcript, and cut on a char boundary.
         assert!(p.matches("migração").count() < transcript.matches("migração").count());
+    }
+
+    /// The title follows the user's setting, not the model's reading of the
+    /// transcript. Guessing is what named a Portuguese meeting in English: the
+    /// speech was full of product names that are English nouns, and the model
+    /// went with those over the words around them.
+    #[test]
+    fn the_title_prompt_names_the_configured_language() {
+        use crate::domain::i18n::Locale;
+        let pt = build_title_prompt("Resumo", "Eu: bom dia.", Locale::PtBr);
+        assert!(pt.contains("Brazilian Portuguese"));
+        assert!(pt.contains("Escreva tudo em português do Brasil."));
+        assert!(
+            !pt.contains("the language the meeting was held in"),
+            "the prompt must not ask the model to guess"
+        );
+        let en = build_title_prompt("Resumo", "Eu: bom dia.", Locale::En);
+        assert!(en.contains("English"));
+        assert!(!en.contains("português"));
     }
 }

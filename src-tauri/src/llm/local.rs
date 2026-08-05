@@ -848,6 +848,165 @@ mod tests {
         assert!(err.contains("not installed"));
     }
 
+    /// How many Portuguese and English function words an answer contains.
+    ///
+    /// Whole words, counted rather than merely spotted. Asking whether a
+    /// handful of substrings appear at all is a guard that passes an English
+    /// answer quoting three Portuguese words off the transcript — which is to
+    /// say a guard that approves the very regression it exists to catch.
+    ///
+    /// Headings do not count: the prompt pins them to English on purpose so the
+    /// parser can find them, and the screen titles the panels from the catalog.
+    fn language_markers(raw: &str) -> (usize, usize) {
+        // Function words that exist in one language and not the other. The
+        // short ones carry the count — a terse answer from a small model has
+        // few nouns and plenty of `do`, `da`, `foi`.
+        const PT: [&str; 20] = [
+            "não", "para", "que", "com", "uma", "está", "de", "do", "da", "dos", "das", "foi",
+            "foram", "durante", "mesmo", "hoje", "pelo", "pela", "ser", "sua",
+        ];
+        const EN: [&str; 20] = [
+            "the", "and", "was", "were", "with", "that", "this", "should", "will", "have",
+            "meeting", "team", "of", "to", "for", "is", "are", "in", "on", "it",
+        ];
+        let body = raw
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase();
+        let words: Vec<&str> = body
+            .split(|c: char| !c.is_alphabetic())
+            .filter(|w| !w.is_empty())
+            .collect();
+        let count = |set: &[&str]| words.iter().filter(|w| set.contains(w)).count();
+        (count(&PT), count(&EN))
+    }
+
+    /// A margin, not a majority. An English answer that quotes a few Portuguese
+    /// words off the transcript beats a bare `pt > en`.
+    fn reads_as_portuguese(pt: usize, en: usize) -> bool {
+        pt >= 3 * en.max(1)
+    }
+
+    /// The guard has to reject the answer it exists to reject. Without this the
+    /// bench is a statement of faith: it runs, it passes, and nobody has shown
+    /// it can fail for the right reason.
+    #[test]
+    fn the_language_guard_rejects_an_english_answer() {
+        let english = "## Summary\nThe meeting was about the build on the Macbook Pro and \
+             the team agreed that the Power Bank was not needed.\n## Action items\n\
+             - Open the pull request for the release branch";
+        let (pt, en) = language_markers(english);
+        assert!(en > pt, "pt {pt} / en {en}");
+        assert!(!reads_as_portuguese(pt, en), "an English answer passed");
+
+        // And the nastier one: English prose quoting Portuguese off the
+        // transcript, which a presence-based check waves through.
+        let mixed = "## Summary\nThe meeting was about the build. The speaker said \
+             \"não foi necessário\" and that the team should ship it.\n\
+             ## Action items\n- The team will open the pull request";
+        let (pt, en) = language_markers(mixed);
+        assert!(
+            !reads_as_portuguese(pt, en),
+            "English prose quoting Portuguese passed (pt {pt} / en {en})"
+        );
+
+        let portuguese = "## Summary\nO build do Macbook Pro foi tranquilo e o Power Bank não \
+             foi necessário durante a tarde.\n## Action items\n\
+             - Subir o hotfix no branch de release hoje mesmo";
+        let (pt, en) = language_markers(portuguese);
+        assert!(
+            reads_as_portuguese(pt, en),
+            "a Portuguese answer failed (pt {pt} / en {en})"
+        );
+    }
+
+    /// Does a summary come back in the language the user chose?
+    ///
+    /// Ignored: it needs downloaded weights, which CI has none of. Run it by
+    /// hand with
+    /// `cargo test --release -- --ignored --nocapture answers_in_the_chosen_language`.
+    ///
+    /// `VESPER_BENCH_MODEL` points it at any GGUF, because the answer depends on
+    /// the model as much as on the prompt — a 0.5B parameter model asked in
+    /// English to write Portuguese is the case this exists to measure.
+    #[test]
+    #[ignore]
+    fn answers_in_the_chosen_language() {
+        let model = std::env::var("VESPER_BENCH_MODEL")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                crate::paths::models_dir()
+                    .join("qwen2.5-0.5b")
+                    .join("model.gguf")
+            });
+        assert!(model.is_file(), "no weights at {}", model.display());
+        // Long on purpose, and about the length of a real four-minute meeting
+        // (~2700 characters). Length IS the bug: with a short transcript this
+        // model obeyed the language instruction every time, and the user's own
+        // meeting — same model, same locale, Portuguese speech — came back in
+        // English. The instruction used to sit before the transcript, so on a
+        // real meeting it was thousands of tokens from where the answer starts.
+        // Brazilian Portuguese speech, thick with English product names, which
+        // is what real speech-to-text output of a technical meeting looks like
+        // — and what the user's own meeting was. That mixture is the trigger:
+        // asked in English about a transcript full of English nouns, a small
+        // model answers in English however the locale is set. A clean
+        // Portuguese transcript never reproduced it.
+        let turn = "Eu: rodei o build no Macbook Pro e o Power Bank nem foi necessário, \
+             o Xcode segurou bem.\n\
+             Outros: aqui no Windows o installer do WebView2 quebrou, deu erro no Visual Studio \
+             Build Tools.\n\
+             Eu: então vamos travar a release até o pipeline do GitHub Actions passar no runner \
+             do Windows.\n\
+             Outros: fechado. Eu subo o hotfix no branch de release e abro o pull request hoje \
+             ainda.\n\
+             Eu: e eu atualizo o README com o passo do LLVM, porque todo mundo tropeça nele.\n";
+        let transcript = turn.repeat(5);
+        assert!(
+            transcript.len() > 2_000,
+            "the reproduction needs a real length"
+        );
+        // The prompt the APP builds, not one this test invents — including the
+        // `/no_think` that `summarize` appends when reasoning is off. That line
+        // is English and it lands after everything else, which makes it the
+        // last thing the model reads before it answers.
+        let mut prompt = crate::domain::summary::build_summary_prompt(
+            SummaryTemplate::General,
+            &transcript,
+            Locale::PtBr,
+        );
+        prompt.push_str("\n/no_think");
+        // Five runs, not one. A small model complies with a language
+        // instruction some of the time, so a single pass measures luck — which
+        // is exactly how this shipped looking fine and reached the user in the
+        // wrong language.
+        let mut ok = 0;
+        for run in 1..=5 {
+            let raw = run_llama(&model, &prompt, 400, "cpu").expect("inference failed");
+            let (pt, en) = language_markers(&raw);
+            // Too few markers either way means the answer is too short to judge.
+            // That fails, and says so: a bench that shrugs is a bench that lets
+            // the next one through.
+            assert!(
+                pt + en >= 5,
+                "run {run}: too short to judge (pt {pt} / en {en})\n{raw}"
+            );
+            let pass = reads_as_portuguese(pt, en);
+            ok += pass as usize;
+            println!(
+                "run {run}: {} (pt {pt} / en {en})",
+                if pass { "pt-BR" } else { "ENGLISH" }
+            );
+            if !pass {
+                println!("---- answer ----\n{raw}\n----------------");
+            }
+        }
+        println!("compliance: {ok}/5");
+        assert_eq!(ok, 5, "the summary came back in English for a pt-BR user");
+    }
+
     #[test]
     fn run_llama_rejects_tiny_file() {
         let dir = tempdir().unwrap();
