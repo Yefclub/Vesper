@@ -19,6 +19,7 @@ import {
   DownloadProgress,
   ModelInfo,
   OrModel,
+  ShortcutStatus,
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
@@ -50,6 +51,11 @@ interface Props {
   /// meeting and the search box, and a drawer that reached into all three would
   /// be a second place deciding what is on screen.
   onWiped: () => void;
+  /// The current accelerator and whether the OS took it. Owned by the shell —
+  /// the empty state shows it too, and two places deciding what the shortcut is
+  /// would disagree the moment one of them changed it.
+  shortcut: ShortcutStatus | null;
+  onShortcutChange: (next: ShortcutStatus) => void;
 }
 
 export function SettingsPanel({
@@ -60,6 +66,8 @@ export function SettingsPanel({
   onThemeChange,
   onRefreshModels,
   onWiped,
+  shortcut,
+  onShortcutChange,
 }: Props) {
   const { t, setLocale } = useI18n();
   const [draft, setDraft] = useState<AppSettings>({ ...settings });
@@ -299,6 +307,7 @@ export function SettingsPanel({
   const [dataBusy, setDataBusy] = useState(false);
   const [dataMessage, setDataMessage] = useState<string | null>(null);
   const [confirmWipe, setConfirmWipe] = useState(false);
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
 
   const exportEverything = async () => {
     const dir = await open({ directory: true, multiple: false });
@@ -962,6 +971,57 @@ export function SettingsPanel({
                 onChange={(v) => setDraft((d) => ({ ...d, ui_locale: v }))}
                 options={LOCALES}
               />
+              {/* Applied on click, not on Save, and for the same reason the
+                  theme is: whether a combination works is the OS's answer, not
+                  a preference, and the user has to hear it while they are still
+                  choosing. `set_record_shortcut` writes the row itself. */}
+              <FieldSelect
+                label={t("settings.shortcut")}
+                value={shortcut?.accelerator ?? draft.record_shortcut}
+                onChange={(v) => {
+                  setShortcutError(null);
+                  void api
+                    .setRecordShortcut(v)
+                    .then((next) => {
+                      onShortcutChange(next);
+                      if (next.registered) {
+                        // Only what the OS accepted reaches the draft. A refused
+                        // combination written here would make Save dirty, and a
+                        // later Save of some unrelated field would persist a
+                        // shortcut that does not work — taking the working one
+                        // with it.
+                        setDraft((d) => ({
+                          ...d,
+                          record_shortcut: next.accelerator,
+                        }));
+                      } else {
+                        setShortcutError(
+                          t(next.reason_key ?? "shortcut.taken"),
+                        );
+                      }
+                    })
+                    .catch((e) => {
+                      // The reason key, translated. The command rejects with one
+                      // rather than a status now, because the status it keeps is
+                      // the combination that is ACTIVE — which after a refusal is
+                      // the previous one, not the one that was asked for.
+                      setShortcutError(t(String(e)));
+                      void api.shortcutStatus().then(onShortcutChange).catch(() => {});
+                    });
+                }}
+                options={(shortcut?.choices ?? [draft.record_shortcut]).map((c) => ({
+                  value: c,
+                  label: c,
+                }))}
+              />
+              {shortcutError && (
+                <p className="text-xs leading-relaxed text-danger">{shortcutError}</p>
+              )}
+              {shortcut && !shortcut.registered && !shortcutError && (
+                <p className="text-xs leading-relaxed text-warn">
+                  {t("shortcut.in_use_note")}
+                </p>
+              )}
             </div>
           )}
         </div>

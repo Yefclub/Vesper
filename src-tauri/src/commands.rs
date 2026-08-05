@@ -229,6 +229,12 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
     // a theme picked in between. One writer, and the incoming value is ignored
     // rather than validated.
     settings.theme = state.settings.lock().theme.clone();
+    // Nor the record shortcut, for a stronger version of the same reason. It is
+    // a system-wide key grab: written through here it would skip the allow-list
+    // AND the registration, so the row could name a combination the OS never
+    // agreed to and the next launch would unregister everything to ask for it.
+    // `set_record_shortcut` is the only writer.
+    settings.record_shortcut = state.settings.lock().record_shortcut.clone();
     // Only an actual change counts as a pick: every save comes through here, and a
     // save that touched the microphone must not reshuffle the model list.
     if settings.openrouter_llm_model != previous_llm_model {
@@ -2001,8 +2007,108 @@ fn is_minisign_key_line(line: &str) -> bool {
 /// window can render the key it will actually get instead of a hardcoded string
 /// derived from nothing the backend reports.
 #[tauri::command]
-pub fn shortcut_status(status: State<'_, ShortcutStatus>) -> ShortcutStatus {
-    status.inner().clone()
+pub fn shortcut_status(status: State<'_, std::sync::Mutex<ShortcutStatus>>) -> ShortcutStatus {
+    status
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+/// Register a combination as the record accelerator, replacing whatever held it.
+///
+/// Shared by startup and by the settings screen so there is one place that
+/// knows what the callback does. Unregistering everything first is deliberate:
+/// this application owns exactly one accelerator, and leaving the old one live
+/// would give a user who changed it two working shortcuts.
+pub fn register_record_shortcut(app: &AppHandle, accelerator: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+    let parsed: Shortcut = accelerator
+        .parse()
+        .map_err(|_| format!("{accelerator} is not a combination this build can register"))?;
+    let _ = app.global_shortcut().unregister_all();
+    let handle = app.clone();
+    app.global_shortcut()
+        .on_shortcut(parsed, move |_app, _sc, event| {
+            if event.state == ShortcutState::Pressed {
+                let _ = handle.emit("hotkey://toggle-record", ());
+            }
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Change the record accelerator, and say whether the OS agreed.
+///
+/// The WebView is the trust boundary and this is a system-wide key grab, so the
+/// request is checked against the offered list before anything is parsed —
+/// `is_offered`, not a parser over arbitrary input.
+///
+/// A refusal puts the previous combination back rather than leaving the user
+/// with none. That is the case this whole feature exists for: the reason to
+/// change a shortcut is that something else already owns it, and the
+/// replacement can be owned too.
+#[tauri::command]
+pub fn set_record_shortcut(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    status: State<'_, std::sync::Mutex<ShortcutStatus>>,
+    accelerator: String,
+) -> Result<ShortcutStatus, String> {
+    if !crate::domain::shortcut::is_offered(&accelerator) {
+        return Err("that is not one of the offered combinations".into());
+    }
+    let previous = { state.settings.lock().record_shortcut.clone() };
+    let result = register_record_shortcut(&app, &accelerator);
+    let next = if result.is_ok() {
+        // Whichever home is holding the API key keeps holding it. Hardcoding
+        // `Keychain` here would strip the key from the row on a machine whose
+        // keychain refused to cooperate — the one place it is still stored — and
+        // changing a keyboard shortcut would silently cost the user their
+        // credential. `set_theme` carries the same guard for the same reason.
+        let home = if state.key_in_keychain.load(Ordering::Relaxed) {
+            KeyHome::Keychain
+        } else {
+            KeyHome::KeepInRow
+        };
+        let mut settings = state.settings.lock();
+        settings.record_shortcut = accelerator.clone();
+        let snapshot = settings.clone();
+        drop(settings);
+        if let Err(e) = state.db.save_settings_with(&snapshot, home) {
+            // The OS already has the new combination and the row does not. Put
+            // both back rather than leaving a shortcut that works until the next
+            // launch and then reverts with no explanation.
+            let restore = crate::domain::shortcut::chosen_or_default(&previous);
+            let _ = register_record_shortcut(&app, restore);
+            state.settings.lock().record_shortcut = previous;
+            return Err(e);
+        }
+        crate::domain::shortcut::status_from(Ok::<(), String>(()), &accelerator)
+    } else {
+        // Back to what was working, so a refused change costs the user nothing.
+        let restore = crate::domain::shortcut::chosen_or_default(&previous);
+        let restored = register_record_shortcut(&app, restore);
+        // What is stored is what is ACTIVE. The request failed; the previous
+        // combination is the one the OS holds, and the empty state reads this
+        // status to tell the user which key works. Storing the rejected one
+        // would have every screen naming a key that does nothing.
+        let active = crate::domain::shortcut::status_from(restored.as_ref().map(|_| ()), restore);
+        if let Ok(mut held) = status.lock() {
+            *held = active;
+        }
+        // Neither one took: something grabbed the previous combination during
+        // the moment it was unregistered, so there is no global shortcut at all
+        // and saying "the previous one is still in place" would be the opposite
+        // of the truth.
+        return Err(if restored.is_ok() {
+            "shortcut.taken".to_string()
+        } else {
+            "shortcut.none".to_string()
+        });
+    };
+    if let Ok(mut held) = status.lock() {
+        *held = next.clone();
+    }
+    Ok(next)
 }
 
 /// Rename a meeting.

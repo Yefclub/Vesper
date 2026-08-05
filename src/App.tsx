@@ -82,6 +82,39 @@ async function dragWindow(stillPressed: () => boolean) {
 /// it: the backdrop that draws it and the card that slides exactly that far.
 const SIDEBAR_WIDTH = 288;
 
+/// Whether a key event is the accelerator the backend registered.
+///
+/// Parsed from the same string the backend holds rather than hardcoded, so the
+/// focused-window shortcut and the global one cannot be different keys. `e.code`
+/// and not `e.key`: layout-independent, and the same `KeyR` the backend
+/// registers.
+///
+/// An accelerator this cannot parse matches nothing. The global shortcut still
+/// works — that one is registered by the OS, not by this — so the cost is the
+/// focused case, which is the milder half.
+function matchesAccelerator(e: KeyboardEvent, accelerator?: string): boolean {
+  if (!accelerator) return false;
+  const parts = accelerator.split("+").map((p) => p.trim().toLowerCase());
+  const key = parts[parts.length - 1];
+  const want = {
+    ctrl: parts.includes("ctrl") || parts.includes("control"),
+    shift: parts.includes("shift"),
+    alt: parts.includes("alt"),
+  };
+  if (e.ctrlKey !== want.ctrl || e.shiftKey !== want.shift || e.altKey !== want.alt) {
+    return false;
+  }
+  // `Ctrl+Shift+R` -> KeyR, `Ctrl+Shift+F9` -> F9, `Ctrl+Alt+Space` -> Space.
+  const code =
+    key.length === 1 && key >= "a" && key <= "z"
+      ? `Key${key.toUpperCase()}`
+      : key === "space"
+        ? "Space"
+        : key.toUpperCase();
+  return e.code === code;
+}
+
+
 export default function App() {
   const [bootLocale, setBootLocale] = useState("en");
   const [ready, setReady] = useState(false);
@@ -513,9 +546,11 @@ function AppShell({
   /// are in the call, not in Vesper.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      // `e.code`, not `e.key`: layout-independent, and the same `KeyR` the
-      // backend registers.
-      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.code !== "KeyR") return;
+      // The combination the backend actually registered, not a literal. It is a
+      // setting now, and a hardcoded Ctrl+Shift+R here would keep working
+      // alongside whatever the user picked — two keys that both start a
+      // recording, one of which they thought they had replaced.
+      if (!matchesAccelerator(e, shortcut?.accelerator)) return;
       // Bubble phase and a tag guard, so a field the user is typing in wins.
       // The capture phase would be right for a shortcut that must fire
       // unconditionally; this is not one.
@@ -543,6 +578,7 @@ function AppShell({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [
+    shortcut?.accelerator,
     status?.recording,
     busy,
     confirmingRecord,
@@ -1791,6 +1827,20 @@ function AppShell({
           <SettingsPanel
             settings={settings}
             models={models}
+            shortcut={shortcut}
+            onShortcutChange={(next) => {
+              setShortcut(next);
+              // The snapshot too, not just the status. `set_record_shortcut`
+              // writes the row itself, so leaving this stale meant a later Save
+              // of any unrelated field sent the OLD combination back and undid
+              // the change on the next launch.
+              if (next.registered) {
+                setSettings((s) => ({
+                  ...s,
+                  record_shortcut: next.accelerator,
+                }));
+              }
+            }}
             onClose={() => setShowSettings(false)}
             onWiped={() => {
               // Everything the shell is holding is about to be about meetings
