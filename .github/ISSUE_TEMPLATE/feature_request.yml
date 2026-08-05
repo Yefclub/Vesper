@@ -21,7 +21,7 @@ body:
     attributes:
       label: Does this need the network?
       description: |
-        Vesper contacts three hosts and only when the user asks for it. A feature that needs a fourth is a product decision rather than a patch, and is worth naming up front.
+        The README lists every destination Vesper reaches and when. A feature that adds one is a product decision rather than a patch, and is worth naming up front.
       options:
         - label: This feature would work entirely on the user's machine
         - label: This feature would need to contact something over the network

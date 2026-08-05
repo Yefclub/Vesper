@@ -16,7 +16,7 @@ The parts of this application where a bug costs a user their privacy:
 
 - **The IPC surface.** Every `#[tauri::command]` in `src-tauri/src/commands.rs` is reachable from the WebView. Anything that turns a parameter into a filesystem path, a network address, a download, or a SQL query is in scope.
 - **Credential storage.** API keys go to the OS keychain (`src-tauri/src/secrets.rs`). A path that writes one somewhere else, logs it, or returns it in an error message is a vulnerability.
-- **Egress.** The application contacts three hosts and only on the user's initiative. Any path that reaches the network without the user having asked — especially one carrying audio or transcript text — is a vulnerability, and offline mode failing to block one is the same bug.
+- **Egress.** The README lists every destination this application reaches and when. A path that carries audio, transcript text or notes anywhere not on that list is a vulnerability, as is a path that carries them to a listed destination in a situation the list does not cover. Offline mode failing to block something it says it blocks is the same bug — note that it deliberately does not block an OpenAI-compatible endpoint the user configured, which is documented rather than a finding.
 - **Model downloads.** Origins come from an internal catalogue and every artifact is checked against a known digest before it is loaded (`src-tauri/src/models/mod.rs`). A way to make the app fetch or load something else belongs here.
 - **The updater.** Release builds check a signed manifest. Anything that would let an unsigned or substituted artifact install is in scope.
 

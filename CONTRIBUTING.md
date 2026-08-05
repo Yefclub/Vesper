@@ -49,7 +49,7 @@ There is no front-end test runner. `npm run lint` is an alias of `npm run typech
 
 Open an issue before writing code if your change:
 
-- **Sends anything new over the network.** This application contacts three hosts and only when the user asks. A fourth is a product decision, not a patch.
+- **Sends anything new over the network.** The README lists every destination this application reaches and when, and that list is a promise to the people who chose this product. Adding to it is a product decision rather than a patch — open an issue and say what would leave the machine, to where, and on whose initiative.
 - **Changes the database schema destructively.** The database is the user's own file, at `%APPDATA%/Vesper/vesper.db` or the equivalent. There is no environment where it can just be recreated: a dropped column is somebody's meeting. Additive migrations in `db::migrate()` are fine.
 - **Adds a dependency.** Everything you add ships inside a desktop installer. Check whether the project already has something equivalent.
 - **Touches the release workflow or the signing configuration.**
