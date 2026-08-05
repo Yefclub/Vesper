@@ -786,6 +786,7 @@ pub fn start_recording(
         id: id.clone(),
         title,
         status,
+        sections: Vec::new(),
         created_at: now.clone(),
         updated_at: now,
         duration_ms: 0,
@@ -1067,6 +1068,10 @@ pub async fn stop_recording(
                 meeting.summary = Some(insights.summary.clone());
                 meeting.action_items = Some(insights.action_items_text());
                 meeting.key_points = Some(insights.key_points_text());
+                // Carried onto the record because `upsert_meeting` is what
+                // rebuilds the search index, and it indexes what the record
+                // holds — a stale list here means a section nobody can find.
+                meeting.sections = insights.sections.clone();
                 meeting.status = MeetingStatus::Ready;
                 name_meeting(&state, &settings, &mut meeting, &insights.summary).await;
                 meeting.updated_at = chrono::Utc::now().to_rfc3339();
@@ -1466,6 +1471,7 @@ pub async fn summarize_meeting(
     m.summary = Some(insights.summary.clone());
     m.action_items = Some(insights.action_items_text());
     m.key_points = Some(insights.key_points_text());
+    m.sections = insights.sections.clone();
     // Re-summarising is also the way an old meeting still carrying its date
     // label gets a real name.
     name_meeting(&state, &settings, &mut m, &insights.summary).await;
@@ -1614,6 +1620,7 @@ pub async fn import_audio(
         id: id.clone(),
         title,
         status: MeetingStatus::Transcribing,
+        sections: Vec::new(),
         created_at: now.clone(),
         updated_at: now,
         duration_ms: (pcm.len() as u64 * 1000) / sr.max(1) as u64,
@@ -1704,7 +1711,7 @@ pub fn export_meeting_cmd(
         .get_meeting(&id)?
         .ok_or_else(|| "meeting not found".to_string())?;
     let transcript = state.db.load_transcript(&id)?;
-    let insights = MeetingInsights {
+    let mut insights = MeetingInsights {
         summary: meeting.summary.clone().unwrap_or_default(),
         key_points: meeting
             .key_points
@@ -1722,7 +1729,16 @@ pub fn export_meeting_cmd(
             .map(|l| l.trim_start_matches('-').trim().to_string())
             .filter(|l| !l.is_empty())
             .collect(),
+        // The export writes every section it is given, so a client call leaves
+        // with its Requirements and Risks rather than with the three the
+        // general template happens to share.
+        sections: meeting.sections.clone(),
     };
+    // The stored section bodies were frozen when the model answered. The action
+    // items have moved since: the merge, the checkbox and every edit write the
+    // rows and the column, never the JSON — so exporting the frozen copy would
+    // omit the tasks the user added and keep the ones they deleted.
+    insights.sync_sections();
     let fmt = ExportFormat::from_ext(&format).ok_or_else(|| "unsupported format".to_string())?;
     export_meeting(
         std::path::Path::new(&path),
@@ -1940,6 +1956,10 @@ fn current_insights(m: &MeetingRecord) -> MeetingInsights {
         summary: m.summary.clone().unwrap_or_default(),
         key_points: bullets(m.key_points.as_deref()),
         action_items: bullets(m.action_items.as_deref()),
+        // Carried, not rebuilt: a client call has Requirements and Risks that
+        // no field above holds, and dropping them here would erase them from
+        // the meeting the moment anything else was improved.
+        sections: m.sections.clone(),
     }
 }
 
@@ -2036,12 +2056,17 @@ pub async fn refine_summary_section(
         Section::KeyPoints => insights.key_points = improved,
         Section::ActionItems => insights.action_items = improved,
     }
+    // The sections carry a second copy of the field just improved. Without this
+    // the version, the row and the export would all keep the body from before
+    // the improvement — the stored copy is the one the screen reads.
+    insights.sync_sections();
     let version = state
         .db
         .push_summary_version(&id, section.as_str(), &insights)?;
     state.db.save_insights(&id, &insights)?;
     meeting.summary = Some(insights.summary.clone());
     meeting.key_points = Some(insights.key_points_text());
+    meeting.sections = insights.sections.clone();
     meeting.action_items = Some(insights.action_items_text());
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
@@ -2077,11 +2102,20 @@ pub async fn restore_summary_version(
         summary: wanted.summary.clone(),
         key_points: parse_refined_list(&wanted.key_points),
         action_items: parse_refined_list(&wanted.action_items),
+        // The version's own sections, not the meeting's current ones: a restore
+        // that kept today's Risks beside a summary from last week would be a set
+        // that never existed.
+        sections: wanted
+            .sections_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default(),
     };
     let created = state.db.push_summary_version(&id, "restore", &insights)?;
     state.db.save_insights(&id, &insights)?;
     meeting.summary = Some(insights.summary.clone());
     meeting.key_points = Some(insights.key_points_text());
+    meeting.sections = insights.sections.clone();
     meeting.action_items = Some(insights.action_items_text());
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;

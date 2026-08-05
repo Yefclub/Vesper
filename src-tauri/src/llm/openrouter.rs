@@ -153,7 +153,7 @@ impl OpenRouterLlm {
             },
         ];
         let (raw, cost) = self.complete(api_key, model, &messages, reasoning).await?;
-        Ok((MeetingInsights::from_model_text(&raw), cost))
+        Ok((MeetingInsights::from_model_text_for(template, &raw), cost))
     }
 }
 

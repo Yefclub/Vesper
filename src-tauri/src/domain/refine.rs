@@ -45,6 +45,11 @@ pub struct SummaryVersion {
     pub summary: String,
     pub key_points: String,
     pub action_items: String,
+    /// The whole section set as it stood, JSON. A version is the WHOLE insight
+    /// set — restoring one that carried only the three fields above would erase
+    /// a client call's Requirements and Risks, which no field here holds.
+    #[serde(default)]
+    pub sections_json: Option<String>,
 }
 
 /// Ask the model to improve one section, given everything the first pass had
