@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Plus, X } from "lucide-react";
+import { Plus, StickyNote, X } from "lucide-react";
 import { useI18n } from "../lib/i18n";
 import { useContextNotes } from "../lib/notes";
-import { duration, ease } from "../lib/motion";
+import { duration, ease, transition } from "../lib/motion";
 import { FOCUS } from "./Button";
 
 /** `mm:ss`, and an hour field once there is one. Mirrors the Rust side, which
@@ -30,6 +30,17 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
   const { notes, add, remove } = useContextNotes(meetingId);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  // Hover and focus tracked apart, like the transport pill: moving the mouse
+  // away while the field is focused must not close the panel under a keyboard
+  // user, and the pointer arriving must open it for a mouse one.
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const field = useRef<HTMLInputElement | null>(null);
+  /// The panel was opened by a keyboard, so the field has to take the focus the
+  /// collapsed button is about to lose. Without this, tabbing to the icon
+  /// expands the panel and unmounts the very button that had focus — it falls
+  /// back to the document, and the next Tab starts from the top of the page.
+  const takeFocus = useRef(false);
 
   const submit = async () => {
     if (busy) return;
@@ -38,8 +49,63 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
     setBusy(false);
   };
 
+  // Hover, focus and content all keep it open, the way the transport pill does.
+  // Hover alone would close the panel the moment the pointer left to read
+  // something, taking a half-typed note with it; focus alone would never open
+  // it. Content counts too — a note already written is the reason to look.
+  const open = hovered || focused || notes.length > 0;
+
+  useEffect(() => {
+    if (open && takeFocus.current) {
+      takeFocus.current = false;
+      field.current?.focus();
+    }
+  }, [open]);
+
+  if (!open) {
+    return (
+      <div
+        onMouseEnter={() => setHovered(true)}
+        className="pointer-events-auto mb-2 flex justify-center"
+      >
+        <motion.button
+          type="button"
+          layoutId="context-bar"
+          onFocus={() => {
+            takeFocus.current = true;
+            setFocused(true);
+          }}
+          onClick={() => {
+            takeFocus.current = true;
+            setFocused(true);
+          }}
+          title={t("context.placeholder")}
+          aria-label={t("context.add")}
+          className={`flex h-9 w-9 items-center justify-center rounded-full border border-border bg-surface-2 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg ${FOCUS}`}
+        >
+          <StickyNote size={16} aria-hidden />
+        </motion.button>
+      </div>
+    );
+  }
+
   return (
-    <div className="pointer-events-auto mb-2 w-full max-w-md rounded-lg border border-border bg-surface-2 p-2">
+    <motion.div
+      layoutId="context-bar"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocusCapture={() => setFocused(true)}
+      onBlurCapture={(e) => {
+        // Only when focus has left the panel entirely. `relatedTarget` inside it
+        // is a tab between the field and the button, and closing on that would
+        // shut the panel while somebody is still using it.
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setFocused(false);
+        }
+      }}
+      transition={transition.base}
+      className="pointer-events-auto mb-2 w-full max-w-md rounded-lg border border-border bg-surface-2 p-2"
+    >
       <AnimatePresence initial={false}>
         {notes.length > 0 && (
           <motion.ul
@@ -84,6 +150,7 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
         }}
       >
         <input
+          ref={field}
           value={text}
           onChange={(e) => setText(e.target.value)}
           disabled={busy}
@@ -106,6 +173,6 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
           {t("context.hint")}
         </p>
       )}
-    </div>
+    </motion.div>
   );
 }
