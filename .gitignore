@@ -84,3 +84,25 @@ src-tauri/gen/schemas/*.json
 
 # Staged by build.rs from the sys crate; rebuilt on every cargo build.
 src-tauri/gpu-backends/
+
+# A meeting database is somebody's conversations. Copying one into the
+# checkout to look at it is a normal thing to do while debugging, and
+# committing it would publish every word of every meeting in it.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Signing material and credentials. Never versioned, whatever the extension.
+*.pfx
+*.jks
+*.p12
+.npmrc
+.netrc
+id_rsa
+id_ed25519
+
+# The Playwright MCP server writes here — accessibility snapshots of whatever
+# was open in the browser, which is not this project's to publish.
+.playwright-mcp/
