@@ -316,6 +316,12 @@ export const api = {
     invoke<string>("suggested_export_name", { id, format }),
   exportMeeting: (id: string, path: string, format: string) =>
     invoke<string>("export_meeting_cmd", { id, path, format }),
+  /// Every meeting as markdown into one folder, and how many were written.
+  exportAll: (dir: string) => invoke<number>("export_all_cmd", { dir }),
+  /// Delete every meeting on this computer, and how many were removed. Settings
+  /// and the API key survive — this is "take my meetings off this machine", not
+  /// a factory reset.
+  wipeAll: () => invoke<number>("wipe_all_cmd"),
   /// Ask a question about one meeting. The answer is the whole answer — this
   /// path does not stream, so the wait is silent and the caller owns saying so.
   chatMeeting: (id: string, question: string) =>

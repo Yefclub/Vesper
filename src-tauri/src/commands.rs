@@ -5,7 +5,7 @@ use crate::db::{Database, KeyHome};
 use crate::domain::actions::ActionItem;
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::chat::ChatMessage;
-use crate::domain::export::{export_meeting, safe_file_stem, ExportFormat};
+use crate::domain::export::{build_markdown, export_meeting, safe_file_stem, ExportFormat};
 use crate::domain::gate::{can_start_recording_with, StartGate};
 use crate::domain::i18n::{catalog, t, Locale};
 use crate::domain::job::{
@@ -1598,6 +1598,12 @@ pub async fn import_audio(
     path: String,
     title: Option<String>,
 ) -> Result<MeetingRecord, String> {
+    // The transcription single-flight, held for the whole job. Not for the
+    // recorder's sake — this reads a file — but so a wipe cannot delete the row
+    // this is about to write. `wipe_all_cmd` takes the same lock, and without it
+    // a confirmed wipe finishes while an import is mid-transcription and the
+    // meeting appears afterwards, pointing at a WAV that is already gone.
+    let _flight = state.stt_flight.lock().await;
     let path = PathBuf::from(path);
     // Multi-format: wav/mp3/m4a/ogg/flac/webm via decode layer.
     // The length ceiling lives in the decoder, where it can stop before the
@@ -1659,6 +1665,9 @@ pub async fn retranscribe(
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<MeetingRecord, String> {
+    // Same reason as `import_audio`: this writes a meeting, so it has to be a
+    // thing a wipe waits for rather than a thing that outlives one.
+    let _flight = state.stt_flight.lock().await;
     let mut meeting = state
         .db
         .get_meeting(&id)?
@@ -1747,6 +1756,141 @@ pub fn export_meeting_cmd(
         &transcript,
         Some(&insights),
     )
+}
+
+/// Every meeting, written into a folder the user chose.
+///
+/// The half of a wipe that has to happen first. Deleting years of meetings is
+/// only a reasonable thing to offer if the user can take them with them, and
+/// "export each of the two hundred by hand" is not an offer.
+///
+/// Markdown, and only markdown. It is the one format that is readable without
+/// this application, and a PDF of a transcript is a thing you cannot search
+/// with the tools someone will actually have in five years.
+#[tauri::command]
+pub fn export_all_cmd(state: State<'_, Arc<AppState>>, dir: String) -> Result<usize, String> {
+    let dir = std::path::Path::new(&dir);
+    // The WebView chose this path. It is a folder picker today, and a folder
+    // picker is still the WebView — a string that is not a directory would have
+    // `join` build file names beside it instead of inside it.
+    if !dir.is_dir() {
+        return Err("that is not a folder".into());
+    }
+    let meetings = state.db.list_meetings()?;
+    let mut written = 0usize;
+    let mut used: HashSet<String> = HashSet::new();
+    for m in meetings {
+        let transcript = state.db.load_transcript(&m.id)?;
+        let mut insights = MeetingInsights {
+            summary: m.summary.clone().unwrap_or_default(),
+            key_points: bullets(m.key_points.as_deref()),
+            action_items: bullets(m.action_items.as_deref()),
+            sections: m.sections.clone(),
+        };
+        // Same as the single-meeting export: the stored section bodies were
+        // frozen when the model answered, and the action items have moved since.
+        insights.sync_sections();
+        // `safe_file_stem`, never the title: it is user text and it reaches a
+        // filesystem here.
+        //
+        // The name has to be free twice over — unused by this run AND absent
+        // from the folder. Two meetings can carry the same title; so can a file
+        // the user exported last month, and the markdown writer truncates, so
+        // the second would replace the first with no sign it had. Compared
+        // lowercased because on Windows two names differing only in case are one
+        // file.
+        let base = safe_file_stem(&m.title);
+        let mut stem = base.clone();
+        let mut n = 2;
+        let file = loop {
+            let candidate = dir.join(format!("{stem}.md"));
+            // `create_new` rather than `exists`, and it does the reserving as
+            // well as the asking. `exists()` follows links, so a dangling
+            // `<stem>.md` symlink pointing somewhere else reads as absent and
+            // the writer follows it — an export outside the folder the user
+            // chose. This fails on a symlink, dangling or not, and fails on a
+            // file that appeared between the question and the answer.
+            if used.insert(stem.to_lowercase()) {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&candidate)
+                {
+                    Ok(file) => break file,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(format!("could not write into that folder: {e}")),
+                }
+            }
+            stem = format!("{base} ({n})");
+            n += 1;
+        };
+        // Written through the handle that reserved the name, never reopened by
+        // path. Closing it and calling the exporter would leave a gap in which
+        // the empty file could be swapped for a symlink, and the reopen would
+        // follow it out of the folder the user chose. `build_markdown` is what
+        // the single-meeting export writes anyway.
+        let md = build_markdown(&m.title, &transcript, Some(&insights));
+        {
+            use std::io::Write;
+            let mut file = file;
+            file.write_all(md.as_bytes())
+                .map_err(|e| format!("could not write that meeting: {e}"))?;
+        }
+        written += 1;
+    }
+    Ok(written)
+}
+
+/// Delete every meeting on this computer.
+///
+/// Transcripts, summaries, notes, tasks, chat and the audio recordings. Not the
+/// settings and not the API key: this is the "take my meetings off this machine"
+/// button, and a user who presses it still has an application to use afterwards.
+///
+/// No confirmation here. The window asks, because the window is where a person
+/// can be shown what they are about to lose; a command that asked twice would
+/// be asking the same WebView that already answered.
+#[tauri::command]
+pub async fn wipe_all_cmd(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+    // Not while the microphone is open.
+    if state.recorder.is_recording() {
+        return Err("stop the recording first".into());
+    }
+    // And not while anything else is still writing a meeting. `is_recording` is
+    // already false the moment Stop is pressed, but `stop_recording` goes on for
+    // seconds afterwards — final transcription, then the summary — and it holds
+    // a `MeetingRecord` it upserts at the end. Wiping in that window deletes the
+    // row and the audio, and then that upsert puts the meeting back: the user
+    // watches everything vanish and one thing return. Both locks, in the order
+    // every other caller takes them.
+    let _stt = state.stt_flight.lock().await;
+    let _refine = state.refine_flight.lock().await;
+    // The recorder's claim, held across the whole delete. `start_recording`
+    // takes this before it opens capture and treats it as the mutual exclusion,
+    // so holding it is what stops a recording beginning between the check and
+    // the delete — a status flag read twice cannot, and the meeting it created
+    // would either be deleted while its WAV was still being written or survive
+    // a wipe the user had confirmed.
+    //
+    // An import can hold `stt_flight` for a minute, so this window is not
+    // theoretical: it is however long the user waits after pressing Delete.
+    let claim = state.active_meeting.lock();
+    if claim.is_some() || state.recorder.is_recording() {
+        return Err("stop the recording first".into());
+    }
+    let removed = state.db.delete_all_meetings();
+    drop(claim);
+    // The in-memory transcripts, whatever the rows did. `get_transcript` answers
+    // from this map before it consults the database, so leaving it populated
+    // means a deleted meeting's words are still readable until the app restarts
+    // — which is the one thing this button exists to prevent.
+    //
+    // Cleared even when the delete reported a failure: what did get deleted must
+    // not stay readable because something else did not.
+    state.live.lock().clear();
+    state.live_stt_passes.lock().clear();
+    state.segmenters.lock().clear();
+    removed
 }
 
 #[tauri::command]

@@ -257,6 +257,8 @@ pub fn run() {
             commands::retranscribe,
             commands::rename_meeting,
             commands::export_meeting_cmd,
+            commands::export_all_cmd,
+            commands::wipe_all_cmd,
             commands::suggested_export_name,
             commands::list_models_cmd,
             commands::download_model_cmd,
