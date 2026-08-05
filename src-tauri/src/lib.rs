@@ -244,6 +244,7 @@ pub fn run() {
             commands::list_meetings,
             commands::get_meeting,
             commands::get_transcript,
+            commands::meeting_audio_path,
             commands::list_action_items,
             commands::add_action_item,
             commands::update_action_item,

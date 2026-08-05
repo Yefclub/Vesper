@@ -281,6 +281,16 @@ export const api = {
   listMeetings: () => invoke<MeetingRecord[]>("list_meetings"),
   getMeeting: (id: string) => invoke<MeetingRecord | null>("get_meeting", { id }),
   getTranscript: (id: string) => invoke<LiveTranscript>("get_transcript", { id }),
+  /// Where this meeting's recording is, for `convertFileSrc`. An id goes out and
+  /// a path comes back — never the other way round, because the path in the
+  /// meeting row is only trustworthy after the backend has proven it resolves
+  /// inside its own recordings directory, and only then does the asset protocol
+  /// learn to serve that one file.
+  ///
+  /// `null` whenever there is nothing to play: still recording, imported with no
+  /// audio retained, or the file has gone. Every caller must render without it.
+  meetingAudioPath: (id: string) =>
+    invoke<string | null>("meeting_audio_path", { id }),
   deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
   search: (query: string) => invoke<SearchHit[]>("search_meetings_cmd", { query }),
   getSettings: () => invoke<AppSettings>("get_settings"),
