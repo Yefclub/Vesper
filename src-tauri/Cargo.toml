@@ -67,7 +67,12 @@ gpu-cuda = ["llama-cpp-2/cuda"]
 gpu-all = ["gpu-vulkan", "gpu-cuda"]
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# `protocol-asset` is what registers the `asset:` handler at all — the scope in
+# `tauri.conf.json` is inert without it. It is how the player streams a
+# recording: the handler answers HTTP range requests, so seeking into a
+# two-hour WAV reads a megabyte rather than the 460 MB a command returning
+# bytes would have to hand the WebView in one piece.
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-global-shortcut = "2"

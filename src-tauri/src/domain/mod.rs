@@ -12,6 +12,7 @@ pub mod i18n;
 pub mod job;
 pub mod offline;
 pub mod overlay;
+pub mod playback;
 pub mod refine;
 pub mod search;
 pub mod segmenter;
