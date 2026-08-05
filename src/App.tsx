@@ -48,6 +48,7 @@ import { EditableLine } from "./components/EditableLine";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { ContextBar } from "./components/ContextBar";
+import { EgressBadge } from "./components/EgressBadge";
 import { RecordTransport } from "./components/RecordTransport";
 import { Sidebar } from "./components/Sidebar";
 import { WindowControls } from "./components/WindowControls";
@@ -970,6 +971,12 @@ function AppShell({
             every pixel to their left was a place the window could not be
             dragged from. The buttons opt back in. */}
         <div className="pointer-events-none flex items-center justify-end gap-1 [&>*]:pointer-events-auto">
+          {/* Renders only while something is actually leaving the machine, which
+              is what makes it worth reading when it appears. */}
+          <EgressBadge
+            settings={settings}
+            onOpenSettings={() => setShowSettings(true)}
+          />
           {/* The theme is one click from anywhere, not four (gear → Appearance →
               pick → close). It applies immediately and writes straight through
               to settings, because there is no draft out here to be dirty and
@@ -1785,6 +1792,14 @@ function AppShell({
             settings={settings}
             models={models}
             onClose={() => setShowSettings(false)}
+            onWiped={() => {
+              // Everything the shell is holding is about to be about meetings
+              // that no longer exist: the list, whatever is open, and the search
+              // term that filtered it.
+              setSelectedId(null);
+              setQuery("");
+              void refreshMeetings();
+            }}
             onThemeChange={(theme) =>
               setSettings((prev) => ({ ...prev, theme }))
             }

@@ -693,6 +693,41 @@ impl Database {
         Ok(())
     }
 
+    /// Every meeting, removed one at a time through the path a single delete
+    /// takes.
+    ///
+    /// Not `DELETE FROM meetings`: that empties the tables and leaves every
+    /// recording on disk, which is the half of a wipe that actually matters.
+    /// Going one by one reuses the ordering that refuses to drop a row whose
+    /// audio could not be removed, so a locked file costs that meeting and
+    /// nothing else.
+    ///
+    /// Returns how many were removed. A partial wipe is reported as an error
+    /// naming what is left rather than as success: a user who asked for
+    /// everything to be gone has to be told when some of it is not.
+    pub fn delete_all_meetings(&self) -> Result<usize, String> {
+        let ids: Vec<String> = self.list_meetings()?.into_iter().map(|m| m.id).collect();
+        let total = ids.len();
+        let mut done = 0usize;
+        let mut first_error = None;
+        for id in ids {
+            match self.delete_meeting(&id) {
+                Ok(()) => done += 1,
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+            }
+        }
+        match first_error {
+            None => Ok(done),
+            Some(e) => Err(format!(
+                "{done} of {total} meetings were deleted. The rest are still on this computer: {e}"
+            )),
+        }
+    }
+
     pub fn save_transcript(
         &self,
         meeting_id: &str,

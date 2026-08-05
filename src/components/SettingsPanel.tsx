@@ -9,7 +9,8 @@ import {
 } from "react";
 import { motion } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
-import { Check, TriangleAlert, X } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { Check, Download, Trash2, TriangleAlert, X } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -23,6 +24,7 @@ import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
 import { applyTheme, currentTheme } from "../lib/theme";
 import { Button, FOCUS } from "./Button";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { ModelPicker } from "./ModelPicker";
 import { LLM_PROVIDERS, LOCALES, PROVIDERS, Segmented } from "./Segmented";
 import { Tabs } from "./Tabs";
@@ -44,6 +46,10 @@ interface Props {
   /// be told separately or its own toggle keeps showing the previous one.
   onThemeChange: (theme: string) => void;
   onRefreshModels: () => Promise<void>;
+  /// Every meeting has just been deleted. The shell owns the list, the open
+  /// meeting and the search box, and a drawer that reached into all three would
+  /// be a second place deciding what is on screen.
+  onWiped: () => void;
 }
 
 export function SettingsPanel({
@@ -53,6 +59,7 @@ export function SettingsPanel({
   onSave,
   onThemeChange,
   onRefreshModels,
+  onWiped,
 }: Props) {
   const { t, setLocale } = useI18n();
   const [draft, setDraft] = useState<AppSettings>({ ...settings });
@@ -285,6 +292,50 @@ export function SettingsPanel({
   /// same screen, and a cloud picker that only disappears after Save leaves the
   /// user looking at options the mode they just chose refuses.
   const offline = draft.offline_mode;
+
+  /// The export/delete pair. One flag for both, so neither can run while the
+  /// other is: a wipe racing an export would delete meetings out from under the
+  /// loop writing them out.
+  const [dataBusy, setDataBusy] = useState(false);
+  const [dataMessage, setDataMessage] = useState<string | null>(null);
+  const [confirmWipe, setConfirmWipe] = useState(false);
+
+  const exportEverything = async () => {
+    const dir = await open({ directory: true, multiple: false });
+    if (typeof dir !== "string") return;
+    setDataBusy(true);
+    setDataMessage(null);
+    try {
+      const n = await api.exportAll(dir);
+      setDataMessage(t("data.exported").replace("{count}", String(n)));
+    } catch (e) {
+      setDataMessage(String(e));
+    } finally {
+      setDataBusy(false);
+    }
+  };
+
+  const wipeEverything = async () => {
+    setConfirmWipe(false);
+    setDataBusy(true);
+    setDataMessage(null);
+    try {
+      const n = await api.wipeAll();
+      setDataMessage(t("data.wiped").replace("{count}", String(n)));
+      // The list, the open meeting and the search index all still hold what was
+      // just deleted. Telling the app to reload is the caller's job — it owns
+      // the meeting list, and a settings drawer that reached into it would be
+      // two places deciding what is on screen.
+      onWiped();
+    } catch (e) {
+      setDataMessage(String(e));
+      // Partially deleted is still deleted. The list has to be re-read either
+      // way, or it goes on offering meetings that are gone.
+      onWiped();
+    } finally {
+      setDataBusy(false);
+    }
+  };
   /// The choices left once nothing may leave the machine. `openai_compatible`
   /// survives — `validate_endpoint_url` already holds it to a loopback or
   /// private address, so that server is on this machine or this network.
@@ -714,6 +765,40 @@ export function SettingsPanel({
                 )}
               </section>
 
+              {/* Export first, then delete, in that order and in that place.
+                  Offering the delete without the export is offering somebody
+                  the choice between keeping years of meetings on a machine they
+                  are handing over and losing them. */}
+              <section className="space-y-3">
+                <h3 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
+                  {t("data.title")}
+                </h3>
+                <p className="text-xs leading-relaxed text-fg-muted">
+                  {t("data.body")}
+                </p>
+                {dataMessage && (
+                  <p className="text-xs leading-relaxed text-fg">{dataMessage}</p>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={dataBusy}
+                    onClick={() => void exportEverything()}
+                  >
+                    <Download size={14} /> {t("data.export_all")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={dataBusy}
+                    onClick={() => setConfirmWipe(true)}
+                  >
+                    <Trash2 size={14} /> {t("data.wipe")}
+                  </Button>
+                </div>
+              </section>
+
               {/* Only where there is an NVIDIA card the current build cannot
                   reach. `cuda_device_name` comes from `nvidia-smi`, which
                   answers "there is one" even when this binary has no CUDA
@@ -922,6 +1007,19 @@ export function SettingsPanel({
           </Button>
         </div>
       </motion.div>
+
+      {/* Outside the drawer's own scroller, so the question is not something the
+          user can scroll away from while it is being asked. */}
+      {confirmWipe && (
+        <ConfirmDialog
+          title={t("data.confirm_title")}
+          body={t("data.confirm_body")}
+          confirmLabel={t("data.wipe")}
+          danger
+          onConfirm={() => void wipeEverything()}
+          onCancel={() => setConfirmWipe(false)}
+        />
+      )}
     </motion.div>
   );
 }
