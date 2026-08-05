@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in Vesper does not work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report a security vulnerability here — see [SECURITY.md](https://github.com/Yefclub/Vesper/blob/main/.github/SECURITY.md).
+
+        And please check the logs before pasting them: Vesper writes to `%APPDATA%/Vesper/logs` (or the equivalent on your platform), and while it never logs transcript text or credentials by design, a path or a filename can still be yours.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      placeholder: |
+        1. Start a recording with...
+        2. Stop it
+        3. The summary comes back...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      description: Vesper is developed and tested on Windows. Reports from macOS and Linux are especially useful, and especially likely to be a real gap rather than your setup.
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Vesper version
+      placeholder: "0.3.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Which provider was in use
+      options:
+        - Local (whisper.cpp / llama.cpp)
+        - A server I run (Ollama, LM Studio, vLLM)
+        - OpenRouter
+        - Not relevant to this bug
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Hardware, GPU, model, or a log excerpt. Screenshots are welcome.

@@ -26,10 +26,10 @@ Failures go to `failed` with reset back to `idle`.
 
 ## Providers
 
-- **STT**: local ONNX/Moonshine/Parakeet-class path + OpenRouter `/audio/transcriptions`
-- **LLM**: local GGUF path + OpenRouter chat completions (`reasoning` toggle)
+- **STT**: whisper.cpp via `whisper-rs`, over the `ggml-*.bin` weights in the catalogue + OpenRouter `/audio/transcriptions`
+- **LLM**: llama.cpp via `llama-cpp-2`, over GGUF weights + OpenRouter chat completions (`reasoning` toggle) + any OpenAI-compatible server on loopback or a private range
 
-Offline fallbacks keep summarize/chat usable without downloaded weights.
+With no weights downloaded, transcription is an error rather than a substitute — there is nothing honest to put in place of speech nobody transcribed. Summarize and chat fall back to a keyword extract of the transcript, which is labelled as one.
 
 ## Compute backends
 

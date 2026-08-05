@@ -1,0 +1,27 @@
+name: Feature request
+description: Something Vesper should do and does not
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that Vesper makes hard? Describe the situation rather than the solution — the solution is what we work out together.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: Optional. If you already know how it should work, say so.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Does this need the network?
+      description: |
+        Vesper contacts three hosts and only when the user asks for it. A feature that needs a fourth is a product decision rather than a patch, and is worth naming up front.
+      options:
+        - label: This feature would work entirely on the user's machine
+        - label: This feature would need to contact something over the network
