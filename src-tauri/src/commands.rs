@@ -14,8 +14,10 @@ use crate::domain::job::{
 use crate::domain::overlay::{dock_right_center, overlay_visible, COLLAPSED, EXPANDED};
 use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, SummaryVersion};
 use crate::domain::search::SearchHit;
+use crate::domain::segmenter::{Segmenter, Utterance};
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
 use crate::domain::shortcut::ShortcutStatus;
+use crate::domain::speaker::Speaker;
 use crate::domain::summary::{MeetingInsights, SummaryTemplate};
 use crate::domain::title::{fallback_title, is_fallback_title, parse_title};
 use crate::domain::transcript::LiveTranscript;
@@ -79,6 +81,18 @@ pub struct AppState {
     /// the first one's completion answer for the second, and the second then
     /// skipped a fallback it needed.
     pub live_stt_passes: Mutex<HashSet<String>>,
+    /// Where each channel's live audio is cut into utterances.
+    ///
+    /// One per channel, not one for both: two people pause in different places,
+    /// and a boundary found in the microphone means nothing in what the speakers
+    /// are playing. `.0` is the microphone, `.1` the system.
+    ///
+    /// Keyed by meeting, like `live`, and for the same reason. A single global
+    /// pair is a thing two recordings can both reach: a stop racing a live pass
+    /// that is still transcribing would take the buffer out from under it, and
+    /// the utterance that pass then failed to transcribe would be put back into
+    /// whatever pair had replaced it — the next meeting's, or nobody's.
+    pub segmenters: Mutex<HashMap<String, (Segmenter, Segmenter)>>,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -103,6 +117,7 @@ impl AppState {
             live_stt_generation: AtomicU64::new(0),
             refine_flight: tokio::sync::Mutex::new(()),
             live_stt_passes: Mutex::new(HashSet::new()),
+            segmenters: Mutex::new(HashMap::new()),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -786,6 +801,13 @@ pub fn start_recording(
     };
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
+    // This meeting's own pair, under this meeting's id. 16 kHz until capture
+    // opens and says otherwise — `set_sample_rate` on the first drain is what
+    // makes the milliseconds real.
+    state
+        .segmenters
+        .lock()
+        .insert(id.clone(), (Segmenter::new(16_000), Segmenter::new(16_000)));
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
     spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
@@ -812,6 +834,12 @@ pub fn pause_recording(state: State<'_, Arc<AppState>>) -> Result<RecorderStatus
         state.db.upsert_meeting(&m)?;
     }
     state.recorder.pause();
+    // The boundary is not marked here. Pressing Pause does end the sentence, but
+    // the recorder still holds samples captured before it, and sealing now would
+    // put those on the far side of the break — leaving them to be merged with
+    // whatever is said after the resume. `drive_live_stt` seals instead, once a
+    // drain comes back empty, which is the first moment everything captured
+    // before the pause is in the segmenter.
     Ok(status_of(&state))
 }
 
@@ -907,6 +935,12 @@ pub async fn stop_recording(
     // writes its result into the in-memory map only. Reopening the meeting shows
     // the transcript with the last chunk gone.
     let _flight = state.stt_flight.lock().await;
+    // Taken past that await, not before it. A live pass still transcribing holds
+    // that lock, so by here it has finished and put back whatever it could not
+    // transcribe — into this meeting's own entry, which is what the map is keyed
+    // for. Removed rather than borrowed: this recording is over, and nothing may
+    // add to it after this point.
+    let mut segmenters = state.segmenters.lock().remove(&id);
 
     let settings = state.settings.lock().clone();
     let mut live = state.live.lock().get(&id).cloned().unwrap_or_default();
@@ -938,20 +972,58 @@ pub async fn stop_recording(
         // the buffer. Skipping it — which is what happened whenever any live
         // segment existed — silently dropped the end of every meeting.
         let (mic, sys, sr) = tail;
-        if !mic.is_empty() || !sys.is_empty() {
-            let tail_ms = duration
-                .saturating_sub((mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64);
-            match state
-                .stt
-                .transcribe_dual(&settings, &mic, &sys, sr, tail_ms)
-                .await
-            {
-                Ok(chunks) => {
-                    bill_chunks(&state.db, &id, &chunks);
-                    apply_stt_chunks(&mut live, &chunks)
-                }
-                // Same reason as the summary above: the error names the model.
-                Err(_) => tracing::warn!("final chunk could not be transcribed"),
+        // Through the segmenters, and then emptied. They are holding the
+        // sentence that had not reached a pause yet, and the last sentence of a
+        // meeting never does — it is followed by somebody pressing Stop.
+        // `None` only if this meeting never had an entry — a recording that
+        // started before this build, or one whose start failed after claiming.
+        // The tail is still transcribed, just without a buffer in front of it.
+        let (mine, theirs) = match segmenters.as_mut() {
+            Some(seg) => {
+                seg.0.set_sample_rate(sr);
+                seg.1.set_sample_rate(sr);
+                let mut mine = seg.0.push(&mic);
+                let mut theirs = seg.1.push(&sys);
+                mine.extend(seg.0.flush());
+                theirs.extend(seg.1.flush());
+                (mine, theirs)
+            }
+            None => {
+                let mut fresh = (Segmenter::new(sr), Segmenter::new(sr));
+                let mut mine = fresh.0.push(&mic);
+                let mut theirs = fresh.1.push(&sys);
+                mine.extend(fresh.0.flush());
+                theirs.extend(fresh.1.flush());
+                (mine, theirs)
+            }
+        };
+        if !mine.is_empty() || !theirs.is_empty() {
+            // `Skip`, not `StopAndReturn`: there is no later pass to put an
+            // utterance back for, so stopping at the first failure would throw
+            // away every utterance behind it untried. Out of order is fine here
+            // — `apply_stt_chunks` files each one by its own timestamp.
+            let (me, others) = tokio::join!(
+                run_utterances(&state, &settings, &id, Speaker::Me, mine, sr, OnError::Skip),
+                run_utterances(
+                    &state,
+                    &settings,
+                    &id,
+                    Speaker::Others,
+                    theirs,
+                    sr,
+                    OnError::Skip
+                ),
+            );
+            let mut chunks = me.0;
+            chunks.extend(others.0);
+            // Same reason as the summary above: the error names the model, so it
+            // is logged rather than shown.
+            if me.2.is_some() || others.2.is_some() {
+                tracing::warn!("an utterance of the last chunk could not be transcribed");
+            }
+            if !chunks.is_empty() {
+                bill_chunks(&state.db, &id, &chunks);
+                apply_stt_chunks(&mut live, &chunks);
             }
         }
     }
@@ -1029,6 +1101,101 @@ pub async fn stop_recording(
 /// Cadence of the backend live-STT ticker.
 const LIVE_STT_INTERVAL_MS: u64 = 1200;
 
+/// How much of the previous utterance is handed to the model as context.
+///
+/// whisper decodes each call from nothing unless told otherwise, which is why
+/// the same name came back spelled three ways across three chunks. The tail of
+/// what was just said is the cheapest fix there is — no state to keep, because
+/// the transcript already holds it.
+const PROMPT_TAIL_CHARS: usize = 200;
+
+/// The last `PROMPT_TAIL_CHARS` of a line.
+fn prompt_tail(text: &str) -> String {
+    let text = text.trim();
+    // On a character boundary, not a byte one: this is Portuguese as often as
+    // English, and slicing an accented letter in half panics.
+    let start = text
+        .char_indices()
+        .rev()
+        .nth(PROMPT_TAIL_CHARS)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    text[start..].to_string()
+}
+
+/// The end of what this speaker last said, for the model to continue from.
+fn context_tail(state: &Arc<AppState>, id: &str, speaker: Speaker) -> String {
+    let live = state.live.lock();
+    let Some(t) = live.get(id) else {
+        return String::new();
+    };
+    let Some(last) = t.segments().iter().rev().find(|s| s.speaker == speaker) else {
+        return String::new();
+    };
+    prompt_tail(&last.text)
+}
+
+/// What a failed utterance means for the ones behind it.
+#[derive(Clone, Copy, PartialEq)]
+enum OnError {
+    /// Give up the rest of the channel and hand it back for the segmenter.
+    ///
+    /// For the live pass. `put_back` winds the buffer to where the failed
+    /// utterance began, so transcribing the ones behind it first would leave the
+    /// segmenter's clock ahead of its own audio.
+    StopAndReturn,
+    /// Carry on with the next one and lose only this.
+    ///
+    /// For stop, where nothing can be put back because there is no later pass —
+    /// so stopping would discard every utterance behind the failure untried.
+    Skip,
+}
+
+/// Transcribe one channel's utterances, oldest first.
+///
+/// Returns what landed, what must go back to the segmenter, and the first error.
+async fn run_utterances(
+    state: &Arc<AppState>,
+    settings: &AppSettings,
+    id: &str,
+    speaker: Speaker,
+    utterances: Vec<Utterance>,
+    sample_rate: u32,
+    on_error: OnError,
+) -> (Vec<SttChunkResult>, Vec<Utterance>, Option<String>) {
+    let mut done = Vec::new();
+    let mut failed = None;
+    let mut prompt = context_tail(state, id, speaker);
+    let mut left = utterances.into_iter();
+    for u in left.by_ref() {
+        match state
+            .stt
+            .transcribe_channel(settings, speaker, &u.pcm, sample_rate, u.start_ms, &prompt)
+            .await
+        {
+            Ok(chunk) => {
+                if !chunk.text.is_empty() {
+                    // Trimmed like the one read from the transcript. A backlog
+                    // chains several utterances through here, and handing each
+                    // the whole of the last would grow the prompt without bound
+                    // — fifteen seconds of speech is a lot of characters.
+                    prompt = prompt_tail(&chunk.text);
+                }
+                done.push(chunk);
+            }
+            Err(e) => {
+                if on_error == OnError::StopAndReturn {
+                    let mut back = vec![u];
+                    back.extend(left);
+                    return (done, back, Some(e));
+                }
+                failed.get_or_insert(e);
+            }
+        }
+    }
+    (done, Vec::new(), failed)
+}
+
 /// Drain whatever audio has arrived and transcribe it.
 ///
 /// No longer a command. It used to be driven by a `setInterval` in the window,
@@ -1038,14 +1205,15 @@ const LIVE_STT_INTERVAL_MS: u64 = 1200;
 /// stalled transcription itself for anyone who minimized the app during a
 /// meeting, which is precisely when they would.
 async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), String> {
-    let id = state
-        .active_meeting
-        .lock()
-        .clone()
-        .ok_or_else(|| "no active meeting".to_string())?;
-    if !state.recorder.is_recording() || state.recorder.is_paused() {
+    if !state.recorder.is_recording() {
         return Ok(());
     }
+    // A pause no longer stops this pass — it changes what it is for. The
+    // recorder still holds whatever it captured before the button, and that
+    // audio has to reach the segmenter before the boundary is marked, or the end
+    // of the sentence lands after the break and merges with what is said on the
+    // far side of it.
+    let paused = state.recorder.is_paused();
     // Single-flight. The UI polls every 1200ms and a chunk can take longer than
     // that to transcribe, so without this the next poll drains a second slice of
     // audio while the first is still running. Both then timestamp their slice from
@@ -1055,31 +1223,109 @@ async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), St
     let Ok(_flight) = state.stt_flight.try_lock() else {
         return Ok(());
     };
+    // Read past the lock, never before it. A stop and a start can both land while
+    // this pass waits for the flight, and an id taken beforehand would be the old
+    // meeting's while the recorder underneath has already become the new one's —
+    // so the drain below would take the new meeting's opening seconds and file
+    // them, or on failure buffer them, against the meeting that just ended.
+    let id = state
+        .active_meeting
+        .lock()
+        .clone()
+        .ok_or_else(|| "no active meeting".to_string())?;
     let (mic, sys, sr) = state.recorder.drain_chunks();
     if mic.is_empty() && sys.is_empty() {
+        // Empty while paused is the moment the boundary becomes safe: everything
+        // captured before the button is in the segmenter, and nothing more is
+        // coming until the resume. Idempotent, so the ticks that follow while
+        // the recording sits paused cost a flag write and nothing else.
+        //
+        // Bounded, and knowingly: a pause and a resume that both land inside one
+        // 1200ms tick are never observed here, so that utterance spans the
+        // break. Closing it needs a mark inside the captured stream, since a
+        // drain after such a resume carries both sides in one buffer with
+        // nothing between them. Not a regression — cutting on the clock spanned
+        // the break too — and a one-second pause is not a boundary anybody means.
+        if paused {
+            if let Some(seg) = state.segmenters.lock().get_mut(&id) {
+                seg.0.seal();
+                seg.1.seal();
+            }
+        }
         return Ok(());
     }
-    let start_ms = state
-        .recorder
-        .elapsed_ms()
-        .saturating_sub((mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64);
-    let settings = state.settings.lock().clone();
-    let chunks = match state
-        .stt
-        .transcribe_dual(&settings, &mic, &sys, sr, start_ms)
-        .await
-    {
-        Ok(chunks) => chunks,
-        Err(e) => {
-            // The audio was drained before the call. Propagating without putting
-            // it back threw a slice of the meeting away every 1200ms — so a cloud
-            // provider rejecting every chunk silently shredded the live
-            // transcript while the window showed nothing at all. The cursor goes
-            // back by what was taken and the next poll tries the same audio again.
+    // The drain is no longer the unit of transcription. What comes out of the
+    // recorder goes into the segmenters, and only a whole utterance — bounded by
+    // a pause — is sent to a model. A poll that lands mid-sentence now adds to
+    // the buffer instead of cutting the word in half.
+    let (mine, theirs) = {
+        let mut all = state.segmenters.lock();
+        // Looked up, never inserted. A ticker that outlives its stop by a beat
+        // would otherwise create an entry nobody is left to flush, and the audio
+        // in it would sit there until the process ended. The recorder takes its
+        // samples back instead, so nothing is dropped on the way out.
+        let Some(seg) = all.get_mut(&id) else {
             state.recorder.rewind_chunks(mic.len(), sys.len());
+            return Ok(());
+        };
+        seg.0.set_sample_rate(sr);
+        seg.1.set_sample_rate(sr);
+        (seg.0.push(&mic), seg.1.push(&sys))
+    };
+    if mine.is_empty() && theirs.is_empty() {
+        return Ok(());
+    }
+    let settings = state.settings.lock().clone();
+    // The two channels are independent, so waiting for one before starting the
+    // other would double the latency of every utterance for no reason.
+    let (me, others) = tokio::join!(
+        run_utterances(
+            state,
+            &settings,
+            &id,
+            Speaker::Me,
+            mine,
+            sr,
+            OnError::StopAndReturn
+        ),
+        run_utterances(
+            state,
+            &settings,
+            &id,
+            Speaker::Others,
+            theirs,
+            sr,
+            OnError::StopAndReturn
+        ),
+    );
+    // Put back before propagating, and in reverse so the oldest ends up at the
+    // head. Audio dropped here is a slice of a meeting nobody can get back — the
+    // reason the recorder already rewinds its own cursor when a provider rejects
+    // a chunk.
+    {
+        let mut all = state.segmenters.lock();
+        if let Some(seg) = all.get_mut(&id) {
+            for u in me.1.into_iter().rev() {
+                seg.0.put_back(u);
+            }
+            for u in others.1.into_iter().rev() {
+                seg.1.put_back(u);
+            }
+        }
+    }
+    let mut chunks = me.0;
+    chunks.extend(others.0);
+    if let Some(e) = me.2.or(others.2) {
+        // Whatever did land is still merged below on the next poll; this pass
+        // reports the failure so the window can say transcription is failing.
+        if chunks.is_empty() {
             return Err(e);
         }
-    };
+        tracing::warn!("an utterance could not be transcribed: {e}");
+    }
+    if chunks.is_empty() {
+        return Ok(());
+    }
     // Charged before the transcript is merged. The sum goes through SQL rather
     // than a read-modify-write here: two channels transcribe concurrently and
     // one would overwrite the other.

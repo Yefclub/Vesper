@@ -14,6 +14,7 @@ pub mod offline;
 pub mod overlay;
 pub mod refine;
 pub mod search;
+pub mod segmenter;
 pub mod settings;
 pub mod shortcut;
 pub mod speaker;
