@@ -14,7 +14,7 @@ use crate::domain::job::{
 use crate::domain::overlay::{dock_at, footprints, overlay_visible, OverlayPosition};
 use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, SummaryVersion};
 use crate::domain::search::SearchHit;
-use crate::domain::segmenter::{has_speech, Segmenter, Utterance};
+use crate::domain::segmenter::{Segmenter, Utterance};
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
 use crate::domain::shortcut::ShortcutStatus;
 use crate::domain::speaker::Speaker;
@@ -835,8 +835,15 @@ pub fn start_recording(
         .insert(id.clone(), (Segmenter::new(16_000), Segmenter::new(16_000)));
     // A fresh vigil for a fresh clock. Carried over from the last recording, an
     // unanswered question would stop this one within seconds of it starting.
-    *state.vigil.lock() = crate::domain::silence::Vigil::default();
+    let mut vigil = state.vigil.lock();
     state.last_speech_ms.store(0, Ordering::SeqCst);
+    *vigil = crate::domain::silence::Vigil::default();
+    drop(vigil);
+    // Said out loud rather than left to the window's own state. The question is
+    // raised and taken down by events, and an event lost to a race — a stop, a
+    // window reload — would otherwise leave it on screen over a meeting it was
+    // never asked about.
+    let _ = app.emit("recording://silent", false);
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
     spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
@@ -1424,10 +1431,16 @@ fn spawn_live_stt_ticker(app: AppHandle, state: Arc<AppState>) {
 /// still on the counter and ask again immediately.
 #[tauri::command]
 pub fn keep_recording(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    *state.vigil.lock() = crate::domain::silence::answered();
+    // Both under the vigil lock, which guards the pair: the watcher reads the
+    // clock under it too, and an answer landing between the two would leave the
+    // state reset and the clock stale — the question raised again on the spot,
+    // at the user who just said to keep recording.
+    let mut vigil = state.vigil.lock();
     state
         .last_speech_ms
         .store(state.recorder.elapsed_ms(), Ordering::SeqCst);
+    *vigil = crate::domain::silence::answered();
+    drop(vigil);
     let _ = app.emit("recording://silent", false);
     Ok(())
 }
@@ -1449,11 +1462,7 @@ fn has_unread_audio(state: &Arc<AppState>) -> bool {
     {
         return true;
     }
-    // Drained and put straight back. Draining only advances a cursor, and the
-    // next pass has to transcribe these samples rather than find them gone.
-    let (mic, sys, sr) = state.recorder.drain_chunks();
-    state.recorder.rewind_chunks(mic.len(), sys.len());
-    has_speech(&mic, sr) || has_speech(&sys, sr)
+    state.recorder.unread_has_speech()
 }
 
 /// Notice a room that has gone quiet, and eventually stop recording it.
@@ -1467,24 +1476,25 @@ fn has_unread_audio(state: &Arc<AppState>) -> bool {
 /// paused, so asking whether anybody is there would be asking about a decision
 /// the user has already made.
 fn watch_for_silence(app: &AppHandle, state: &Arc<AppState>) {
-    use crate::domain::silence::{advance, Act, Vigil};
+    use crate::domain::silence::{advance, Act};
 
     if state.recorder.is_paused() {
         return;
     }
     let now = state.recorder.elapsed_ms();
+    let unread = has_unread_audio(state);
+    // One acquisition, and `last_speech_ms` is read under it: the vigil mutex
+    // guards the pair. Read outside, an answer landing between the two leaves
+    // the state reset and the clock stale, and the question is raised again on
+    // the spot — for a user who just said to keep recording.
+    let mut vigil = state.vigil.lock();
     let quiet_for = now.saturating_sub(state.last_speech_ms.load(Ordering::SeqCst));
     // Speech is what the last pass found, not a level meter: a fan, a keyboard
     // and a television all move a meter, and none of them is somebody talking.
     let speaking = quiet_for < LIVE_STT_INTERVAL_MS * 2;
-    // Only while the question is up, because that is the only decision it feeds
-    // and it copies the undrained tail to answer.
-    let asking = matches!(*state.vigil.lock(), Vigil::Asking { .. });
-    let unread = asking && has_unread_audio(state);
-    let mut guard = state.vigil.lock();
-    let (next, act) = advance(*guard, quiet_for, now, speaking, unread);
-    *guard = next;
-    drop(guard);
+    let (next, act) = advance(*vigil, quiet_for, now, speaking, unread);
+    *vigil = next;
+    drop(vigil);
     match act {
         Act::Ask => {
             let _ = app.emit("recording://silent", true);
