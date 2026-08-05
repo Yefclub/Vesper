@@ -125,10 +125,13 @@ impl LlmService {
 
     /// Name a meeting from its summary and its own words.
     ///
-    /// Deliberately not routed through `chat`: with no GGUF on disk the local
-    /// path answers from `offline_answer`, and a keyword-matched transcript
-    /// line is worse than the date label it would replace. A missing model is
-    /// an `Err` here, which the caller treats as "keep the label".
+    /// Deliberately not routed through `chat`, which used to answer from
+    /// `offline_answer` with no GGUF on disk — a keyword-matched transcript
+    /// line, worse than the date label it would have replaced. `chat` now
+    /// errors too, so this is no longer the only path that does; the separate
+    /// entry point stays because the prompt and the token budget differ. A
+    /// missing model is an `Err` here, which the caller treats as "keep the
+    /// label".
     pub async fn title(
         &self,
         settings: &AppSettings,

@@ -1568,6 +1568,16 @@ pub async fn summarize_meeting(
     id: String,
     template: Option<String>,
 ) -> Result<MeetingInsights, String> {
+    // Before the row is read, not after the status is written. Held later, two
+    // overlapping calls both read `Summarizing` — the second one's idea of "what
+    // it was before" is the first one's work in progress, and restoring that on
+    // an error would put a finished summary back into a state nobody is going
+    // to finish.
+    //
+    // It is also held for the reason it always was: this replaces the whole
+    // insight set, and a refinement awaiting its model call would otherwise
+    // write a version built from what this is about to overwrite.
+    let _flight = state.refine_flight.lock().await;
     let meeting = state
         .db
         .get_meeting(&id)?
@@ -1575,16 +1585,13 @@ pub async fn summarize_meeting(
     let tpl = SummaryTemplate::from_id(template.as_deref().unwrap_or("general"));
     let settings = state.settings.lock().clone();
     let mut m = meeting;
+    let before = m.status;
     m.status = m
         .status
         .transition(MeetingEvent::StartSummarize)
         .unwrap_or(MeetingStatus::Summarizing);
     state.db.upsert_meeting(&m)?;
-    // Held for the same reason a refinement holds it: this replaces the whole
-    // insight set, and a refinement awaiting its model call would otherwise
-    // write a version built from what this is about to overwrite.
-    let _flight = state.refine_flight.lock().await;
-    let (insights, cost) = state
+    let outcome = state
         .llm
         .summarize(
             &settings,
@@ -1594,7 +1601,30 @@ pub async fn summarize_meeting(
             // cannot be read is a worse summary, not a lost meeting.
             &state.db.list_context_notes(&id).unwrap_or_default(),
         )
-        .await?;
+        .await;
+    // Put the status back before propagating. `Summarizing` was written to the
+    // row a few lines up, and `?` on the call above walked out over it — the
+    // meeting then sat in the sidebar summarising forever, through restarts,
+    // because nothing was ever going to finish it. Not `Failed` either: the
+    // transcript is intact and the meeting is as usable as it was a moment ago,
+    // so it goes back to exactly what it was.
+    let (insights, cost) = match outcome {
+        Ok(v) => v,
+        Err(e) => {
+            m.status = before;
+            // Said out loud rather than swallowed. If this write is the thing
+            // that failed — a full disk, a locked database — the row really is
+            // stuck in `Summarizing`, which is the exact state this arm exists
+            // to prevent, and reporting only the model error would send the
+            // user to fix the wrong thing.
+            return match state.db.upsert_meeting(&m) {
+                Ok(()) => Err(e),
+                Err(restore) => Err(format!(
+                    "{e} — and the meeting could not be put back: {restore}"
+                )),
+            };
+        }
+    };
     // The summary being replaced has to become a version before it is gone.
     // Without this, re-summarising a meeting nobody had opened the history of
     // left the original unrecoverable — the lazy baseline would then record the
