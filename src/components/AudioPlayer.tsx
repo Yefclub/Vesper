@@ -1,4 +1,4 @@
-import { useState, type RefObject } from "react";
+import { useEffect, useState, type RefObject } from "react";
 import { clsx } from "clsx";
 import { Pause, Play } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -45,6 +45,21 @@ export function AudioPlayer({
   // dragged.
   const total = loaded > 0 ? loaded : durationMs;
 
+  // Taking a media element out of the document does not stop it — the spec
+  // pauses only when the element changes document — so selecting another meeting
+  // or deleting the one playing would leave a recording audible with no
+  // transport on screen to stop it.
+  //
+  // The element is read once, on mount, and held by the closure. Reading the ref
+  // at cleanup time gives `null`, because React clears it first; a ref callback
+  // returning the cleanup instead would run it on every render unless the
+  // callback's identity were pinned, which stops playback on the first
+  // `timeupdate`.
+  useEffect(() => {
+    const el = audioRef.current;
+    return () => el?.pause();
+  }, [audioRef]);
+
   const toggle = () => {
     const el = audioRef.current;
     if (!el) return;
@@ -61,20 +76,7 @@ export function AudioPlayer({
   return (
     <div className="flex items-center gap-3">
       <audio
-        // A ref callback rather than the object, for the cleanup half. Taking a
-        // media element out of the document does not stop it — the spec pauses
-        // only when the element changes document — so switching meetings or
-        // deleting the one playing would leave a recording audible with no
-        // transport left on screen to stop it. React nulls a ref object before
-        // an effect cleanup could reach the element, so the pause has to happen
-        // here, where the element is still in hand.
-        ref={(el) => {
-          audioRef.current = el;
-          return () => {
-            el?.pause();
-            audioRef.current = null;
-          };
-        }}
+        ref={audioRef}
         src={convertFileSrc(path)}
         // Metadata alone: opening a meeting must not pull a two-hour recording
         // off the disk to draw a slider. The range requests that follow fetch
