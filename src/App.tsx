@@ -14,7 +14,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { clsx } from "clsx";
-import { Moon, PanelLeftClose, PanelLeftOpen, Settings, Sparkles, Sun, TriangleAlert } from "lucide-react";
+import { House, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sparkles, Sun, TriangleAlert } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -980,6 +980,25 @@ function AppShell({
           >
             {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
           </Button>
+          {/* Only with the sidebar closed and a meeting open. The way back to
+              the empty screen lived in the sidebar and nowhere else, so closing
+              the sidebar took it away — and closing the sidebar is exactly when
+              somebody is reading a meeting and wants out of it.
+
+              Hidden with the sidebar open on purpose: the same action is right
+              there in the list header, and two buttons for one thing on screen
+              at once is how a user learns to distrust both. */}
+          {!sidebarOpen && selected && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={startNewMeeting}
+              title={t("nav.new")}
+              aria-label={t("nav.new")}
+            >
+              <House size={16} />
+            </Button>
+          )}
           {/* No radius: the asset is the mark alone now, not a rounded tile, so
               a corner clip would shave the artwork instead of a background. */}
           <img src={logo} alt="" className="h-8 w-8" />
