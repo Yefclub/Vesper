@@ -1575,6 +1575,7 @@ pub async fn summarize_meeting(
     let tpl = SummaryTemplate::from_id(template.as_deref().unwrap_or("general"));
     let settings = state.settings.lock().clone();
     let mut m = meeting;
+    let before = m.status;
     m.status = m
         .status
         .transition(MeetingEvent::StartSummarize)
@@ -1584,7 +1585,7 @@ pub async fn summarize_meeting(
     // insight set, and a refinement awaiting its model call would otherwise
     // write a version built from what this is about to overwrite.
     let _flight = state.refine_flight.lock().await;
-    let (insights, cost) = state
+    let outcome = state
         .llm
         .summarize(
             &settings,
@@ -1594,7 +1595,21 @@ pub async fn summarize_meeting(
             // cannot be read is a worse summary, not a lost meeting.
             &state.db.list_context_notes(&id).unwrap_or_default(),
         )
-        .await?;
+        .await;
+    // Put the status back before propagating. `Summarizing` was written to the
+    // row a few lines up, and `?` on the call above walked out over it — the
+    // meeting then sat in the sidebar summarising forever, through restarts,
+    // because nothing was ever going to finish it. Not `Failed` either: the
+    // transcript is intact and the meeting is as usable as it was a moment ago,
+    // so it goes back to exactly what it was.
+    let (insights, cost) = match outcome {
+        Ok(v) => v,
+        Err(e) => {
+            m.status = before;
+            let _ = state.db.upsert_meeting(&m);
+            return Err(e);
+        }
+    };
     // The summary being replaced has to become a version before it is gone.
     // Without this, re-summarising a meeting nobody had opened the history of
     // left the original unrecoverable — the lazy baseline would then record the
