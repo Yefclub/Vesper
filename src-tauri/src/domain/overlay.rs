@@ -10,6 +10,11 @@
 /// native frame and the WebView2 surface resize on different ticks, so a
 /// per-frame `set_size` tears. Contents animate inside the new box, where the
 /// compositor can do it at frame rate.
+///
+/// `COLLAPSED` is mirrored by `h-[132px] w-[14px]` in `src/overlay/Overlay.tsx`,
+/// which draws the sliver at that size while the window is still at `EXPANDED`
+/// waiting for the card to finish leaving. Changing it here without changing it
+/// there makes the card step as it collapses.
 pub const COLLAPSED: (u32, u32) = (14, 132);
 pub const EXPANDED: (u32, u32) = (340, 268);
 
