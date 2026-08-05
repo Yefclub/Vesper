@@ -1447,10 +1447,11 @@ fn watch_for_silence(app: &AppHandle, state: &Arc<AppState>) {
     // Speech is what the last pass found, not a level meter: a fan, a keyboard
     // and a television all move a meter, and none of them is somebody talking.
     let speaking = quiet_for < LIVE_STT_INTERVAL_MS * 2;
-    let mut held = state.vigil.lock();
-    let (next, act) = advance(*held, quiet_for, now, speaking);
-    *held = next;
-    drop(held);
+    let mut guard = state.vigil.lock();
+    let was = *guard;
+    let (next, act) = advance(was, quiet_for, now, speaking);
+    *guard = next;
+    drop(guard);
     match act {
         Act::Ask => {
             let _ = app.emit("recording://silent", true);
@@ -1463,6 +1464,24 @@ fn watch_for_silence(app: &AppHandle, state: &Arc<AppState>) {
         // guards that one has — the flight lock, the final transcription, the
         // summary — and the two would drift.
         Act::Stop => {
+            // Audio nobody has transcribed yet cannot be called silence. A
+            // segmenter holds either somebody speaking right now — the answer,
+            // arriving in the last seconds of the window — or an utterance a
+            // failing provider handed back, which says nothing about the room.
+            //
+            // The question is left standing rather than restarted, so the stop
+            // lands on the next tick after the buffer clears: speech resolves
+            // to words and dismisses it, and noise resolves to nothing and does
+            // not hold a recording open forever.
+            if state
+                .segmenters
+                .lock()
+                .values()
+                .any(|(mine, theirs)| mine.holding() || theirs.holding())
+            {
+                *state.vigil.lock() = was;
+                return;
+            }
             let _ = app.emit("recording://silent", false);
             let _ = app.emit("recording://stop-silent", ());
         }

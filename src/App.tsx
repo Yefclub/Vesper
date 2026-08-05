@@ -407,6 +407,11 @@ function AppShell({
     setError(null);
     try {
       const m = await api.stopRecording();
+      // Here and not before the call: a stop that fails leaves the recording
+      // running, and the question about it standing is the whole point — the
+      // user can still answer it. Cleared on the way out, the banner would
+      // otherwise be waiting for them at the start of the next meeting.
+      setSilent(false);
       setStatus(await api.recorderStatus());
       await refreshMeetings();
       await loadMeeting(m.id);
