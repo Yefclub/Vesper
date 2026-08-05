@@ -1,4 +1,4 @@
-use crate::domain::speaker::Speaker;
+use crate::domain::speaker::{Speaker, SpeakerNames};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -87,10 +87,16 @@ impl LiveTranscript {
         }
     }
 
-    pub fn plain_text(&self) -> String {
+    /// The lines as the meeting names its two channels.
+    ///
+    /// The names are the caller's to supply rather than the segment's own: they
+    /// belong to the meeting, and the one thing that must not happen is a
+    /// transcript on screen reading "Ana" while the copy the summary model was
+    /// handed still reads "Me".
+    pub fn plain_text(&self, names: &SpeakerNames) -> String {
         self.segments
             .iter()
-            .map(|s| format!("{}: {}", s.speaker.label(), s.text))
+            .map(|s| format!("{}: {}", names.label(s.speaker), s.text))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -101,7 +107,7 @@ impl LiveTranscript {
     /// they are noise when the task is "what happened". A refinement is being
     /// asked to find what the first pass missed, and when something was said is
     /// most of how a model tells a decision from an aside.
-    pub fn timestamped_text(&self) -> String {
+    pub fn timestamped_text(&self, names: &SpeakerNames) -> String {
         self.segments
             .iter()
             .map(|s| {
@@ -110,7 +116,7 @@ impl LiveTranscript {
                     "[{:02}:{:02}] {}: {}",
                     secs / 60,
                     secs % 60,
-                    s.speaker.label(),
+                    names.label(s.speaker),
                     s.text
                 )
             })
@@ -138,6 +144,11 @@ pub fn format_ts(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::i18n::Locale;
+
+    fn english() -> SpeakerNames {
+        SpeakerNames::resolve(None, None, Locale::En)
+    }
 
     fn two_lines() -> LiveTranscript {
         let mut t = LiveTranscript::new();
@@ -182,8 +193,8 @@ mod tests {
     fn the_corrected_words_are_what_the_summary_will_read() {
         let mut t = two_lines();
         t.edit_segment("a", "Claude Code");
-        assert!(t.plain_text().contains("Claude Code"));
-        assert!(!t.plain_text().contains("clode Cote"));
+        assert!(t.plain_text(&english()).contains("Claude Code"));
+        assert!(!t.plain_text(&english()).contains("clode Cote"));
     }
 
     #[test]
@@ -213,9 +224,25 @@ mod tests {
         let mut t = LiveTranscript::new();
         t.append(TranscriptSegment::new(Speaker::Me, "hello", 0, 500));
         t.append(TranscriptSegment::new(Speaker::Others, "hi", 500, 900));
-        let plain = t.plain_text();
+        let plain = t.plain_text(&english());
         assert!(plain.contains("Me: hello"));
         assert!(plain.contains("Others: hi"));
+    }
+
+    /// The text every prompt is built from. A name that reached the screen and
+    /// not this would leave the model writing about "Others" in a summary the
+    /// reader sees headed "Cliente".
+    #[test]
+    fn the_meetings_own_names_are_what_the_model_reads() {
+        let mut t = LiveTranscript::new();
+        t.append(TranscriptSegment::new(Speaker::Me, "hello", 0, 500));
+        t.append(TranscriptSegment::new(Speaker::Others, "hi", 500, 900));
+        let names = SpeakerNames::resolve(Some("Ana"), Some("Cliente"), Locale::En);
+        assert_eq!(t.plain_text(&names), "Ana: hello\nCliente: hi");
+        assert_eq!(
+            t.timestamped_text(&names),
+            "[00:00] Ana: hello\n[00:00] Cliente: hi"
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::domain::search::SearchHit;
 use crate::domain::segmenter::{Segmenter, Utterance};
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
 use crate::domain::shortcut::ShortcutStatus;
-use crate::domain::speaker::Speaker;
+use crate::domain::speaker::{clean_speaker_name, Speaker, SpeakerNames};
 use crate::domain::summary::{MeetingInsights, SummaryTemplate};
 use crate::domain::title::{fallback_title, is_fallback_title, parse_title};
 use crate::domain::transcript::LiveTranscript;
@@ -241,6 +241,18 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
         (wanted_local_weights(&current), current.auto_summarize)
     };
     settings.validate_models().map_err(|e| e.to_string())?;
+    // Cleaned here rather than trusted, because these are copied onto every
+    // meeting created from now on and travel from there into model prompts and
+    // exported documents. Blank clears, which is what leaves a new meeting
+    // reading in the app's own words.
+    settings.default_speaker_me = settings
+        .default_speaker_me
+        .as_deref()
+        .and_then(clean_speaker_name);
+    settings.default_speaker_others = settings
+        .default_speaker_others
+        .as_deref()
+        .and_then(clean_speaker_name);
     // The theme is not this command's to write. `set_theme` owns it, and the
     // drawer's draft carries whatever the theme was when it opened — so a Save
     // of some unrelated field would put that stale value back and silently undo
@@ -401,6 +413,19 @@ pub fn get_meeting(
     id: String,
 ) -> Result<Option<MeetingRecord>, String> {
     state.db.get_meeting(&id)
+}
+
+/// What this meeting calls its two channels, everywhere they are named.
+///
+/// Read from the meeting and not from settings: the defaults were copied onto
+/// the row when it was created, and reading them live would make a rename in
+/// the drawer rewrite the transcript of every meeting already recorded.
+fn speaker_names(state: &AppState, meeting: &MeetingRecord) -> SpeakerNames {
+    SpeakerNames::resolve(
+        meeting.speaker_me.as_deref(),
+        meeting.speaker_others.as_deref(),
+        state.settings.lock().locale(),
+    )
 }
 
 #[tauri::command]
@@ -609,7 +634,7 @@ pub async fn edit_transcript_segment(
     // has to land there or it would be visible on screen and invisible to the
     // model. All three writes — segments, that field, and the search index —
     // commit together or not at all.
-    meeting.transcript_text = transcript.plain_text();
+    meeting.transcript_text = transcript.plain_text(&speaker_names(&state, &meeting));
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.save_corrected_transcript(&meeting, &transcript)?;
     // The cache is what `get_transcript` answers from while it is warm.
@@ -823,6 +848,10 @@ pub fn start_recording(
         title_locked,
         cost_nano_usd: None,
         cost_label: None,
+        // Copied, not referenced. From here this meeting carries its own names,
+        // so changing the defaults before the next call leaves this one alone.
+        speaker_me: settings.default_speaker_me.clone(),
+        speaker_others: settings.default_speaker_others.clone(),
     };
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
@@ -1070,8 +1099,9 @@ pub async fn stop_recording(
         }
     }
     state.live.lock().insert(id.clone(), live.clone());
-    state.db.save_transcript(&id, &live)?;
-    meeting.transcript_text = live.plain_text();
+    let names = speaker_names(&state, &meeting);
+    state.db.save_transcript(&id, &live, &names)?;
+    meeting.transcript_text = live.plain_text(&names);
     meeting.status = meeting
         .status
         .transition(MeetingEvent::TranscribeDone)
@@ -1792,6 +1822,7 @@ pub async fn import_audio(
     // Persist a dual-channel WAV copy under recordings for retranscription
     let wav_path = recordings_dir().join(format!("{id}.wav"));
     crate::audio::capture::write_dual_wav(&wav_path, sr, &pcm, &[]).map_err(|e| e.to_string())?;
+    let settings = state.settings.lock().clone();
     let mut meeting = MeetingRecord {
         id: id.clone(),
         title,
@@ -1809,9 +1840,12 @@ pub async fn import_audio(
         title_locked,
         cost_nano_usd: None,
         cost_label: None,
+        // Copied at creation, like a recorded meeting's: an import is a meeting
+        // too, and it keeps the names the app was set to when it arrived.
+        speaker_me: settings.default_speaker_me.clone(),
+        speaker_others: settings.default_speaker_others.clone(),
     };
     state.db.upsert_meeting(&meeting)?;
-    let settings = state.settings.lock().clone();
     // Mono import: Me channel only (no dual split in source file)
     let chunks = state
         .stt
@@ -1822,8 +1856,9 @@ pub async fn import_audio(
     // provider and it was the meeting's only charge on an imported file.
     bill_chunks(&state.db, &id, &chunks);
     apply_stt_chunks(&mut t, &chunks);
-    state.db.save_transcript(&id, &t)?;
-    meeting.transcript_text = t.plain_text();
+    let names = speaker_names(&state, &meeting);
+    state.db.save_transcript(&id, &t, &names)?;
+    meeting.transcript_text = t.plain_text(&names);
     meeting.status = MeetingStatus::Ready;
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
@@ -1870,8 +1905,9 @@ pub async fn retranscribe(
     // provider and it was the meeting's only charge on an imported file.
     bill_chunks(&state.db, &id, &chunks);
     apply_stt_chunks(&mut t, &chunks);
-    state.db.save_transcript(&id, &t)?;
-    meeting.transcript_text = t.plain_text();
+    let names = speaker_names(&state, &meeting);
+    state.db.save_transcript(&id, &t, &names)?;
+    meeting.transcript_text = t.plain_text(&names);
     meeting.status = MeetingStatus::Ready;
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
@@ -1925,6 +1961,7 @@ pub fn export_meeting_cmd(
         &meeting.title,
         &transcript,
         Some(&insights),
+        &speaker_names(&state, &meeting),
     )
 }
 
@@ -1999,7 +2036,12 @@ pub fn export_all_cmd(state: State<'_, Arc<AppState>>, dir: String) -> Result<us
         // the empty file could be swapped for a symlink, and the reopen would
         // follow it out of the folder the user chose. `build_markdown` is what
         // the single-meeting export writes anyway.
-        let md = build_markdown(&m.title, &transcript, Some(&insights));
+        let md = build_markdown(
+            &m.title,
+            &transcript,
+            Some(&insights),
+            &speaker_names(&state, &m),
+        );
         {
             use std::io::Write;
             let mut file = file;
@@ -2491,11 +2533,12 @@ pub async fn refine_summary_section(
     // The timestamped, speaker-labelled transcript rather than the flattened
     // text the first pass used: the whole transcript already went in, so "more
     // information" is the structure, not more of it.
+    let names = speaker_names(&state, &meeting);
     let transcript = state
         .live
         .lock()
         .get(&id)
-        .map(|t| t.timestamped_text())
+        .map(|t| t.timestamped_text(&names))
         .unwrap_or_else(|| meeting.transcript_text.clone());
     let prompt = build_refine_prompt(section, &current, &transcript, settings.locale());
     let messages = vec![ChatMessage {
@@ -2604,6 +2647,64 @@ pub fn rename_meeting(
     // From here the name is the user's. Nothing generated replaces it, however
     // much the shape of what they typed happens to resemble the date label.
     meeting.title_locked = true;
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    state.db.upsert_meeting(&meeting)?;
+    Ok(meeting)
+}
+
+/// Name this meeting's two channels.
+///
+/// Blank clears rather than stores: an empty string is not what anybody calls a
+/// person, and clearing has to put the meeting back to the app's own words in
+/// whatever language the user reads — which is what `None` means in the row.
+///
+/// `transcript_text` is rebuilt here from the segments the meeting already has.
+/// It is the copy the summary, the chat and the search index read, and leaving
+/// it holding the old names would make the rename something the user can see and
+/// nothing else can: a summary written about "Others" under a transcript headed
+/// "Cliente". `upsert_meeting` re-indexes search in the same transaction.
+#[tauri::command]
+pub async fn set_speaker_names(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    me: Option<String>,
+    others: Option<String>,
+) -> Result<MeetingRecord, String> {
+    // Refused while this is the meeting being recorded, for the reason an edit
+    // to a line is: the transcription ticker writes the whole set back, and
+    // `transcript_text` is rebuilt below from segments the next chunk is about
+    // to replace.
+    let recording_this = state
+        .active_meeting
+        .lock()
+        .as_deref()
+        .is_some_and(|active| active == id)
+        && state.recorder.is_recording();
+    if recording_this {
+        return Err("the speakers can be renamed once the recording has stopped".into());
+    }
+    // The same lock the final pass takes, and taken for the same reason the
+    // segment edit takes it: the recorder stopping is not enough. `stop_recording`
+    // is still awaiting the last chunk holding a copy of this row read before
+    // the rename, and it writes that copy back — so a name set in that window
+    // would vanish with no sign it had been set.
+    let _flight = state.stt_flight.lock().await;
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    // The WebView is the trust boundary and this name reaches a model prompt and
+    // an exported document. Cleaned on the way in so the row holds exactly what
+    // the window will show.
+    meeting.speaker_me = me.as_deref().and_then(clean_speaker_name);
+    meeting.speaker_others = others.as_deref().and_then(clean_speaker_name);
+    let transcript = state.db.load_transcript(&id)?;
+    // Only when there is something to rebuild from. `save_transcript` clears the
+    // segments before it writes them, so a meeting interrupted mid-write has
+    // none and its `transcript_text` is the last copy of the words that exists.
+    if !transcript.segments().is_empty() {
+        meeting.transcript_text = transcript.plain_text(&speaker_names(&state, &meeting));
+    }
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
     Ok(meeting)

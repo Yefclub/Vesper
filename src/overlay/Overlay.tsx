@@ -114,6 +114,34 @@ function Card({ top }: { top: boolean }) {
     return () => window.clearInterval(id);
   }, []);
 
+  // What the meeting being recorded calls its two channels. Fetched from the
+  // meeting rather than read off the settings defaults: those are copied onto a
+  // meeting when it is created, so a card reading them live would name this
+  // recording after a preference changed while it was running.
+  const meetingId = status?.meeting_id ?? null;
+  const [names, setNames] = useState<{
+    me?: string | null;
+    others?: string | null;
+  }>({});
+  useEffect(() => {
+    if (!meetingId) {
+      setNames({});
+      return;
+    }
+    let live = true;
+    api
+      .getMeeting(meetingId)
+      .then((m) => {
+        if (live && m) setNames({ me: m.speaker_me, others: m.speaker_others });
+      })
+      .catch(() => {
+        /* the card falls back to the app's own words */
+      });
+    return () => {
+      live = false;
+    };
+  }, [meetingId]);
+
   // Newest line, always. Nobody scrolls a card they are hovering to read the
   // last thing said, so there is no pinned-to-bottom question here.
   useEffect(() => {
@@ -244,8 +272,8 @@ function Card({ top }: { top: boolean }) {
                       }
                     >
                       {s.speaker === "me"
-                        ? t("speaker.me")
-                        : t("speaker.others")}
+                        ? names.me || t("speaker.me")
+                        : names.others || t("speaker.others")}
                     </span>{" "}
                     <span className="text-fg-muted">{s.text}</span>
                   </p>
