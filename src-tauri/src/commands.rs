@@ -422,14 +422,20 @@ pub fn get_transcript(
 /// boundary. What comes back is a file the asset protocol has just been told to
 /// serve — the scope in `tauri.conf.json` is empty, and this is the only thing
 /// that ever adds to it, one recording at a time. Naming any other file in the
-/// URL is refused by Tauri before a byte is read, and the refusal re-resolves
-/// the path at request time, so a file swapped for a symlink after this returns
-/// stops matching what was allowed.
+/// URL is refused by Tauri, which resolves symlinks again on every request, so
+/// the grant does not survive the file being swapped for a link pointing out.
 ///
-/// `None` for every way there is nothing to play: a meeting still being
-/// recorded, an imported one with no audio retained, a file deleted from under
-/// the app, a row pointing outside the recordings directory. The window shows
-/// the same thing for all of them; only the log tells the last one apart.
+/// What that does not close is the instant between Tauri's check and its open.
+/// No path-based validation closes it — reading the bytes here instead would
+/// carry the same race across a wider gap — and both ends of it need somebody
+/// who can already write inside the app's data directory, beside the database.
+///
+/// `None` for every way there is nothing to play: an imported meeting whose
+/// audio was not retained, a file deleted from under the app, a row pointing
+/// outside the recordings directory, and a meeting still being recorded — the
+/// recorder writes the WAV when it stops, so until then there is nothing at
+/// that path to resolve. The window shows the same thing for all of them; only
+/// the row pointing outside gets a line in the log.
 #[tauri::command]
 pub fn meeting_audio_path(
     app: AppHandle,
