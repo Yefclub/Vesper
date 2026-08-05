@@ -29,7 +29,9 @@ Failures go to `failed` with reset back to `idle`.
 - **STT**: whisper.cpp via `whisper-rs`, over the `ggml-*.bin` weights in the catalogue + OpenRouter `/audio/transcriptions`
 - **LLM**: llama.cpp via `llama-cpp-2`, over GGUF weights + OpenRouter chat completions (`reasoning` toggle) + any OpenAI-compatible server on loopback or a private range
 
-With no weights downloaded, transcription is an error rather than a substitute — there is nothing honest to put in place of speech nobody transcribed. Summarize and chat fall back to a keyword extract of the transcript, which is labelled as one.
+With no weights downloaded, transcription is an error rather than a substitute — there is nothing honest to put in place of speech nobody transcribed.
+
+Summarize and chat do the opposite: they fall back to a keyword extract of the transcript, and **nothing in the interface says so**. The summary pane renders it through the same fields a model's answer uses, with the same badge. That is a defect rather than a design, tracked as [#76](https://github.com/Yefclub/Vesper/issues/76).
 
 ## Compute backends
 

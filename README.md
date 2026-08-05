@@ -32,23 +32,24 @@ No bot joins your call. Nothing is uploaded to be processed. The transcript, the
 
 ## What leaves the machine
 
-Vesper contacts exactly three hosts, and never on its own initiative:
+This is the complete list. Four situations, and one of them happens without you asking:
 
-| Host | When | What it carries |
+| Destination | When | What it carries |
 |---|---|---|
-| `github.com` | Update check | The installed version. No meeting data. |
-| `huggingface.co` | You download a model in Settings | Nothing but the request for the file, which is verified against a checksum before it is loaded. |
-| `openrouter.ai` | Only if **you** select OpenRouter as the provider | Audio for transcription, or transcript text for summaries — the thing you chose to send. |
+| `github.com` | **At every launch, on its own.** Vesper asks whether a newer version exists, and if one does it downloads the installer in the background so the Update button is instant. Nothing installs until you click. | The request itself, and the installer coming back. No meeting data. There is currently no setting to turn this off — [#77](https://github.com/Yefclub/Vesper/issues/77). |
+| `huggingface.co` | You download a model in Settings | The request for that file. Origins come from a fixed internal catalogue, never from anything the interface can compose, and every download is checked against a known hash before it is loaded. |
+| A server **you** run | Only if you configure an OpenAI-compatible endpoint | Transcript text, and your notes, for summaries and chat. The address is checked: loopback and the private network ranges are accepted and anything routable on the public internet is refused, so a model on a public VPS will not work. That refusal is deliberate. A machine on your LAN is still not this machine — if that distinction matters to you, keep the endpoint on `127.0.0.1`. |
+| `openrouter.ai` | Only if you select OpenRouter as the provider | Your meeting **audio** for transcription, or transcript text for summaries. This is a third party, and it is the one place where the recording itself leaves your machine. |
 
-There is no fourth host. No analytics, no crash reporting, no "anonymous usage statistics".
-
-**Offline mode** turns all three off at once. "Cloud optional" is only a promise if it can be enforced, and this is the enforcement: with the switch on, every path that would reach the network is refused before it opens a socket, and each refusal names the thing that did not happen rather than reporting a connection error the user would go looking for.
+No analytics, no crash reporting, no "anonymous usage statistics". No fifth destination.
 
 **Local by default.** Out of the box, transcription runs on whisper.cpp and summaries on llama.cpp, both on your machine. OpenRouter is a choice you make in Settings, never a fallback the app takes by itself.
 
-**Your own server.** You can point Vesper at an OpenAI-compatible server you run — Ollama, LM Studio, vLLM, an internal proxy. The address is checked: loopback and private network ranges are accepted, anything routable on the public internet is refused. A model on a public VPS will not work, and that is deliberate for a product that makes this promise.
+**Offline mode** is the enforcement, because "cloud optional" is only a promise if something checks. With the switch on, cloud transcription, cloud summaries, model downloads and the update check are all refused before a socket opens, and each refusal names the thing that did not happen rather than reporting a connection error you would go looking for.
 
-**API keys** go to the operating system's keychain — Credential Manager on Windows, Keychain on macOS, the Secret Service on Linux. When the keychain refuses (a headless Linux box with no keyring daemon, most often), the app says so and keeps the key in the local database instead, rather than silently losing it.
+It deliberately does **not** block an OpenAI-compatible endpoint you configured yourself. The reasoning is that a model on your own machine is not egress — but if you pointed that endpoint at another machine on your network, offline mode will not stop it, and you should know that rather than discover it.
+
+**API keys** go to the operating system's keychain — Credential Manager on Windows, Keychain on macOS, the Secret Service on Linux. If the keychain refuses a key you just typed, saving fails and tells you, rather than quietly writing the key somewhere less safe. A key from an older version that has not migrated yet stays in the local database until a keychain write succeeds.
 
 ## Platforms, and what is actually tested
 
