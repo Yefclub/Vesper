@@ -870,6 +870,11 @@ function AppShell({
   /// the backend cleans what it is given — the name reaches a model prompt and
   /// an exported file — so what comes back is what is true, and a refusal leaves
   /// the header showing what the database holds.
+  ///
+  /// One channel, never the pair. Sending both would send this snapshot's idea
+  /// of the other one too, and renaming the second while the first is still in
+  /// flight would carry that stale value back over a rename that had already
+  /// succeeded.
   async function commitSpeakerRename(
     meeting: MeetingRecord,
     speaker: Speaker,
@@ -879,13 +884,11 @@ function AppShell({
     // Blank clears. `null` is the absence of a name, which is what puts the
     // channel back to the app's own word — and it is what typing nothing means.
     const name = next.trim() || null;
-    const wasMe = meeting.speaker_me ?? null;
-    const wasOthers = meeting.speaker_others ?? null;
-    const me = speaker === "me" ? name : wasMe;
-    const others = speaker === "me" ? wasOthers : name;
-    if (me === wasMe && others === wasOthers) return;
+    const was =
+      (speaker === "me" ? meeting.speaker_me : meeting.speaker_others) ?? null;
+    if (name === was) return;
     try {
-      const m = await api.setSpeakerNames(meeting.id, me, others);
+      const m = await api.setSpeakerName(meeting.id, speaker, name);
       setMeetings((prev) => prev.map((x) => (x.id === m.id ? m : x)));
     } catch (e) {
       setError(String(e));

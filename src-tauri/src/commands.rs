@@ -428,6 +428,17 @@ fn speaker_names(state: &AppState, meeting: &MeetingRecord) -> SpeakerNames {
     )
 }
 
+/// A meeting's segments, warm cache first — the order `get_transcript` answers
+/// in. Empty when the meeting has none and when they could not be read: both
+/// mean the caller has to fall back to whatever text it already holds.
+fn segments_of(state: &AppState, id: &str) -> LiveTranscript {
+    let cached = state.live.lock().get(id).cloned();
+    match cached {
+        Some(t) => t,
+        None => state.db.load_transcript(id).unwrap_or_default(),
+    }
+}
+
 /// The meeting's lines for a model prompt, under the names it goes by now.
 ///
 /// Rendered from the segments rather than read from `transcript_text`, which is
@@ -436,15 +447,10 @@ fn speaker_names(state: &AppState, meeting: &MeetingRecord) -> SpeakerNames {
 /// to Portuguese would leave the window and the export saying "Eu" while every
 /// prompt still read "Me". The fallback belongs to the read, not to the row.
 ///
-/// Warm cache first, like `get_transcript`. The stored copy is the last resort
-/// rather than the first: a meeting whose segments are gone has nothing else
-/// left of its words.
+/// The stored copy is the last resort rather than the first: a meeting whose
+/// segments are gone has nothing else left of its words.
 fn prompt_transcript(state: &AppState, meeting: &MeetingRecord) -> String {
-    let cached = state.live.lock().get(&meeting.id).cloned();
-    let transcript = match cached {
-        Some(t) => t,
-        None => state.db.load_transcript(&meeting.id).unwrap_or_default(),
-    };
+    let transcript = segments_of(state, &meeting.id);
     if transcript.segments().is_empty() {
         return meeting.transcript_text.clone();
     }
@@ -2556,13 +2562,17 @@ pub async fn refine_summary_section(
     // The timestamped, speaker-labelled transcript rather than the flattened
     // text the first pass used: the whole transcript already went in, so "more
     // information" is the structure, not more of it.
+    // From the segments, and from the stored ones when nothing is cached — which
+    // is every meeting opened after a restart. Reading the flattened column there
+    // gave up the timestamps this branch exists for, and gave the model whatever
+    // names that column was written under rather than the ones in use now.
     let names = speaker_names(&state, &meeting);
-    let transcript = state
-        .live
-        .lock()
-        .get(&id)
-        .map(|t| t.timestamped_text(&names))
-        .unwrap_or_else(|| meeting.transcript_text.clone());
+    let segments = segments_of(&state, &id);
+    let transcript = if segments.segments().is_empty() {
+        meeting.transcript_text.clone()
+    } else {
+        segments.timestamped_text(&names)
+    };
     let prompt = build_refine_prompt(section, &current, &transcript, settings.locale());
     let messages = vec![ChatMessage {
         role: "user".into(),
@@ -2675,24 +2685,34 @@ pub fn rename_meeting(
     Ok(meeting)
 }
 
-/// Name this meeting's two channels.
+/// Name one of this meeting's two channels.
+///
+/// One channel and not the pair, for the reason an action item is written one
+/// at a time: a caller that sends both sends its idea of the OTHER one too, and
+/// that idea is stale the moment anything else writes. Renaming the second
+/// channel while the first is still in flight would carry the first one's old
+/// value back and erase a rename that had already succeeded.
 ///
 /// Blank clears rather than stores: an empty string is not what anybody calls a
-/// person, and clearing has to put the meeting back to the app's own words in
+/// person, and clearing has to put the channel back to the app's own words in
 /// whatever language the user reads — which is what `None` means in the row.
 ///
 /// `transcript_text` is rebuilt here from the segments the meeting already has.
 /// The prompts render their own copy — `prompt_transcript` — but this one is
-/// what the search index is built from, and leaving it holding the old names
+/// what the search index is built from, and leaving it holding the old name
 /// would have search answering with a name the meeting no longer uses.
 /// `upsert_meeting` re-indexes in the same transaction.
 #[tauri::command]
-pub async fn set_speaker_names(
+pub async fn set_speaker_name(
     state: State<'_, Arc<AppState>>,
     id: String,
-    me: Option<String>,
-    others: Option<String>,
+    speaker: String,
+    name: Option<String>,
 ) -> Result<MeetingRecord, String> {
+    // From the WebView, so it is parsed rather than trusted: an unrecognised
+    // channel has no right answer, and defaulting to one of the two would
+    // rename whichever the caller did not mean.
+    let speaker = Speaker::parse(&speaker).ok_or_else(|| "unknown speaker".to_string())?;
     // Refused while this is the meeting being recorded, for the reason an edit
     // to a line is: the transcription ticker writes the whole set back, and
     // `transcript_text` is rebuilt below from segments the next chunk is about
@@ -2725,8 +2745,11 @@ pub async fn set_speaker_names(
     // The WebView is the trust boundary and this name reaches a model prompt and
     // an exported document. Cleaned on the way in so the row holds exactly what
     // the window will show.
-    meeting.speaker_me = me.as_deref().and_then(clean_speaker_name);
-    meeting.speaker_others = others.as_deref().and_then(clean_speaker_name);
+    let name = name.as_deref().and_then(clean_speaker_name);
+    match speaker {
+        Speaker::Me => meeting.speaker_me = name,
+        Speaker::Others => meeting.speaker_others = name,
+    }
     let transcript = state.db.load_transcript(&id)?;
     // Only when there is something to rebuild from. `save_transcript` clears the
     // segments before it writes them, so a meeting interrupted mid-write has

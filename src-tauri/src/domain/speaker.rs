@@ -18,6 +18,20 @@ impl Speaker {
             Speaker::Others
         }
     }
+
+    /// The channel a wire name refers to, as the WebView sends it.
+    ///
+    /// The same two strings `rename_all = "lowercase"` produces above, which is
+    /// what the window compares against and what the transcript rows carry.
+    /// `None` for anything else — this arrives from the WebView, and picking a
+    /// channel for a value nobody recognises renames the wrong one.
+    pub fn parse(id: &str) -> Option<Self> {
+        match id {
+            "me" => Some(Speaker::Me),
+            "others" => Some(Speaker::Others),
+            _ => None,
+        }
+    }
 }
 
 /// The longest a channel's name may be.
@@ -149,6 +163,19 @@ mod tests {
     fn labels_from_channel() {
         assert_eq!(Speaker::from_channel(0), Speaker::Me);
         assert_eq!(Speaker::from_channel(1), Speaker::Others);
+    }
+
+    /// `parse` and the serde name are the two halves of one vocabulary and
+    /// nothing type-checks across the WebView boundary: a rename on either side
+    /// alone leaves the window naming a channel the backend cannot find.
+    #[test]
+    fn a_channel_parses_back_from_the_name_it_serialises_as() {
+        for speaker in [Speaker::Me, Speaker::Others] {
+            let wire = serde_json::to_value(speaker).unwrap();
+            assert_eq!(Speaker::parse(wire.as_str().unwrap()), Some(speaker));
+        }
+        assert_eq!(Speaker::parse("Me"), None);
+        assert_eq!(Speaker::parse(""), None);
     }
 
     #[test]

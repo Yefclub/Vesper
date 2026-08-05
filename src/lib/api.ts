@@ -349,15 +349,14 @@ export const api = {
   // rather than showing a title the database does not carry.
   renameMeeting: (id: string, title: string) =>
     invoke<MeetingRecord>("rename_meeting", { id, title }),
-  // `null` clears a name rather than storing an empty one, which is what puts
+  // One channel per call, never the pair: a caller that sends both sends its
+  // idea of the other one too, and that idea is stale the moment anything else
+  // writes. `null` clears rather than storing an empty name, which is what puts
   // the channel back to the app's own words. The backend cleans what it is
   // given — the name reaches a model prompt and an exported document — so the
   // record that comes back is the truth, not what was typed.
-  setSpeakerNames: (
-    id: string,
-    me: string | null,
-    others: string | null,
-  ) => invoke<MeetingRecord>("set_speaker_names", { id, me, others }),
+  setSpeakerName: (id: string, speaker: Speaker, name: string | null) =>
+    invoke<MeetingRecord>("set_speaker_name", { id, speaker, name }),
   // The title, sanitised for the filesystem by the side that owns the rule
   // table. Every caller must have a fallback name — it lands with the backend
   // change and rejects until then.
