@@ -113,6 +113,20 @@ pub struct MeetingRecord {
     /// the number.
     #[serde(default)]
     pub cost_label: Option<String>,
+    /// What this meeting calls the microphone and the system audio.
+    ///
+    /// `None` is the absence of a name, not a name — the window, the exporter
+    /// and every prompt fall back to the app's own words in the user's language,
+    /// and that fallback is resolved on each read rather than stored, so a
+    /// meeting nobody renamed follows the user when they change language.
+    ///
+    /// On the meeting rather than in settings because a rename must not reach
+    /// backwards: the defaults are copied here when the meeting is created and
+    /// this is what everything reads afterwards.
+    #[serde(default)]
+    pub speaker_me: Option<String>,
+    #[serde(default)]
+    pub speaker_others: Option<String>,
 }
 
 /// What the app is doing to a meeting after Stop, as the window renders it.

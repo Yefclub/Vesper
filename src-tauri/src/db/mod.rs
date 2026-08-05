@@ -2,7 +2,7 @@ use crate::domain::job::{MeetingRecord, MeetingStatus};
 use crate::domain::refine::SummaryVersion;
 use crate::domain::search::SearchHit;
 use crate::domain::settings::AppSettings;
-use crate::domain::speaker::Speaker;
+use crate::domain::speaker::{Speaker, SpeakerNames};
 use crate::domain::summary::MeetingInsights;
 use crate::domain::transcript::{LiveTranscript, TranscriptSegment};
 use rusqlite::{params, Connection};
@@ -262,6 +262,23 @@ impl Database {
             "ALTER TABLE summary_versions ADD COLUMN sections_json TEXT",
             [],
         ) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
+        // What this meeting calls its two channels. Nullable, and NULL is the
+        // normal case rather than a missing value: it means nobody renamed
+        // anything here, and the window and the exporter say "Me" and "Others"
+        // in the user's own language. Writing those words into the column
+        // instead would freeze every meeting in the language it was recorded in.
+        if let Err(e) = conn.execute("ALTER TABLE meetings ADD COLUMN speaker_me TEXT", []) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
+        if let Err(e) = conn.execute("ALTER TABLE meetings ADD COLUMN speaker_others TEXT", []) {
             let message = e.to_string();
             if !message.contains("duplicate column name") {
                 return Err(message);
@@ -581,14 +598,16 @@ impl Database {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute(
             r#"INSERT INTO meetings (id, title, status, created_at, updated_at, duration_ms, audio_path,
-                transcript_text, summary, action_items, key_points, project, title_locked)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                transcript_text, summary, action_items, key_points, project, title_locked,
+                speaker_me, speaker_others)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
                ON CONFLICT(id) DO UPDATE SET
                 title=excluded.title, status=excluded.status, updated_at=excluded.updated_at,
                 duration_ms=excluded.duration_ms, audio_path=excluded.audio_path,
                 transcript_text=excluded.transcript_text, summary=excluded.summary,
                 action_items=excluded.action_items, key_points=excluded.key_points,
-                project=excluded.project, title_locked=excluded.title_locked"#,
+                project=excluded.project, title_locked=excluded.title_locked,
+                speaker_me=excluded.speaker_me, speaker_others=excluded.speaker_others"#,
             params![
                 m.id,
                 m.title,
@@ -603,6 +622,8 @@ impl Database {
                 m.key_points,
                 m.project,
                 m.title_locked as i64,
+                m.speaker_me,
+                m.speaker_others,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -617,7 +638,7 @@ impl Database {
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
                         transcript_text, summary, action_items, key_points, project, title_locked,
-                        cost_nano_usd, sections_json
+                        cost_nano_usd, sections_json, speaker_me, speaker_others
                  FROM meetings WHERE id=?1",
             )
             .map_err(|e| e.to_string())?;
@@ -639,7 +660,7 @@ impl Database {
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
                         '' AS transcript_text, summary, action_items, key_points, project, title_locked,
-                        cost_nano_usd, sections_json
+                        cost_nano_usd, sections_json, speaker_me, speaker_others
                  FROM meetings ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -732,6 +753,7 @@ impl Database {
         &self,
         meeting_id: &str,
         transcript: &LiveTranscript,
+        names: &SpeakerNames,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -757,7 +779,7 @@ impl Database {
         conn.execute(
             "UPDATE meetings SET transcript_text=?1, updated_at=?2 WHERE id=?3",
             params![
-                transcript.plain_text(),
+                transcript.plain_text(names),
                 chrono::Utc::now().to_rfc3339(),
                 meeting_id
             ],
@@ -1216,14 +1238,21 @@ fn row_to_meeting(row: &rusqlite::Row<'_>) -> Result<MeetingRecord, String> {
             .get::<_, Option<i64>>(13)
             .map_err(|e| e.to_string())?
             .map(crate::domain::cost::format_cost),
+        speaker_me: row.get(15).map_err(|e| e.to_string())?,
+        speaker_others: row.get(16).map_err(|e| e.to_string())?,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::i18n::Locale;
     use crate::domain::job::MeetingStatus;
     use tempfile::tempdir;
+
+    fn english() -> SpeakerNames {
+        SpeakerNames::resolve(None, None, Locale::En)
+    }
 
     #[test]
     fn persistence_roundtrip() {
@@ -1246,11 +1275,13 @@ mod tests {
             title_locked: false,
             cost_nano_usd: None,
             cost_label: None,
+            speaker_me: None,
+            speaker_others: None,
         };
         db.upsert_meeting(&m).unwrap();
         let mut t = LiveTranscript::new();
         t.append(TranscriptSegment::new(Speaker::Me, "hello", 0, 500));
-        db.save_transcript("m1", &t).unwrap();
+        db.save_transcript("m1", &t, &english()).unwrap();
         let loaded = db.get_meeting("m1").unwrap().unwrap();
         assert_eq!(loaded.title, "Sync");
         assert_eq!(loaded.status, MeetingStatus::Ready);
@@ -1531,7 +1562,46 @@ mod tests {
             cost_nano_usd: None,
             cost_label: None,
             project: None,
+            speaker_me: None,
+            speaker_others: None,
         }
+    }
+
+    /// The columns arrive on a database that already holds somebody's meetings,
+    /// and `migrate` runs again on every launch after the first — so the second
+    /// open is the normal case, not the edge one.
+    #[test]
+    fn naming_the_channels_is_additive_and_survives_a_reopen() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let mut existing = sample_meeting("m1", "Sync");
+        existing.transcript_text = "Me: hello".into();
+        db.upsert_meeting(&existing).unwrap();
+        drop(db);
+
+        let db = Database::open(dir.path()).unwrap();
+        let loaded = db.get_meeting("m1").unwrap().unwrap();
+        assert_eq!(loaded.speaker_me, None, "nobody renamed this one");
+        assert_eq!(
+            loaded.transcript_text, "Me: hello",
+            "and its words are its own"
+        );
+
+        // A name belongs to one meeting. The other keeps reading as it did.
+        let mut named = sample_meeting("m2", "Client call");
+        named.speaker_me = Some("Ana".into());
+        named.speaker_others = Some("Cliente".into());
+        db.upsert_meeting(&named).unwrap();
+        assert_eq!(
+            db.get_meeting("m2").unwrap().unwrap().speaker_me.as_deref(),
+            Some("Ana")
+        );
+        assert_eq!(db.get_meeting("m1").unwrap().unwrap().speaker_me, None);
+        let listed = db.list_meetings().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed
+            .iter()
+            .any(|m| m.speaker_others.as_deref() == Some("Cliente")));
     }
 
     #[test]

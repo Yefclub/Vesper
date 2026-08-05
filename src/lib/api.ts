@@ -38,6 +38,14 @@ export interface MeetingRecord {
   /// fields above, which are still written for the templates that have them.
   sections?: SummarySection[];
   project?: string | null;
+  /// What this meeting calls the microphone and the system audio.
+  ///
+  /// Null is the absence of a name, not a name: the window falls back to
+  /// `speaker.me` / `speaker.others` in the user's language, and that fallback
+  /// is never written back — so a meeting nobody renamed follows the language
+  /// they pick next.
+  speaker_me?: string | null;
+  speaker_others?: string | null;
 }
 
 /** One section of a summary, as the template declared it. `key` is stable and
@@ -84,6 +92,7 @@ export interface AppSettings {
   overlay_position: string;
   /// Closing the window hides it instead of quitting.
   close_to_tray: boolean;
+
   /** Read the whole recording again once it stops, replacing the live
    *  transcript. Only ever runs on the local engine — the backend decides that,
    *  not this side. */
@@ -91,6 +100,13 @@ export interface AppSettings {
   /** Names, products and jargon handed to the engine as context. Already
    *  normalised by the backend: what comes back is the list in effect. */
   hot_words?: string[];
+
+  /// What new meetings start out calling their two channels. Copied onto a
+  /// meeting when it is created, so changing them here leaves every meeting
+  /// already recorded exactly as it was.
+  default_speaker_me?: string | null;
+  default_speaker_others?: string | null;
+
 }
 
 export interface ChannelLevels {
@@ -282,6 +298,16 @@ export const api = {
   listMeetings: () => invoke<MeetingRecord[]>("list_meetings"),
   getMeeting: (id: string) => invoke<MeetingRecord | null>("get_meeting", { id }),
   getTranscript: (id: string) => invoke<LiveTranscript>("get_transcript", { id }),
+  /// Where this meeting's recording is, for `convertFileSrc`. An id goes out and
+  /// a path comes back — never the other way round, because the path in the
+  /// meeting row is only trustworthy after the backend has proven it resolves
+  /// inside its own recordings directory, and only then does the asset protocol
+  /// learn to serve that one file.
+  ///
+  /// `null` whenever there is nothing to play: still recording, imported with no
+  /// audio retained, or the file has gone. Every caller must render without it.
+  meetingAudioPath: (id: string) =>
+    invoke<string | null>("meeting_audio_path", { id }),
   deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
   search: (query: string) => invoke<SearchHit[]>("search_meetings_cmd", { query }),
   getSettings: () => invoke<AppSettings>("get_settings"),
@@ -350,6 +376,14 @@ export const api = {
   // rather than showing a title the database does not carry.
   renameMeeting: (id: string, title: string) =>
     invoke<MeetingRecord>("rename_meeting", { id, title }),
+  // One channel per call, never the pair: a caller that sends both sends its
+  // idea of the other one too, and that idea is stale the moment anything else
+  // writes. `null` clears rather than storing an empty name, which is what puts
+  // the channel back to the app's own words. The backend cleans what it is
+  // given — the name reaches a model prompt and an exported document — so the
+  // record that comes back is the truth, not what was typed.
+  setSpeakerName: (id: string, speaker: Speaker, name: string | null) =>
+    invoke<MeetingRecord>("set_speaker_name", { id, speaker, name }),
   // The title, sanitised for the filesystem by the side that owns the rule
   // table. Every caller must have a fallback name — it lands with the backend
   // change and rejects until then.

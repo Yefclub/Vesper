@@ -109,6 +109,7 @@ pub struct AppSettings {
     /// would turn the failure into a factory-fresh configuration in silence.
     #[serde(default = "default_theme")]
     pub theme: String,
+
     /// Transcribe the whole recording again once it stops.
     ///
     /// Defaults on, including for rows written before it existed: it only ever
@@ -124,6 +125,19 @@ pub struct AppSettings {
     /// settings screen shows the user the list that is actually in effect.
     #[serde(default)]
     pub hot_words: Vec<String>,
+
+    /// What new meetings call the microphone and the system audio.
+    ///
+    /// Copied onto a meeting when it is created and never read again: a meeting
+    /// keeps the names it was recorded under, so somebody who changes these
+    /// before the next call does not rewrite last month's.
+    ///
+    /// `None` is not a name — it is the absence of one, which leaves the meeting
+    /// reading in the app's own words in whatever language the user picks.
+    #[serde(default)]
+    pub default_speaker_me: Option<String>,
+    #[serde(default)]
+    pub default_speaker_others: Option<String>,
 }
 
 fn default_ui_locale() -> String {
@@ -176,8 +190,12 @@ impl Default for AppSettings {
             close_to_tray: false,
             recent_openrouter_llm_models: Vec::new(),
             theme: "light".into(),
+
             final_stt_pass: true,
             hot_words: Vec::new(),
+
+            default_speaker_me: None,
+            default_speaker_others: None,
         }
     }
 }
@@ -415,6 +433,8 @@ mod tests {
         assert!(!s.confirm_before_recording);
         assert!(s.recent_openrouter_llm_models.is_empty());
         assert_eq!(s.theme, "light");
+        assert_eq!(s.default_speaker_me, None);
+        assert_eq!(s.default_speaker_others, None);
     }
 
     /// A row written before the field existed still has to load, and has to load

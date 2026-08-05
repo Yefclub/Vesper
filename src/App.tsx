@@ -27,6 +27,7 @@ import {
   RecorderStatus,
   SearchHit,
   ShortcutStatus,
+  Speaker,
   StartGate,
 } from "./lib/api";
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
@@ -45,6 +46,7 @@ import { SummarizeButton } from "./components/SummarizeButton";
 import { ActionItems } from "./components/ActionItems";
 import { NotesPanel } from "./components/NotesPanel";
 import { EditableLine } from "./components/EditableLine";
+import { AudioPlayer } from "./components/AudioPlayer";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { ContextBar } from "./components/ContextBar";
@@ -172,6 +174,18 @@ function AppShell({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<LiveTranscript>({ segments: [] });
   const [transcriptOwner, setTranscriptOwner] = useState<string | null>(null);
+  /// Where the selected meeting's recording is, once the backend has proven the
+  /// row points inside its own directory.
+  ///
+  /// `undefined` while the answer is still in flight, which is a different thing
+  /// from `null`, "there is nothing to play". Without the distinction the note
+  /// about a missing recording flashes over every meeting on the way in.
+  const [audioPath, setAudioPath] = useState<string | null | undefined>(
+    undefined,
+  );
+  /// The player's element, held here because the transcript seeks through it and
+  /// the transcript is rendered by this component rather than by the player.
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const [status, setStatus] = useState<RecorderStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [query, setQuery] = useState("");
@@ -232,6 +246,12 @@ function AppShell({
   /// Whether the meeting header's title is being edited. A generated title is a
   /// guess, and a guess the user cannot correct is worse than a date.
   const [renaming, setRenaming] = useState(false);
+  /// The segment whose turn header is being renamed, or null. The segment and
+  /// not the channel: a channel names every turn it opens, and keying on it
+  /// would turn all of them into an input at once.
+  const [renamingSpeakerAt, setRenamingSpeakerAt] = useState<string | null>(
+    null,
+  );
   /// Which section is being improved, or null. One at a time: the two calls
   /// would each read the meeting row and write a version from it, and the second
   /// to land would carry a copy of the first section from before the first
@@ -267,6 +287,54 @@ function AppShell({
     () => meetings.find((m) => m.id === selectedId) ?? null,
     [meetings, selectedId],
   );
+
+  /// Ask where this meeting's recording is, whenever which meeting or what it is
+  /// doing changes. The status is a dependency and not decoration: the file is
+  /// written when the recorder stops, so a meeting asked about while it was
+  /// still being captured has to be asked again once it is not.
+  ///
+  /// The late answer to an abandoned request is dropped. Selecting two meetings
+  /// quickly would otherwise leave the first one's recording under the second
+  /// one's transcript, which is the one mistake a player like this must not make.
+  const selectedStatus = selected?.status;
+  useEffect(() => {
+    if (!selectedId) {
+      setAudioPath(null);
+      return;
+    }
+    let live = true;
+    setAudioPath(undefined);
+    api
+      .meetingAudioPath(selectedId)
+      .then((p) => {
+        if (live) setAudioPath(p);
+      })
+      .catch(() => {
+        if (live) setAudioPath(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [selectedId, selectedStatus]);
+
+  /// Put the playhead where a line was said, and start playing only when the
+  /// thing that was clicked says it will.
+  ///
+  /// Every segment moves the playhead — that is what makes the transcript an
+  /// index into the recording — but only the offset above a turn, which reads
+  /// "play from here", also starts the audio. The bubbles cannot: their click
+  /// already opens the correction, and a line that begins playing under the
+  /// typing would be a second thing that click did.
+  ///
+  /// Best effort, deliberately: a click landing before the file's metadata has
+  /// arrived has nowhere to seek to, and the honest response is to do nothing
+  /// rather than to queue a jump the user has stopped expecting.
+  const seekTo = useCallback((ms: number, play: boolean) => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.currentTime = ms / 1000;
+    if (play) void el.play().catch(() => {});
+  }, []);
 
   /// The phase the header narrates, or `null` when there is nothing to say.
   /// `ready` is the end of the walk and clears the state; the two failures are
@@ -874,6 +942,57 @@ function AppShell({
     }
   }
 
+  /// The name this meeting stored for a channel, or "" when it stored none.
+  ///
+  /// What the rename field is filled with. Never the fallback: a field
+  /// pre-filled with "Me" that somebody opens and walks away from would store
+  /// the English word, and freeze the meeting in a language they may not read.
+  function ownSpeakerName(speaker: Speaker) {
+    return (
+      (speaker === "me" ? selected?.speaker_me : selected?.speaker_others) ?? ""
+    );
+  }
+
+  /// What this meeting calls a channel: its own name if it has one, otherwise
+  /// the app's own word in the user's language. The fallback is computed here
+  /// and never sent back — a meeting nobody renamed has to follow the language
+  /// they pick next.
+  function speakerName(speaker: Speaker) {
+    return (
+      ownSpeakerName(speaker) ||
+      t(speaker === "me" ? "speaker.me" : "speaker.others")
+    );
+  }
+
+  /// Nothing is written optimistically, for the reason the title rename is not:
+  /// the backend cleans what it is given — the name reaches a model prompt and
+  /// an exported file — so what comes back is what is true, and a refusal leaves
+  /// the header showing what the database holds.
+  ///
+  /// One channel, never the pair. Sending both would send this snapshot's idea
+  /// of the other one too, and renaming the second while the first is still in
+  /// flight would carry that stale value back over a rename that had already
+  /// succeeded.
+  async function commitSpeakerRename(
+    meeting: MeetingRecord,
+    speaker: Speaker,
+    next: string,
+  ) {
+    setRenamingSpeakerAt(null);
+    // Blank clears. `null` is the absence of a name, which is what puts the
+    // channel back to the app's own word — and it is what typing nothing means.
+    const name = next.trim() || null;
+    const was =
+      (speaker === "me" ? meeting.speaker_me : meeting.speaker_others) ?? null;
+    if (name === was) return;
+    try {
+      const m = await api.setSpeakerName(meeting.id, speaker, name);
+      setMeetings((prev) => prev.map((x) => (x.id === m.id ? m : x)));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function handleDelete(id: string) {
     // Dismiss first. Leaving the dialog up after the meeting is gone offers a
     // Delete button for something that no longer exists.
@@ -1401,6 +1520,36 @@ function AppShell({
                       </div>
                     </div>
                   </div>
+                  {/* Under the title rather than in its own strip: this is the
+                      meeting's recording, not a second region, and a rule of its
+                      own directly beneath the header's would read as one.
+                      Nothing is drawn while the answer is in flight — see
+                      `audioPath` — and nothing is drawn for the meeting being
+                      recorded either, where the file does not exist yet because
+                      it is still being captured. Saying "not on this computer"
+                      about audio that is arriving is worse than saying nothing. */}
+                  {audioPath !== undefined &&
+                    selected.status !== "recording" &&
+                    selected.status !== "paused" && (
+                      <div className="mx-auto w-full max-w-pane px-6 pb-3">
+                        {audioPath ? (
+                          <AudioPlayer
+                            // Remounted per recording, so the transport does not
+                            // open the next meeting showing the previous one's
+                            // position.
+                            key={audioPath}
+                            audioRef={audioRef}
+                            path={audioPath}
+                            durationMs={selected.duration_ms}
+                            onUnavailable={() => setAudioPath(null)}
+                          />
+                        ) : (
+                          <p className="text-xs text-fg-muted">
+                            {t("player.unavailable")}
+                          </p>
+                        )}
+                      </div>
+                    )}
                 </div>
 
                 {/* The copy control rides the tab rule rather than the pane:
@@ -1428,11 +1577,9 @@ function AppShell({
                         text={transcript.segments
                           .map(
                             (s) =>
-                              `[${formatDuration(s.start_ms)}] ${
-                                s.speaker === "me"
-                                  ? t("speaker.me")
-                                  : t("speaker.others")
-                              }: ${s.text}`,
+                              `[${formatDuration(s.start_ms)}] ${speakerName(
+                                s.speaker,
+                              )}: ${s.text}`,
                           )
                           .join("\n")}
                       />
@@ -1539,12 +1686,86 @@ function AppShell({
                                         me && "flex-row-reverse",
                                       )}
                                     >
-                                      <span className="font-medium">
-                                        {me ? t("speaker.me") : t("speaker.others")}
-                                      </span>
-                                      <span className="tabular-nums">
-                                        {formatDuration(s.start_ms)}
-                                      </span>
+
+                                      {/* Click the name to change it, in place
+                                          and at the same size, like the title
+                                          in the header above. The name belongs
+                                          to the meeting, so editing it here
+                                          renames every turn — and the export,
+                                          the copy and the model's copy with
+                                          them. */}
+                                      {renamingSpeakerAt === s.id ? (
+                                        <input
+                                          autoFocus
+                                          aria-label={t("speaker.rename")}
+                                          // The word the transcript falls back
+                                          // to, shown but not stored: clearing
+                                          // the field is how a channel goes
+                                          // back to it.
+                                          placeholder={speakerName(s.speaker)}
+                                          defaultValue={ownSpeakerName(s.speaker)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === "Enter") {
+                                              e.preventDefault();
+                                              void commitSpeakerRename(
+                                                selected,
+                                                s.speaker,
+                                                e.currentTarget.value,
+                                              );
+                                            } else if (e.key === "Escape") {
+                                              e.preventDefault();
+                                              // Put the name back before
+                                              // closing, so the blur that
+                                              // follows commits nothing.
+                                              e.currentTarget.value =
+                                                ownSpeakerName(s.speaker);
+                                              setRenamingSpeakerAt(null);
+                                            }
+                                          }}
+                                          onBlur={(e) =>
+                                            void commitSpeakerRename(
+                                              selected,
+                                              s.speaker,
+                                              e.currentTarget.value,
+                                            )
+                                          }
+                                          className={`w-32 rounded-sm bg-transparent text-2xs font-medium ${FOCUS}`}
+                                        />
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setRenamingSpeakerAt(s.id)
+                                          }
+                                          aria-label={t("speaker.rename")}
+                                          className={`cursor-text rounded-sm font-medium ${FOCUS}`}
+                                        >
+                                          {speakerName(s.speaker)}
+                                        </button>
+                                      )}
+                                      {/* The offset was already the seek target
+                                          in everything but function, so it is
+                                          the one control that starts playing.
+                                          The bubbles below only move the
+                                          playhead — see `seekTo`. Plain text
+                                          again when there is nothing to play,
+                                          so the app never offers an action it
+                                          cannot perform. */}
+                                      {audioPath ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => seekTo(s.start_ms, true)}
+                                          aria-label={t("transcript.seek")}
+                                          className={`rounded-xs tabular-nums hover:text-accent ${FOCUS}`}
+                                        >
+                                          {formatDuration(s.start_ms)}
+                                        </button>
+                                      ) : (
+                                        <span className="tabular-nums">
+                                          {formatDuration(s.start_ms)}
+                                        </span>
+                                      )}
+
                                     </div>
                                   )}
                                   {/* The corner nearest the speaker's own edge
@@ -1567,6 +1788,17 @@ function AppShell({
                                       status.meeting_id !== selected.id
                                     }
                                     label={t("transcript.edit")}
+                                    // Every segment, not only the one that
+                                    // opens a turn: the turn's offset is the
+                                    // only one drawn, and without this the
+                                    // lines under it would be the part of the
+                                    // transcript the recording cannot be
+                                    // reached from.
+                                    onSeek={
+                                      audioPath
+                                        ? () => seekTo(s.start_ms, false)
+                                        : undefined
+                                    }
                                     onSave={async (next) => {
                                       const updated =
                                         await api.editTranscriptSegment(

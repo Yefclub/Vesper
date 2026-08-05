@@ -1,3 +1,4 @@
+use crate::domain::speaker::SpeakerNames;
 use crate::domain::summary::MeetingInsights;
 use crate::domain::transcript::LiveTranscript;
 use docx_rs::{Docx, Paragraph, Run};
@@ -127,6 +128,7 @@ pub fn build_markdown(
     title: &str,
     transcript: &LiveTranscript,
     insights: Option<&MeetingInsights>,
+    names: &SpeakerNames,
 ) -> String {
     let mut md = String::new();
     md.push_str(&format!("# {title}\n\n"));
@@ -167,7 +169,7 @@ pub fn build_markdown(
     for seg in transcript.segments() {
         md.push_str(&format!(
             "**{}** ({}): {}\n\n",
-            seg.speaker.label(),
+            names.label(seg.speaker),
             crate::domain::transcript::format_ts(seg.start_ms),
             seg.text
         ));
@@ -222,8 +224,9 @@ pub fn export_meeting(
     title: &str,
     transcript: &LiveTranscript,
     insights: Option<&MeetingInsights>,
+    names: &SpeakerNames,
 ) -> Result<String, String> {
-    let md = build_markdown(title, transcript, insights);
+    let md = build_markdown(title, transcript, insights, names);
     match format {
         ExportFormat::Markdown => {
             export_markdown_to_path(path, &md).map_err(|e| e.to_string())?;
@@ -241,9 +244,14 @@ pub fn export_meeting(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::i18n::Locale;
     use crate::domain::speaker::Speaker;
     use crate::domain::transcript::TranscriptSegment;
     use tempfile::tempdir;
+
+    fn english() -> SpeakerNames {
+        SpeakerNames::resolve(None, None, Locale::En)
+    }
 
     fn sample() -> (LiveTranscript, MeetingInsights) {
         let mut t = LiveTranscript::new();
@@ -266,7 +274,7 @@ mod tests {
     #[test]
     fn markdown_contains_all_sections() {
         let (t, i) = sample();
-        let md = build_markdown("Standup", &t, Some(&i));
+        let md = build_markdown("Standup", &t, Some(&i), &english());
         assert!(md.contains("# Standup"));
         assert!(md.contains("## Summary"));
         assert!(md.contains("Introductions"));
@@ -286,10 +294,38 @@ mod tests {
             ("out.docx", ExportFormat::Docx),
         ] {
             let path = dir.path().join(name);
-            export_meeting(&path, fmt, "Standup", &t, Some(&i)).unwrap();
+            export_meeting(&path, fmt, "Standup", &t, Some(&i), &english()).unwrap();
             let meta = std::fs::metadata(&path).unwrap();
             assert!(meta.len() > 10, "{name} should have content");
         }
+    }
+
+    /// All three formats are written from the same markdown, so the names have
+    /// to be in it — a renamed channel that reached the screen and not the file
+    /// is the export saying something the app does not.
+    #[test]
+    fn the_export_carries_the_meetings_own_names() {
+        let dir = tempdir().unwrap();
+        let (t, i) = sample();
+        let names = SpeakerNames::resolve(Some("Ana"), Some("Cliente"), Locale::En);
+        let md = build_markdown("Standup", &t, Some(&i), &names);
+        assert!(md.contains("**Ana** ([00:00]): Hello team"), "{md}");
+        assert!(md.contains("**Cliente** ([00:01]): Hi there"), "{md}");
+        assert!(!md.contains("**Me**"), "{md}");
+
+        let path = dir.path().join("out.md");
+        export_meeting(
+            &path,
+            ExportFormat::Markdown,
+            "Standup",
+            &t,
+            Some(&i),
+            &names,
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("**Cliente**"));
     }
 
     #[test]
