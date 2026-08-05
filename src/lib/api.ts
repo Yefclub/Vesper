@@ -77,6 +77,8 @@ export interface AppSettings {
   system_device_id?: string | null;
   compute_backend: string;
   confirm_before_recording: boolean;
+  /// The global record accelerator, one of the combinations the backend offers.
+  record_shortcut: string;
   /// Where the floating record card docks: right_top | right_center |
   /// right_bottom | top.
   overlay_position: string;
@@ -225,6 +227,9 @@ export interface ShortcutStatus {
   registered: boolean;
   accelerator: string;
   reason_key?: string | null;
+  /// What else may be picked. Sent by the backend rather than kept here: only
+  /// it can actually register a combination, so only it may offer one.
+  choices?: string[];
 }
 
 export interface SummaryVersion {
@@ -278,6 +283,13 @@ export const api = {
   setReasoning: (enabled: boolean) => invoke<AppSettings>("set_reasoning", { enabled }),
   recorderStatus: () => invoke<RecorderStatus>("recorder_status"),
   canRecord: () => invoke<StartGate>("can_record"),
+  /// Ask the OS for a different record accelerator.
+  ///
+  /// Resolves with the new status either way: a refusal comes back with
+  /// `registered: false` and the combination that was refused, and the previous
+  /// one is put back so the user is never left with none.
+  setRecordShortcut: (accelerator: string) =>
+    invoke<ShortcutStatus>("set_record_shortcut", { accelerator }),
   shortcutStatus: () => invoke<ShortcutStatus>("shortcut_status"),
   listDevices: () => invoke<AudioDevice[]>("list_audio_devices_cmd"),
   i18nCatalog: (locale: string) =>

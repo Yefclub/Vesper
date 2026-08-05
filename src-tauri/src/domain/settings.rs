@@ -71,6 +71,14 @@ pub struct AppSettings {
     /// least once, and the user can turn it off after the first time.
     #[serde(default = "default_true")]
     pub confirm_before_recording: bool,
+    /// The global record accelerator, as one of `domain::shortcut::CHOICES`.
+    ///
+    /// A string like `compute_backend` beside it, with `chosen_or_default` the
+    /// one place that decides what an unrecognised value means — a row written
+    /// by a build that offered something this one does not must not leave the
+    /// user with no shortcut at all.
+    #[serde(default = "default_shortcut")]
+    pub record_shortcut: String,
     /// Where the floating record card docks: `right_top`, `right_center`,
     /// `right_bottom` or `top`.
     ///
@@ -115,6 +123,9 @@ fn default_true() -> bool {
 fn default_backend() -> String {
     "auto".into()
 }
+fn default_shortcut() -> String {
+    crate::domain::shortcut::RECORD_ACCELERATOR.into()
+}
 fn default_overlay_position() -> String {
     crate::domain::overlay::OverlayPosition::default()
         .id()
@@ -145,6 +156,7 @@ impl Default for AppSettings {
             system_device_id: None,
             compute_backend: "auto".into(),
             confirm_before_recording: true,
+            record_shortcut: default_shortcut(),
             overlay_position: default_overlay_position(),
             close_to_tray: false,
             recent_openrouter_llm_models: Vec::new(),
