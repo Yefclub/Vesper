@@ -77,6 +77,11 @@ export interface AppSettings {
   system_device_id?: string | null;
   compute_backend: string;
   confirm_before_recording: boolean;
+  /// Where the floating record card docks: right_top | right_center |
+  /// right_bottom | top.
+  overlay_position: string;
+  /// Closing the window hides it instead of quitting.
+  close_to_tray: boolean;
 }
 
 export interface ChannelLevels {
@@ -298,6 +303,13 @@ export const api = {
   /// The card asking to grow or shrink as the pointer arrives and leaves.
   /// A no-op unless a recording is running and the main window is minimized —
   /// the backend re-derives both rather than trusting a remembered flag.
+  /// Tell the backend a native dialog is on screen.
+  ///
+  /// A file chooser and another application look the same from the Rust side —
+  /// the main window loses focus either way — and the floating record card must
+  /// not appear over Vesper's own chooser.
+  setModalOpen: (open: boolean) =>
+    invoke<void>("set_modal_open", { open }).catch(() => {}),
   setOverlayExpanded: (expanded: boolean) =>
     invoke<void>("set_overlay_expanded", { expanded }),
   summarize: (id: string, template?: string) =>

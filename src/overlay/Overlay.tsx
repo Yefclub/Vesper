@@ -29,21 +29,44 @@ export function Overlay() {
   // and updating the state afterwards leaves the card in English for anyone
   // whose app is in Portuguese.
   const [locale, setLocale] = useState<string | null>(null);
+  /// Where the card is docked, which decides its shape as well as its place: a
+  /// notch is wide and short and slides down, an edge dock is narrow and tall
+  /// and slides sideways. The Rust side positions and sizes the window; this
+  /// only has to draw the matching shape inside it.
+  const [position, setPosition] = useState("right_center");
   useEffect(() => {
     api
       .getSettings()
-      .then((s) => setLocale(s.ui_locale || "en"))
+      .then((s) => {
+        setLocale(s.ui_locale || "en");
+        setPosition(s.overlay_position || "right_center");
+      })
       .catch(() => setLocale("en"));
+  }, []);
+  // The dock again, on every sync. This window is never destroyed — it is
+  // hidden and shown — so a value read once at mount is the one it keeps: change
+  // the setting while the app is running and the backend would place a notch
+  // while this still drew an edge dock, and animate it out of the wrong side.
+  useEffect(() => {
+    let un: (() => void) | null = null;
+    let live = true;
+    listen<string>("overlay://position", (e) => setPosition(e.payload)).then(
+      (fn) => (live ? (un = fn) : fn()),
+    );
+    return () => {
+      live = false;
+      un?.();
+    };
   }, []);
   if (locale === null) return null;
   return (
     <I18nProvider initialLocale={locale}>
-      <Card />
+      <Card top={position === "top"} />
     </I18nProvider>
   );
 }
 
-function Card() {
+function Card({ top }: { top: boolean }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   /// Whether the pointer is still on the card. A ref, not state: nothing
@@ -133,7 +156,9 @@ function Card() {
         inside.current = false;
         setExpanded(false);
       }}
-      className="relative flex h-screen w-screen items-center justify-end"
+      className={`relative flex h-screen w-screen ${
+        top ? "items-start justify-center" : "items-center justify-end"
+      }`}
     >
       {/* The collapsed sliver, always mounted, at its own fixed footprint
           rather than at the window's. The window is 340×268 for as long as the
@@ -148,7 +173,13 @@ function Card() {
           is still centred, so the sliver would step on the way down.
 
           132 and 14 mirror `COLLAPSED` in domain/overlay.rs, which says so. */}
-      <div className="absolute right-0 top-1/2 flex h-[132px] w-[14px] -translate-y-1/2 items-center justify-center rounded-l-lg border border-r-0 border-border bg-surface-1 shadow-lift">
+      <div
+        className={`absolute flex items-center justify-center border border-border bg-surface-1 shadow-lift ${
+          top
+            ? "left-1/2 top-0 h-[14px] w-[132px] -translate-x-1/2 rounded-b-lg border-t-0"
+            : "right-0 top-1/2 h-[132px] w-[14px] -translate-y-1/2 rounded-l-lg border-r-0"
+        }`}
+      >
         <span
           aria-hidden
           className={`h-2 w-2 rounded-full ${
@@ -169,15 +200,21 @@ function Card() {
             // only, both composite-only: this window floats over whatever the
             // user is actually working in, and a layout-animating card here
             // would take frames from that.
-            initial={reduced ? { opacity: 0 } : { opacity: 0, x: "100%" }}
-            animate={{ opacity: 1, x: 0 }}
+            initial={
+              reduced ? { opacity: 0 } : top ? { opacity: 0, y: "-100%" } : { opacity: 0, x: "100%" }
+            }
+            animate={{ opacity: 1, x: 0, y: 0 }}
             exit={
               reduced
                 ? { opacity: 0, transition: transition.exit }
-                : { opacity: 0, x: "100%", transition: transition.panelExit }
+                : top
+                  ? { opacity: 0, y: "-100%", transition: transition.panelExit }
+                  : { opacity: 0, x: "100%", transition: transition.panelExit }
             }
             transition={transition.panel}
-            className="relative flex h-full w-full flex-col overflow-hidden rounded-l-lg border border-r-0 border-border bg-surface-1 shadow-lift"
+            className={`relative flex h-full w-full flex-col overflow-hidden border border-border bg-surface-1 shadow-lift ${
+              top ? "rounded-b-lg border-t-0" : "rounded-l-lg border-r-0"
+            }`}
           >
             <div className="flex items-center gap-2 border-b border-border px-3 py-2">
               <span

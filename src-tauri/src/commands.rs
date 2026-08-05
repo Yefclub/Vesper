@@ -11,7 +11,7 @@ use crate::domain::i18n::{catalog, t, Locale};
 use crate::domain::job::{
     MeetingEvent, MeetingPhase, MeetingProgress, MeetingRecord, MeetingStatus,
 };
-use crate::domain::overlay::{dock_right_center, overlay_visible, COLLAPSED, EXPANDED};
+use crate::domain::overlay::{dock_at, footprints, overlay_visible, OverlayPosition};
 use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, SummaryVersion};
 use crate::domain::search::SearchHit;
 use crate::domain::segmenter::{Segmenter, Utterance};
@@ -93,6 +93,13 @@ pub struct AppState {
     /// the utterance that pass then failed to transcribe would be put back into
     /// whatever pair had replaced it — the next meeting's, or nobody's.
     pub segmenters: Mutex<HashMap<String, (Segmenter, Segmenter)>>,
+    /// A native dialog this application opened is on screen.
+    ///
+    /// Set by the window around the file pickers it opens, because from the
+    /// outside a modal chooser and another application look the same: the main
+    /// window loses focus either way, and only one of them is a reason to float
+    /// a card over the screen.
+    pub modal_open: AtomicBool,
     pub stt: SttService,
     pub llm: LlmService,
 }
@@ -118,6 +125,7 @@ impl AppState {
             refine_flight: tokio::sync::Mutex::new(()),
             live_stt_passes: Mutex::new(HashSet::new()),
             segmenters: Mutex::new(HashMap::new()),
+            modal_open: AtomicBool::new(false),
             stt: SttService::new(),
             llm: LlmService::new(),
         })
@@ -2041,27 +2049,52 @@ fn sync_overlay(app: &AppHandle, state: &AppState, expanded: bool) {
         return;
     };
     let recording = state.recorder.is_recording();
-    let minimized = app
-        .get_webview_window("main")
+    let main = app.get_webview_window("main");
+    let minimized = main
+        .as_ref()
         .and_then(|w| w.is_minimized().ok())
         .unwrap_or(false);
+    // Asked of the window rather than remembered from the last event. A focus
+    // flag kept in state is one that a missed event leaves wrong forever, and
+    // this runs on every resize and focus change anyway.
+    //
+    // `unwrap_or(true)` — a platform that cannot answer is treated as focused,
+    // so the failure mode is a card that does not appear rather than one that
+    // sits over the user's screen and will not go away.
+    let focused = main
+        .as_ref()
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(true);
 
-    if !overlay_visible(recording, minimized) {
+    if !overlay_visible(recording, minimized, focused) {
         let _ = overlay.hide();
         return;
     }
 
-    let size = if expanded { EXPANDED } else { COLLAPSED };
+    // A dialog this application opened is not another application. Both make
+    // the main window lose focus, and only one of them is a reason to float a
+    // card over the screen — over the file chooser Vesper itself just opened,
+    // in fact, where its sliver can be hovered and expanded on top of it. The
+    // window tells the backend when it opens one.
+    if state.modal_open.load(Ordering::SeqCst) {
+        let _ = overlay.hide();
+        return;
+    }
+
+    let position = OverlayPosition::from_id(&state.settings.lock().overlay_position);
+    let (collapsed, expanded_size) = footprints(position);
+    let size = if expanded { expanded_size } else { collapsed };
     // The monitor the main window is on, not the primary: on a two-screen desk
     // the card belongs beside the work, and the scale factor differs per display.
-    let monitor = app
-        .get_webview_window("main")
+    let monitor = main
+        .as_ref()
         .and_then(|w| w.current_monitor().ok().flatten())
         .or_else(|| overlay.primary_monitor().ok().flatten());
     if let Some(m) = monitor {
         let pos = m.position();
         let msize = m.size();
-        let (x, y) = dock_right_center(
+        let (x, y) = dock_at(
+            position,
             (pos.x, pos.y),
             (msize.width, msize.height),
             m.scale_factor(),
@@ -2070,7 +2103,28 @@ fn sync_overlay(app: &AppHandle, state: &AppState, expanded: bool) {
         let _ = overlay.set_size(tauri::LogicalSize::new(size.0, size.1));
         let _ = overlay.set_position(tauri::PhysicalPosition::new(x, y));
     }
+    // Sent on every sync, not read once at mount: changing the dock while the
+    // app is running would otherwise leave the card drawing the previous edge —
+    // and animating out of it — until the next launch.
+    let _ = overlay.emit("overlay://position", position.id());
     let _ = overlay.show();
+}
+
+/// Tell the backend a native dialog this application opened is on screen.
+///
+/// The card hides while one is: a file chooser and another application look the
+/// same from here — the main window loses focus either way — and floating an
+/// always-on-top card over Vesper's own chooser is not what the setting asked
+/// for.
+#[tauri::command]
+pub fn set_modal_open(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    open: bool,
+) -> Result<(), String> {
+    state.modal_open.store(open, Ordering::SeqCst);
+    sync_overlay(&app, &state, false);
+    Ok(())
 }
 
 /// Re-derive the card's visibility after the main window moved or changed state.
