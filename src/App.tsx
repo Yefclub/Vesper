@@ -302,17 +302,23 @@ function AppShell({
     };
   }, [selectedId, selectedStatus]);
 
-  /// Play the recording from where a line was said.
+  /// Put the playhead where a line was said, and start playing only when the
+  /// thing that was clicked says it will.
+  ///
+  /// Every segment moves the playhead — that is what makes the transcript an
+  /// index into the recording — but only the offset above a turn, which reads
+  /// "play from here", also starts the audio. The bubbles cannot: their click
+  /// already opens the correction, and a line that begins playing under the
+  /// typing would be a second thing that click did.
   ///
   /// Best effort, deliberately: a click landing before the file's metadata has
   /// arrived has nowhere to seek to, and the honest response is to do nothing
   /// rather than to queue a jump the user has stopped expecting.
-  const seekTo = useCallback((ms: number) => {
+  const seekTo = useCallback((ms: number, play: boolean) => {
     const el = audioRef.current;
     if (!el) return;
     el.currentTime = ms / 1000;
-    // A click on a line is a request to hear it, not to move a cursor and wait.
-    void el.play().catch(() => {});
+    if (play) void el.play().catch(() => {});
   }, []);
 
   /// The phase the header narrates, or `null` when there is nothing to say.
@@ -1577,19 +1583,17 @@ function AppShell({
                                         {me ? t("speaker.me") : t("speaker.others")}
                                       </span>
                                       {/* The offset was already the seek target
-                                          in everything but function. It becomes
-                                          the control rather than the bubble
-                                          because the bubble is already a button
-                                          — it opens the correction — and one
-                                          element cannot carry two intents for
-                                          the same click. Plain text again when
-                                          there is nothing to play, so the app
-                                          never offers an action it cannot
-                                          perform. */}
+                                          in everything but function, so it is
+                                          the one control that starts playing.
+                                          The bubbles below only move the
+                                          playhead — see `seekTo`. Plain text
+                                          again when there is nothing to play,
+                                          so the app never offers an action it
+                                          cannot perform. */}
                                       {audioPath ? (
                                         <button
                                           type="button"
-                                          onClick={() => seekTo(s.start_ms)}
+                                          onClick={() => seekTo(s.start_ms, true)}
                                           aria-label={t("transcript.seek")}
                                           className={`rounded-xs tabular-nums hover:text-accent ${FOCUS}`}
                                         >
@@ -1622,6 +1626,17 @@ function AppShell({
                                       status.meeting_id !== selected.id
                                     }
                                     label={t("transcript.edit")}
+                                    // Every segment, not only the one that
+                                    // opens a turn: the turn's offset is the
+                                    // only one drawn, and without this the
+                                    // lines under it would be the part of the
+                                    // transcript the recording cannot be
+                                    // reached from.
+                                    onSeek={
+                                      audioPath
+                                        ? () => seekTo(s.start_ms, false)
+                                        : undefined
+                                    }
                                     onSave={async (next) => {
                                       const updated =
                                         await api.editTranscriptSegment(

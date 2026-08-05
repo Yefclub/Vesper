@@ -19,6 +19,7 @@ export function EditableLine({
   editable,
   label,
   onSave,
+  onSeek,
 }: {
   text: string;
   mine: boolean;
@@ -26,6 +27,15 @@ export function EditableLine({
   /// Names the action for a screen reader — the bubble itself carries the words.
   label: string;
   onSave: (next: string) => Promise<void>;
+  /// Put the recording's playhead on this line. Absent when the meeting has
+  /// nothing to play.
+  ///
+  /// It rides the same click that opens the correction rather than taking one of
+  /// its own, and it deliberately does not start playing: correcting a line is
+  /// the reason to click it, and audio arriving over the typing would be a
+  /// second thing the click did. What it buys is that pressing play afterwards
+  /// plays the line being read, from wherever in the transcript that is.
+  onSeek?: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(text);
@@ -108,7 +118,10 @@ export function EditableLine({
     return editable ? (
       <button
         type="button"
-        onClick={() => setEditing(true)}
+        onClick={() => {
+          onSeek?.();
+          setEditing(true);
+        }}
         aria-label={label}
         className={clsx(shape, "text-left hover:border-accent/40", FOCUS)}
       >
