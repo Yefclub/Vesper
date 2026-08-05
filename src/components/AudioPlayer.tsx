@@ -61,7 +61,20 @@ export function AudioPlayer({
   return (
     <div className="flex items-center gap-3">
       <audio
-        ref={audioRef}
+        // A ref callback rather than the object, for the cleanup half. Taking a
+        // media element out of the document does not stop it — the spec pauses
+        // only when the element changes document — so switching meetings or
+        // deleting the one playing would leave a recording audible with no
+        // transport left on screen to stop it. React nulls a ref object before
+        // an effect cleanup could reach the element, so the pause has to happen
+        // here, where the element is still in hand.
+        ref={(el) => {
+          audioRef.current = el;
+          return () => {
+            el?.pause();
+            audioRef.current = null;
+          };
+        }}
         src={convertFileSrc(path)}
         // Metadata alone: opening a meeting must not pull a two-hour recording
         // off the disk to draw a slider. The range requests that follow fetch
