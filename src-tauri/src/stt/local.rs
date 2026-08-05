@@ -14,6 +14,19 @@ fn whisper_cache() -> &'static Mutex<Option<(String, WhisperContext)>> {
     WHISPER_CACHE.get_or_init(|| Mutex::new(None))
 }
 
+/// One line of a transcription, with the clock the engine itself reported.
+///
+/// The live pass throws this away — an utterance is already bounded by the
+/// segmenter, so one string is all it needs. A pass over a whole recording has
+/// no such boundaries, and without these every meeting would come back as a
+/// single line stamped `[00:00]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhisperLine {
+    pub text: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalSttEngine {
     models_dir: PathBuf,
@@ -62,21 +75,42 @@ impl LocalSttEngine {
         backend_preference: &str,
         prompt: &str,
     ) -> Result<String, String> {
+        let lines = self.transcribe_lines(
+            pcm,
+            sample_rate,
+            model_id,
+            language,
+            backend_preference,
+            prompt,
+        )?;
+        Ok(join_lines(&lines))
+    }
+
+    /// The same inference, keeping the engine's own line boundaries and clock.
+    pub fn transcribe_lines(
+        &self,
+        pcm: &[i16],
+        sample_rate: u32,
+        model_id: &str,
+        language: &str,
+        backend_preference: &str,
+        prompt: &str,
+    ) -> Result<Vec<WhisperLine>, String> {
         if pcm.is_empty() {
-            return Ok(String::new());
+            return Ok(Vec::new());
         }
         let peak = pcm.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
         if !self.is_model_ready(model_id) {
             // Silent frames: no-op. Voiced frames without weights: hard error (not fake ASR).
             if peak < 400 {
-                return Ok(String::new());
+                return Ok(Vec::new());
             }
             return Err(format!(
                 "local STT model `{model_id}` is not installed — download Whisper GGML from Settings"
             ));
         }
         let path = self.model_path(model_id);
-        run_whisper(
+        run_whisper_lines(
             &path,
             pcm,
             sample_rate,
@@ -85,6 +119,18 @@ impl LocalSttEngine {
             prompt,
         )
     }
+}
+
+/// The lines as one string, which is what a caller with its own boundaries
+/// wants — the live pass already knows where the utterance started and ended.
+fn join_lines(lines: &[WhisperLine]) -> String {
+    lines
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 impl Default for LocalSttEngine {
@@ -105,6 +151,26 @@ pub fn run_whisper(
     backend_preference: &str,
     prompt: &str,
 ) -> Result<String, String> {
+    let lines = run_whisper_lines(
+        model_path,
+        pcm,
+        sample_rate,
+        language,
+        backend_preference,
+        prompt,
+    )?;
+    Ok(join_lines(&lines))
+}
+
+/// The same pass, line by line, with the timestamps whisper reported for each.
+pub fn run_whisper_lines(
+    model_path: &Path,
+    pcm: &[i16],
+    sample_rate: u32,
+    language: &str,
+    backend_preference: &str,
+    prompt: &str,
+) -> Result<Vec<WhisperLine>, String> {
     if !model_path.is_file() {
         return Err(format!("whisper model missing: {}", model_path.display()));
     }
@@ -168,19 +234,24 @@ pub fn run_whisper(
         .full(params, &audio)
         .map_err(|e| format!("whisper inference failed: {e}"))?;
 
-    let mut out = String::new();
+    let mut out = Vec::new();
     for segment in state.as_iter() {
         let text = segment.to_string();
         let text = text.trim();
         if text.is_empty() {
             continue;
         }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(text);
+        // Centiseconds on the way out of whisper.cpp, and never negative in
+        // practice — clamped rather than cast, because a negative would wrap
+        // into a timestamp near the end of time and sort the line last.
+        let at = |cs: i64| (cs.max(0) as u64) * 10;
+        out.push(WhisperLine {
+            text: text.to_string(),
+            start_ms: at(segment.start_timestamp()),
+            end_ms: at(segment.end_timestamp()),
+        });
     }
-    Ok(out.trim().to_string())
+    Ok(out)
 }
 
 fn num_cpus_soft() -> i32 {

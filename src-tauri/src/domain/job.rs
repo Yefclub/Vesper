@@ -144,9 +144,23 @@ pub struct MeetingRecord {
 pub enum MeetingPhase {
     Saving,
     Transcribing,
+    /// The whole recording being transcribed again, after the live pass.
+    ///
+    /// Its own phase rather than a second `Transcribing`: the two are different
+    /// work on different audio — one caught up with the last utterance, this one
+    /// reads the meeting from the beginning — and a window that cannot tell them
+    /// apart shows the same spinner for seconds and then for minutes.
+    FinalPass,
     Summarizing,
     Ready,
     SummaryFailed,
+    /// The whole-recording pass did not finish.
+    ///
+    /// Not a failure of the meeting: the live transcript is saved and the row is
+    /// already `Ready` before this pass is attempted, so what this reports is an
+    /// improvement that did not arrive. Like `SummaryFailed`, it names an outcome
+    /// the walk is over for, not a step in it.
+    FinalPassFailed,
 }
 
 /// Payload of `meeting://progress`. One channel, so the window can tell that a
@@ -173,6 +187,14 @@ impl MeetingProgress {
         Self {
             meeting_id: meeting_id.to_string(),
             phase: MeetingPhase::SummaryFailed,
+            error: Some(error.to_string()),
+        }
+    }
+
+    pub fn final_pass_failed(meeting_id: &str, error: &str) -> Self {
+        Self {
+            meeting_id: meeting_id.to_string(),
+            phase: MeetingPhase::FinalPassFailed,
             error: Some(error.to_string()),
         }
     }
@@ -223,9 +245,11 @@ mod tests {
         for (phase, wire) in [
             (MeetingPhase::Saving, "saving"),
             (MeetingPhase::Transcribing, "transcribing"),
+            (MeetingPhase::FinalPass, "final_pass"),
             (MeetingPhase::Summarizing, "summarizing"),
             (MeetingPhase::Ready, "ready"),
             (MeetingPhase::SummaryFailed, "summary_failed"),
+            (MeetingPhase::FinalPassFailed, "final_pass_failed"),
         ] {
             assert_eq!(serde_json::to_value(phase).unwrap(), wire);
         }

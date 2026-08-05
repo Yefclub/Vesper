@@ -23,3 +23,4 @@ pub mod speaker;
 pub mod summary;
 pub mod title;
 pub mod transcript;
+pub mod vocabulary;

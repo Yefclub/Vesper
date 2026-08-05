@@ -109,6 +109,23 @@ pub struct AppSettings {
     /// would turn the failure into a factory-fresh configuration in silence.
     #[serde(default = "default_theme")]
     pub theme: String,
+
+    /// Transcribe the whole recording again once it stops.
+    ///
+    /// Defaults on, including for rows written before it existed: it only ever
+    /// runs on the local engine — see `wants_final_stt_pass` — so turning it on
+    /// for everybody costs processor time on a machine that is no longer
+    /// recording, and nothing else.
+    #[serde(default = "default_true")]
+    pub final_stt_pass: bool,
+    /// Names, products and jargon the engine keeps mishearing.
+    ///
+    /// Stored already normalised — `domain::vocabulary::normalise` runs on the
+    /// way in — so what the field holds is what the prompt will carry, and the
+    /// settings screen shows the user the list that is actually in effect.
+    #[serde(default)]
+    pub hot_words: Vec<String>,
+
     /// What new meetings call the microphone and the system audio.
     ///
     /// Copied onto a meeting when it is created and never read again: a meeting
@@ -173,6 +190,10 @@ impl Default for AppSettings {
             close_to_tray: false,
             recent_openrouter_llm_models: Vec::new(),
             theme: "light".into(),
+
+            final_stt_pass: true,
+            hot_words: Vec::new(),
+
             default_speaker_me: None,
             default_speaker_others: None,
         }
@@ -229,6 +250,19 @@ impl AppSettings {
 
     pub fn set_reasoning(&mut self, enabled: bool) {
         self.reasoning_enabled = enabled;
+    }
+
+    /// Whether stopping a recording should transcribe the whole of it again.
+    ///
+    /// The switch, and the provider. A cloud transcriber is deliberately left
+    /// out: the live pass already sent every utterance to the same model, so a
+    /// second pass over the same audio buys a wider decoding context and is
+    /// billed a second time for a meeting the user has already paid to
+    /// transcribe. The path that does send a whole recording to a cloud provider
+    /// — a stop where no live pass ever ran, an import, a retranscribe — is the
+    /// one where nothing was charged for it yet.
+    pub fn wants_final_stt_pass(&self) -> bool {
+        self.final_stt_pass && self.stt_provider == SttProvider::Local
     }
 
     pub fn require_openrouter_key(&self) -> Result<(), SettingsError> {
@@ -401,6 +435,56 @@ mod tests {
         assert_eq!(s.theme, "light");
         assert_eq!(s.default_speaker_me, None);
         assert_eq!(s.default_speaker_others, None);
+    }
+
+    /// A row written before the field existed still has to load, and has to load
+    /// with the pass ON — a local user upgrading gets the better transcript
+    /// without going looking for a checkbox.
+    #[test]
+    fn the_final_pass_is_on_for_a_row_that_predates_it() {
+        let older_row = r#"{
+            "stt_provider": "local",
+            "llm_provider": "local",
+            "openrouter_api_key": null,
+            "openrouter_stt_model": "openai/gpt-4o-mini-transcribe",
+            "openrouter_llm_model": "openai/gpt-4o-mini",
+            "local_stt_model": "whisper-small",
+            "local_llm_model": "llama32-1b",
+            "reasoning_enabled": false,
+            "auto_summarize": true,
+            "language": "pt",
+            "ui_locale": "pt-BR",
+            "onboarding_complete": true,
+            "compute_backend": "auto",
+            "confirm_before_recording": true
+        }"#;
+        let s: AppSettings = serde_json::from_str(older_row).expect("older rows must still load");
+        assert!(s.final_stt_pass);
+        assert!(s.hot_words.is_empty());
+        assert!(s.wants_final_stt_pass());
+    }
+
+    /// Off means off: a meeting stopped with the switch down does exactly what
+    /// it did before this existed.
+    #[test]
+    fn the_switch_alone_can_turn_the_final_pass_off() {
+        let s = AppSettings {
+            final_stt_pass: false,
+            ..AppSettings::default()
+        };
+        assert!(!s.wants_final_stt_pass());
+    }
+
+    /// And a cloud transcriber never gets one, however the switch is set — the
+    /// audio would be sent, and billed, a second time.
+    #[test]
+    fn a_cloud_transcriber_never_runs_the_final_pass() {
+        let s = AppSettings {
+            stt_provider: SttProvider::OpenRouter,
+            final_stt_pass: true,
+            ..AppSettings::default()
+        };
+        assert!(!s.wants_final_stt_pass());
     }
 
     #[test]

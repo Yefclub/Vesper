@@ -92,11 +92,21 @@ export interface AppSettings {
   overlay_position: string;
   /// Closing the window hides it instead of quitting.
   close_to_tray: boolean;
+
+  /** Read the whole recording again once it stops, replacing the live
+   *  transcript. Only ever runs on the local engine — the backend decides that,
+   *  not this side. */
+  final_stt_pass?: boolean;
+  /** Names, products and jargon handed to the engine as context. Already
+   *  normalised by the backend: what comes back is the list in effect. */
+  hot_words?: string[];
+
   /// What new meetings start out calling their two channels. Copied onto a
   /// meeting when it is created, so changing them here leaves every meeting
   /// already recorded exactly as it was.
   default_speaker_me?: string | null;
   default_speaker_others?: string | null;
+
 }
 
 export interface ChannelLevels {
@@ -129,9 +139,16 @@ export interface SearchHit {
 export type MeetingPhase =
   | "saving"
   | "transcribing"
+  /** The whole recording being read again, after the live pass. Its own phase
+   *  because it is different work of a different length — seconds of catching
+   *  up versus minutes of re-reading the meeting. */
+  | "final_pass"
   | "summarizing"
   | "ready"
-  | "summary_failed";
+  | "summary_failed"
+  /** The re-read did not finish. An outcome, not a step: the live transcript is
+   *  saved and the meeting is ready either way. */
+  | "final_pass_failed";
 
 /** Payload of the `meeting://progress` event.
  *
