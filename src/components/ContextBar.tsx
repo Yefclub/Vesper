@@ -64,7 +64,9 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
                   type="button"
                   onClick={() => void remove(n.id)}
                   aria-label={t("context.remove")}
-                  className={`shrink-0 text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS}`}
+                  // 16px box for the 16px line of `text-xs`, icon centred. See
+                  // `NotesPanel` — same row, same fix, one size down.
+                  className={`flex h-4 w-4 shrink-0 items-center justify-center text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS}`}
                 >
                   <X size={12} />
                 </button>

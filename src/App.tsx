@@ -34,7 +34,7 @@ import { formatMeetingDateTime } from "./lib/datetime";
 import { I18nProvider, useI18n } from "./lib/i18n";
 import { fadeRise, segmentArrive, transition } from "./lib/motion";
 import { applyTheme } from "./lib/theme";
-import { Button, FOCUS } from "./components/Button";
+import { Button, FOCUS, PANEL } from "./components/Button";
 import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -1305,10 +1305,14 @@ function AppShell({
                   // the foot of the pane, and a scroller wrapping a scroller
                   // puts it wherever the conversation happens to end. The other
                   // two tabs are documents and scroll as one.
-                  className={`min-h-0 flex-1 px-6 pb-6 pt-4 ${
+                  // The document padding is for the documents. Chat carries its
+                  // own — a scroller with `px-4 py-5` and a composer with
+                  // `pb-4` — and taking this pane's `px-6 pb-6` on top of it
+                  // floated the composer 40px above the foot of the card.
+                  className={`min-h-0 flex-1 ${
                     tab === "chat"
                       ? "flex flex-col overflow-hidden"
-                      : "overflow-y-auto"
+                      : "overflow-y-auto px-6 pb-6 pt-4"
                   }`}
                 >
                   <AnimatePresence mode="wait">
@@ -1444,18 +1448,20 @@ function AppShell({
                         {selected.summary ||
                         selected.key_points ||
                         selected.action_items ? (
-                          // Three sections, two kinds of content: one is prose
-                          // that needs a measure, two are lists that do not.
-                          // `xl:` and not `lg:` because the grid measures the
-                          // viewport while the card is ~312px narrower — at
-                          // 1024px the right column would resolve to 130px.
-                          // Below the breakpoint it stacks, summary first.
-                          <div className="grid gap-6 xl:grid-cols-[minmax(0,36rem)_minmax(18rem,1fr)]">
-                            {/* Prose gets the reading measure and no box:
-                                boxing it is what makes the product's headline
-                                output read as a widget instead of as the
-                                answer. */}
-                            <section className="group">
+                          // One column of panels, full width, in the order the
+                          // meeting is read: what happened, the points, the
+                          // work, then the record of previous runs. It was a
+                          // two-column grid, which spent a third of a wide
+                          // screen on a rail while the prose stayed at 36rem
+                          // and everything below the fold was in the narrow
+                          // side. Down the page each panel gets the whole
+                          // measure and nothing has to be hunted for.
+                          <div className="space-y-4">
+                            {/* The summary keeps its own shape inside the
+                                panel: reading measure on the prose, and a
+                                heavier weight than the panels under it, because
+                                it is the answer and they are its parts. */}
+                            <section className={`group ${PANEL}`}>
                               <div className="mb-2 flex items-start justify-between gap-2">
                                 <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
                                   {t("section.summary")}
@@ -1466,37 +1472,43 @@ function AppShell({
                                   className="-mt-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
                                 />
                               </div>
-                              <Markdown text={selected.summary || "—"} />
+                              <div className="max-w-reading">
+                                <Markdown text={selected.summary || "—"} />
+                              </div>
                             </section>
-                            {/* The two lists become a right-hand rail and keep
-                                the box — that is what makes short lines
-                                scannable blocks rather than more prose. */}
-                            <div className="space-y-6">
-                              <Section
-                                title={t("section.key_points")}
-                                body={selected.key_points || "—"}
-                                onImprove={() => improve("key_points")}
-                                improving={improving === "key_points"}
-                              />
-                              {/* Not a `Section`: this one is work rather
-                                  than prose. It ticks off, carries an owner and
-                                  a deadline, and survives the meeting being
-                                  summarised again — which the free-text card
-                                  could not, because every run replaced it. */}
+                            <Section
+                              title={t("section.key_points")}
+                              body={selected.key_points || "—"}
+                              onImprove={() => improve("key_points")}
+                              improving={improving === "key_points"}
+                            />
+                            {/* Not a `Section`: this one is work rather than
+                                prose. It ticks off, carries an owner and a
+                                deadline, and survives the meeting being
+                                summarised again — which the free-text card
+                                could not, because every run replaced it. The
+                                panel chrome is out here so the three below the
+                                summary read as one family. */}
+                            <div className={PANEL}>
                               <ActionItems
                                 key={selected.id}
                                 meetingId={selected.id}
                                 reloadKey={versionsKey}
                               />
-                              <SummaryHistory
-                                meetingId={selected.id}
-                                reloadKey={versionsKey}
-                                onRestored={() => {
-                                  setVersionsKey((k) => k + 1);
-                                  void loadMeeting(selected.id);
-                                }}
-                              />
                             </div>
+                            {/* Chrome inside this one, not out here: it returns
+                                null once a meeting has a single version, and a
+                                wrapper drawn around nothing is an empty bordered
+                                box. Only the thing that knows it has content can
+                                decide to draw a panel. */}
+                            <SummaryHistory
+                              meetingId={selected.id}
+                              reloadKey={versionsKey}
+                              onRestored={() => {
+                                setVersionsKey((k) => k + 1);
+                                void loadMeeting(selected.id);
+                              }}
+                            />
                           </div>
                         ) : summarizingId === selected.id ||
                           (progress?.phase === "summarizing" &&
@@ -1625,17 +1637,6 @@ function AppShell({
                 true the instant recording begins — which is precisely when the
                 control has to still be there. It changes into pause and stop
                 instead of vanishing. */}
-            {/* Above the dock and only while recording: it is context about
-                what is being said now, and after Stop the meeting's own screen
-                is where notes belong. */}
-            {status?.recording && status.meeting_id && (
-              // The meeting being recorded, not the one on screen. The sidebar
-              // stays live during a recording, so those are not the same thing
-              // — and a note stamped with this recording's clock, filed against
-              // a meeting from last week, would be evidence of something that
-              // never happened.
-              <ContextBar meetingId={status.meeting_id} />
-            )}
             <AnimatePresence>
               {(!selected || status?.recording) && (
                 <RecordDock
@@ -1653,7 +1654,24 @@ function AppShell({
                   }
                   onStop={handleStop}
                   onPauseResume={handlePauseResume}
-                />
+                >
+                  {/* Above the transport and only while recording: it is context
+                      about what is being said now, and after Stop the meeting's
+                      own screen is where notes belong.
+
+                      Inside the dock rather than beside it — the dock is
+                      absolutely positioned and this was in the card's flow, so
+                      the bar sat against the sidebar while the transport it
+                      belongs to was centred. */}
+                  {status?.recording && status.meeting_id && (
+                    // The meeting being recorded, not the one on screen. The
+                    // sidebar stays live during a recording, so those are not
+                    // the same thing — and a note stamped with this recording's
+                    // clock, filed against a meeting from last week, would be
+                    // evidence of something that never happened.
+                    <ContextBar meetingId={status.meeting_id} />
+                  )}
+                </RecordDock>
               )}
             </AnimatePresence>
           </div>
@@ -1777,7 +1795,7 @@ function Section({
     // copies. A control that is always lit competes with the text it sits on;
     // one that only exists on hover is unreachable — `focus-within` keeps it for
     // the keyboard.
-    <section className="group rounded-lg border border-border bg-surface-2 p-4">
+    <section className={`group ${PANEL}`}>
       <div className="mb-2 flex items-start justify-between gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-eyebrow text-fg-subtle">
           {title}

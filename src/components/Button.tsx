@@ -15,6 +15,11 @@ import { clsx } from "clsx";
  * input lag on the one signal that has to feel immediate.
  */
 export const FOCUS = "focus-visible:outline-none focus-visible:shadow-focus";
+
+/** The summary tab's panel chrome. Here beside `FOCUS` for the same reason: the
+ *  blocks that wear it are stacked one under another, and a copy that drifts
+ *  shows up as one panel with a different border in a column of four. */
+export const PANEL = "rounded-lg border border-border bg-surface-2 p-4";
 export const FOCUS_DANGER =
   "focus-visible:outline-none focus-visible:shadow-focus-danger";
 

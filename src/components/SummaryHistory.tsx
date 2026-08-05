@@ -5,7 +5,7 @@ import { api, SummaryVersion } from "../lib/api";
 import { formatMeetingDateTime } from "../lib/datetime";
 import { useI18n } from "../lib/i18n";
 import { transition } from "../lib/motion";
-import { Button } from "./Button";
+import { Button, PANEL } from "./Button";
 
 /**
  * Every version of a meeting's insights, and a way back to one.
@@ -67,7 +67,10 @@ export function SummaryHistory({
   if (!worthShowing) return null;
 
   return (
-    <div className="mt-4">
+    // The panel is drawn here rather than by the caller, past the `null` above:
+    // the summary tab stacks four panels down the page, and a wrapper out there
+    // would survive this component returning nothing as an empty bordered box.
+    <div className={PANEL}>
       <Button
         size="xs"
         variant="ghost"

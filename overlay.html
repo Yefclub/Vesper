@@ -1,16 +1,19 @@
 <!doctype html>
-<html lang="en">
+<!-- `overlay` is what keeps this document from being painted. This window is a
+     card floating over whatever the user is actually looking at, so any fill
+     here is a rectangle around it — and the rounded corners were sitting on
+     exactly that. Two things paint, and both read this class: `index.css`, whose
+     `html, body, #root { background: … }` is injected into this same `<head>`
+     after the block below and used to win it on order, and `boot-theme.js`,
+     which sets an inline background that no stylesheet can beat. -->
+<html lang="en" class="overlay">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vesper</title>
-    <!-- Transparent, not the app canvas: this window is a card floating over
-         whatever the user is actually looking at, and anything opaque here would
-         paint a rectangle around it. -->
     <style>
       html,
       body {
-        background: transparent;
         margin: 0;
         overflow: hidden;
       }
