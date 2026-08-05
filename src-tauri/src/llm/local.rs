@@ -467,7 +467,7 @@ impl LocalLlm {
             if let Some(thinking) = thinking {
                 tracing::info!("the model reasoned for {} characters", thinking.len());
             }
-            return Ok(MeetingInsights::from_model_text(&answer));
+            return Ok(MeetingInsights::from_model_text_for(template, &answer));
         }
         if self.soft_fallback {
             return Ok(extractive_summary(transcript, 4));

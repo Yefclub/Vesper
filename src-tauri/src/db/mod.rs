@@ -240,6 +240,33 @@ impl Database {
                 return Err(message);
             }
         }
+        // Every section the template asked for, in order, as JSON.
+        //
+        // A column and not a table: the sections of one meeting are always read
+        // and written together, as a whole ordered list, and a table would buy
+        // per-section queries nobody has asked for at the price of a join on
+        // every open. NULL means a meeting summarised before templates had
+        // shapes of their own — the screen falls back to the three columns
+        // beside this one, which are still written and still what the search
+        // index and the exporter read.
+        if let Err(e) = conn.execute("ALTER TABLE meetings ADD COLUMN sections_json TEXT", []) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
+        // And on a version, for the same reason a version is the whole set
+        // rather than a delta: restoring one that carried only the three
+        // columns would erase a client call's Requirements and Risks.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE summary_versions ADD COLUMN sections_json TEXT",
+            [],
+        ) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
         drop(conn);
         self.backfill_search_index()
     }
@@ -590,7 +617,7 @@ impl Database {
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
                         transcript_text, summary, action_items, key_points, project, title_locked,
-                        cost_nano_usd
+                        cost_nano_usd, sections_json
                  FROM meetings WHERE id=?1",
             )
             .map_err(|e| e.to_string())?;
@@ -612,7 +639,7 @@ impl Database {
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
                         '' AS transcript_text, summary, action_items, key_points, project, title_locked,
-                        cost_nano_usd
+                        cost_nano_usd, sections_json
                  FROM meetings ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -751,10 +778,15 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let created_at = chrono::Utc::now().to_rfc3339();
         let (key_points, action_items) = (insights.key_points_text(), insights.action_items_text());
+        let sections_json = if insights.sections.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&insights.sections).map_err(|e| e.to_string())?)
+        };
         conn.execute(
             "INSERT INTO summary_versions
-                (meeting_id, version, origin, created_at, summary, key_points, action_items)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                (meeting_id, version, origin, created_at, summary, key_points, action_items, sections_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 meeting_id,
                 next,
@@ -762,7 +794,8 @@ impl Database {
                 created_at,
                 insights.summary,
                 key_points,
-                action_items
+                action_items,
+                sections_json
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -773,6 +806,7 @@ impl Database {
             summary: insights.summary.clone(),
             key_points,
             action_items,
+            sections_json,
         })
     }
 
@@ -780,7 +814,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT version, origin, created_at, summary, key_points, action_items
+                "SELECT version, origin, created_at, summary, key_points, action_items, sections_json
                  FROM summary_versions WHERE meeting_id = ?1 ORDER BY version ASC",
             )
             .map_err(|e| e.to_string())?;
@@ -793,6 +827,7 @@ impl Database {
                     summary: r.get(3)?,
                     key_points: r.get(4)?,
                     action_items: r.get(5)?,
+                    sections_json: r.get(6)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -806,12 +841,21 @@ impl Database {
         insights: &MeetingInsights,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // NULL rather than `[]` when there are none, so a meeting summarised by
+        // a path that has no sections is indistinguishable from one summarised
+        // before they existed — both fall back to the three columns.
+        let sections = if insights.sections.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&insights.sections).map_err(|e| e.to_string())?)
+        };
         conn.execute(
-            "UPDATE meetings SET summary=?1, action_items=?2, key_points=?3, updated_at=?4 WHERE id=?5",
+            "UPDATE meetings SET summary=?1, action_items=?2, key_points=?3, sections_json=?4, updated_at=?5 WHERE id=?6",
             params![
                 insights.summary,
                 insights.action_items_text(),
                 insights.key_points_text(),
+                sections,
                 chrono::Utc::now().to_rfc3339(),
                 meeting_id
             ],
@@ -962,11 +1006,22 @@ impl Database {
                 m.id,
                 m.title,
                 format!(
-                    "{}\n{}\n{}\n{}",
+                    "{}\n{}\n{}\n{}\n{}",
                     m.transcript_text,
                     m.summary.clone().unwrap_or_default(),
                     m.action_items.clone().unwrap_or_default(),
-                    m.key_points.clone().unwrap_or_default()
+                    m.key_points.clone().unwrap_or_default(),
+                    // The template's own sections. Without them a client call's
+                    // Requirements and Risks are stored, rendered and exported
+                    // but cannot be found — and search is how a meeting from
+                    // three weeks ago is reached at all. Bodies only: the keys
+                    // are `action_items`, and indexing those would match every
+                    // meeting on a search for "action".
+                    m.sections
+                        .iter()
+                        .map(|s| s.body.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 )
             ],
         )
@@ -1107,6 +1162,16 @@ fn row_to_meeting(row: &rusqlite::Row<'_>) -> Result<MeetingRecord, String> {
         summary: row.get(8).map_err(|e| e.to_string())?,
         action_items: row.get(9).map_err(|e| e.to_string())?,
         key_points: row.get(10).map_err(|e| e.to_string())?,
+        // A row written before the column existed reads NULL; one written by a
+        // build whose section shapes have since changed reads JSON this build
+        // may not recognise. Both answer with an empty list, and the screen
+        // falls back to the three columns above — the alternative is failing to
+        // open a meeting over the shape of its headings.
+        sections: row
+            .get::<_, Option<String>>(14)
+            .map_err(|e| e.to_string())?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
         project: row.get(11).map_err(|e| e.to_string())?,
         title_locked: row.get::<_, i64>(12).map_err(|e| e.to_string())? != 0,
         cost_nano_usd: row.get(13).map_err(|e| e.to_string())?,
@@ -1141,6 +1206,7 @@ mod tests {
             summary: Some("hi".into()),
             action_items: None,
             key_points: None,
+            sections: Vec::new(),
             project: Some("Core".into()),
             title_locked: false,
             cost_nano_usd: None,
@@ -1376,11 +1442,13 @@ mod tests {
             summary: "s1".into(),
             key_points: vec!["a".into()],
             action_items: vec![],
+            sections: Vec::new(),
         };
         let second = MeetingInsights {
             summary: "s1".into(),
             key_points: vec!["a".into(), "b".into()],
             action_items: vec![],
+            sections: Vec::new(),
         };
         let v1 = db.push_summary_version("m1", "summarize", &first).unwrap();
         let v2 = db
@@ -1423,6 +1491,7 @@ mod tests {
             summary: None,
             action_items: None,
             key_points: None,
+            sections: Vec::new(),
             title_locked: false,
             cost_nano_usd: None,
             cost_label: None,

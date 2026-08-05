@@ -1447,7 +1447,12 @@ function AppShell({
                       >
                         {selected.summary ||
                         selected.key_points ||
-                        selected.action_items ? (
+                        selected.action_items ||
+                        // A template whose sections are none of those three —
+                        // a client call with Requirements and Risks and a model
+                        // that skipped the summary — is still a summarised
+                        // meeting, and without this it showed the empty state.
+                        selected.sections?.length ? (
                           // One column of panels, full width, in the order the
                           // meeting is read: what happened, the points, the
                           // work, then the record of previous runs. It was a
@@ -1476,12 +1481,43 @@ function AppShell({
                                 <Markdown text={selected.summary || "—"} />
                               </div>
                             </section>
-                            <Section
-                              title={t("section.key_points")}
-                              body={selected.key_points || "—"}
-                              onImprove={() => improve("key_points")}
-                              improving={improving === "key_points"}
-                            />
+                            {/* Whatever else this template asked for, in its
+                                order. `summary` is drawn above and `action_items`
+                                below — one is the answer and the other is a list
+                                of work with owners and a done flag, and neither
+                                is a card of prose.
+
+                                A meeting with no sections is one summarised
+                                before templates had shapes of their own: it
+                                falls back to Key points, which is what it has. */}
+                            {selected.sections?.length ? (
+                              selected.sections
+                                .filter(
+                                  (s) =>
+                                    s.key !== "summary" &&
+                                    s.key !== "action_items",
+                                )
+                                .map((s) => (
+                                  <Section
+                                    key={s.key}
+                                    title={t(`section.${s.key}`)}
+                                    body={s.body || "—"}
+                                    onImprove={
+                                      s.key === "key_points"
+                                        ? () => improve("key_points")
+                                        : undefined
+                                    }
+                                    improving={improving === "key_points"}
+                                  />
+                                ))
+                            ) : (
+                              <Section
+                                title={t("section.key_points")}
+                                body={selected.key_points || "—"}
+                                onImprove={() => improve("key_points")}
+                                improving={improving === "key_points"}
+                              />
+                            )}
                             {/* Not a `Section`: this one is work rather than
                                 prose. It ticks off, carries an owner and a
                                 deadline, and survives the meeting being

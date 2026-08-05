@@ -31,7 +31,21 @@ export interface MeetingRecord {
   summary?: string | null;
   action_items?: string | null;
   key_points?: string | null;
+  /// Every section the template asked for, in order.
+  ///
+  /// Empty for a meeting summarised before templates had shapes of their own,
+  /// and for one never summarised — the summary tab falls back to the three
+  /// fields above, which are still written for the templates that have them.
+  sections?: SummarySection[];
   project?: string | null;
+}
+
+/** One section of a summary, as the template declared it. `key` is stable and
+ *  titles the panel from the catalog; `body` is markdown — prose as written, a
+ *  list as `- ` lines. */
+export interface SummarySection {
+  key: string;
+  body: string;
 }
 
 export interface AppSettings {

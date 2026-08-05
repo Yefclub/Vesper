@@ -101,6 +101,28 @@ fn is_device_name(stem: &str) -> bool {
 }
 
 /// Build canonical markdown for a meeting export.
+/// The heading an exported section is written under.
+///
+/// The templates' own English, found by key across all of them, so the exported
+/// file reads the way the model was asked to write it. An unknown key — a
+/// document written by a build whose templates have since changed — is titled
+/// from the key itself rather than dropped: an export that silently omits a
+/// section is worse than one with an ugly heading.
+fn section_heading(key: &str) -> String {
+    use crate::domain::summary::SummaryTemplate;
+    for template in [
+        SummaryTemplate::General,
+        SummaryTemplate::Standup,
+        SummaryTemplate::OneOnOne,
+        SummaryTemplate::ClientCall,
+    ] {
+        if let Some(spec) = template.sections().iter().find(|s| s.key == key) {
+            return spec.heading.to_string();
+        }
+    }
+    key.replace('_', " ")
+}
+
 pub fn build_markdown(
     title: &str,
     transcript: &LiveTranscript,
@@ -109,20 +131,36 @@ pub fn build_markdown(
     let mut md = String::new();
     md.push_str(&format!("# {title}\n\n"));
     if let Some(i) = insights {
-        if !i.summary.is_empty() {
-            md.push_str("## Summary\n\n");
-            md.push_str(&i.summary);
-            md.push_str("\n\n");
-        }
-        if !i.key_points.is_empty() {
-            md.push_str("## Key points\n\n");
-            md.push_str(&i.key_points_text());
-            md.push_str("\n\n");
-        }
-        if !i.action_items.is_empty() {
-            md.push_str("## Action items\n\n");
-            md.push_str(&i.action_items_text());
-            md.push_str("\n\n");
+        if i.sections.is_empty() {
+            // Nothing summarised, or summarised before templates had shapes of
+            // their own. The three fields are all there is.
+            if !i.summary.is_empty() {
+                md.push_str("## Summary\n\n");
+                md.push_str(&i.summary);
+                md.push_str("\n\n");
+            }
+            if !i.key_points.is_empty() {
+                md.push_str("## Key points\n\n");
+                md.push_str(&i.key_points_text());
+                md.push_str("\n\n");
+            }
+            if !i.action_items.is_empty() {
+                md.push_str("## Action items\n\n");
+                md.push_str(&i.action_items_text());
+                md.push_str("\n\n");
+            }
+        } else {
+            // Whatever the template asked for, in its order. A client call
+            // leaves with its Requirements and Risks rather than with the three
+            // headings the general template happens to share.
+            for section in &i.sections {
+                if section.body.trim().is_empty() {
+                    continue;
+                }
+                md.push_str(&format!("## {}\n\n", section_heading(&section.key)));
+                md.push_str(section.body.trim());
+                md.push_str("\n\n");
+            }
         }
     }
     md.push_str("## Transcript\n\n");
@@ -220,6 +258,7 @@ mod tests {
             summary: "Introductions".into(),
             key_points: vec!["Greetings exchanged".into()],
             action_items: vec!["Follow up tomorrow".into()],
+            sections: Vec::new(),
         };
         (t, insights)
     }

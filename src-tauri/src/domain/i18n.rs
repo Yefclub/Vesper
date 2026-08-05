@@ -103,6 +103,17 @@ fn en_dict() -> HashMap<&'static str, &'static str> {
         ("picker.unknown_model", "Not in the catalogue"),
         ("section.summary", "Summary"),
         ("section.key_points", "Key points"),
+        // The other templates' sections. Titled from the key here rather than
+        // shown as the model wrote them: the prompt pins the headings in English
+        // so the parser can find them, and a Portuguese screen must not inherit
+        // that decision.
+        ("section.done", "Done since last time"),
+        ("section.next", "Next"),
+        ("section.goals", "Goals"),
+        ("section.feedback", "Feedback"),
+        ("section.requirements", "Requirements"),
+        ("section.decisions", "Decisions"),
+        ("section.risks", "Risks"),
         ("section.action_items", "Action items"),
         ("model.ready", "Ready"),
         ("model.not_downloaded", "Not downloaded"),
@@ -318,6 +329,13 @@ fn pt_dict() -> HashMap<&'static str, &'static str> {
         ("picker.unknown_model", "Fora do catálogo"),
         ("section.summary", "Resumo"),
         ("section.key_points", "Pontos principais"),
+        ("section.done", "Feito desde a última vez"),
+        ("section.next", "Próximos"),
+        ("section.goals", "Objetivos"),
+        ("section.feedback", "Feedback"),
+        ("section.requirements", "Requisitos"),
+        ("section.decisions", "Decisões"),
+        ("section.risks", "Riscos"),
         ("section.action_items", "Ações"),
         ("model.ready", "Pronto"),
         ("model.not_downloaded", "Não baixado"),
