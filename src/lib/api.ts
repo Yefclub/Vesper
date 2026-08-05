@@ -281,6 +281,9 @@ export const api = {
   switchStt: (provider: string) => invoke<AppSettings>("switch_stt_provider", { provider }),
   switchLlm: (provider: string) => invoke<AppSettings>("switch_llm_provider", { provider }),
   setReasoning: (enabled: boolean) => invoke<AppSettings>("set_reasoning", { enabled }),
+  /// Answer the "still there?" question. Whatever the user clicked, they are
+  /// there, and the vigil starts over.
+  keepRecording: () => invoke<void>("keep_recording"),
   recorderStatus: () => invoke<RecorderStatus>("recorder_status"),
   canRecord: () => invoke<StartGate>("can_record"),
   /// Ask the OS for a different record accelerator.

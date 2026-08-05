@@ -17,6 +17,7 @@ pub mod search;
 pub mod segmenter;
 pub mod settings;
 pub mod shortcut;
+pub mod silence;
 pub mod speaker;
 pub mod summary;
 pub mod title;
