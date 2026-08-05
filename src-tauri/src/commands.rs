@@ -428,6 +428,29 @@ fn speaker_names(state: &AppState, meeting: &MeetingRecord) -> SpeakerNames {
     )
 }
 
+/// The meeting's lines for a model prompt, under the names it goes by now.
+///
+/// Rendered from the segments rather than read from `transcript_text`, which is
+/// a projection frozen at whatever the last write knew: for a meeting that named
+/// neither channel it carries the language of that moment, so switching the app
+/// to Portuguese would leave the window and the export saying "Eu" while every
+/// prompt still read "Me". The fallback belongs to the read, not to the row.
+///
+/// Warm cache first, like `get_transcript`. The stored copy is the last resort
+/// rather than the first: a meeting whose segments are gone has nothing else
+/// left of its words.
+fn prompt_transcript(state: &AppState, meeting: &MeetingRecord) -> String {
+    let cached = state.live.lock().get(&meeting.id).cloned();
+    let transcript = match cached {
+        Some(t) => t,
+        None => state.db.load_transcript(&meeting.id).unwrap_or_default(),
+    };
+    if transcript.segments().is_empty() {
+        return meeting.transcript_text.clone();
+    }
+    transcript.plain_text(&speaker_names(state, meeting))
+}
+
 #[tauri::command]
 pub fn get_transcript(
     state: State<'_, Arc<AppState>>,
@@ -630,10 +653,10 @@ pub async fn edit_transcript_segment(
         return Err("that line is no longer in this transcript".into());
     }
 
-    // The summary reads `transcript_text`, not the segments, so the correction
-    // has to land there or it would be visible on screen and invisible to the
-    // model. All three writes — segments, that field, and the search index —
-    // commit together or not at all.
+    // The search index is built from `transcript_text`, not from the segments,
+    // so the correction has to land there or the meeting would stay findable by
+    // what was misheard and unfindable by what was said. All three writes —
+    // segments, that field, and the index — commit together or not at all.
     meeting.transcript_text = transcript.plain_text(&speaker_names(&state, &meeting));
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.save_corrected_transcript(&meeting, &transcript)?;
@@ -1570,7 +1593,7 @@ async fn name_meeting(
     }
     match state
         .llm
-        .title(settings, summary, &meeting.transcript_text)
+        .title(settings, summary, &prompt_transcript(state, meeting))
         .await
     {
         Ok((raw, cost)) => {
@@ -1625,7 +1648,7 @@ pub async fn summarize_meeting(
         .llm
         .summarize(
             &settings,
-            &m.transcript_text,
+            &prompt_transcript(&state, &m),
             tpl,
             // Empty on failure rather than refusing to summarise: a note that
             // cannot be read is a worse summary, not a lost meeting.
@@ -1706,7 +1729,7 @@ pub async fn chat_meeting(
             &settings,
             crate::domain::context::ChatSubject {
                 meeting_title: &meeting.title,
-                transcript: &meeting.transcript_text,
+                transcript: &prompt_transcript(&state, &meeting),
                 summary: meeting.summary.as_deref(),
                 notes: &notes,
             },
@@ -2659,10 +2682,10 @@ pub fn rename_meeting(
 /// whatever language the user reads — which is what `None` means in the row.
 ///
 /// `transcript_text` is rebuilt here from the segments the meeting already has.
-/// It is the copy the summary, the chat and the search index read, and leaving
-/// it holding the old names would make the rename something the user can see and
-/// nothing else can: a summary written about "Others" under a transcript headed
-/// "Cliente". `upsert_meeting` re-indexes search in the same transaction.
+/// The prompts render their own copy — `prompt_transcript` — but this one is
+/// what the search index is built from, and leaving it holding the old names
+/// would have search answering with a name the meeting no longer uses.
+/// `upsert_meeting` re-indexes in the same transaction.
 #[tauri::command]
 pub async fn set_speaker_names(
     state: State<'_, Arc<AppState>>,
@@ -2688,7 +2711,13 @@ pub async fn set_speaker_names(
     // is still awaiting the last chunk holding a copy of this row read before
     // the rename, and it writes that copy back — so a name set in that window
     // would vanish with no sign it had been set.
-    let _flight = state.stt_flight.lock().await;
+    let _stt = state.stt_flight.lock().await;
+    // And the same for the model calls, which hold a row for as long as the
+    // provider takes to answer: a summary or a refinement started before the
+    // rename would put its pre-rename copy of these two columns back. Taken in
+    // the order `stop_recording` takes them, which is the only path that holds
+    // both — the other order between two holders is what a deadlock is made of.
+    let _refine = state.refine_flight.lock().await;
     let mut meeting = state
         .db
         .get_meeting(&id)?
