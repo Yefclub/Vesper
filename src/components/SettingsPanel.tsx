@@ -301,7 +301,12 @@ export function SettingsPanel({
   const [confirmWipe, setConfirmWipe] = useState(false);
 
   const exportEverything = async () => {
-    const dir = await open({ directory: true, multiple: false });
+    // Same reason as the import and export pickers: the floating card must not
+    // appear over a chooser Vesper itself opened.
+    await api.setModalOpen(true);
+    const dir = await open({ directory: true, multiple: false }).finally(() =>
+      api.setModalOpen(false),
+    );
     if (typeof dir !== "string") return;
     setDataBusy(true);
     setDataMessage(null);
@@ -962,6 +967,32 @@ export function SettingsPanel({
                 onChange={(v) => setDraft((d) => ({ ...d, ui_locale: v }))}
                 options={LOCALES}
               />
+              {/* A select and not a segmented control: four options with
+                  sentences for labels do not fit in a row of pills, and this is
+                  a preference somebody sets once. */}
+              <FieldSelect
+                label={t("settings.overlay_position")}
+                value={draft.overlay_position}
+                onChange={(v) =>
+                  setDraft((d) => ({ ...d, overlay_position: v }))
+                }
+                options={[
+                  { value: "right_top", label: t("overlay.right_top") },
+                  { value: "right_center", label: t("overlay.right_center") },
+                  { value: "right_bottom", label: t("overlay.right_bottom") },
+                  { value: "top", label: t("overlay.top") },
+                ]}
+              />
+              <CheckBox
+                label={t("settings.close_to_tray")}
+                checked={draft.close_to_tray}
+                onChange={(v) => setDraft((d) => ({ ...d, close_to_tray: v }))}
+              />
+              {draft.close_to_tray && (
+                <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                  {t("settings.close_to_tray_on")}
+                </p>
+              )}
             </div>
           )}
         </div>

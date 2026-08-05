@@ -700,6 +700,10 @@ function AppShell({
   }
 
   async function handleImport() {
+    // The card must not float over the chooser this is about to open. Both this
+    // and the export below are Vesper's own modals, and from the backend a
+    // modal and another application look identical.
+    await api.setModalOpen(true);
     try {
       const file = await open({
         multiple: false,
@@ -713,12 +717,14 @@ function AppShell({
     } catch (e) {
       setError(String(e));
     } finally {
+      await api.setModalOpen(false);
       setBusy(false);
     }
   }
 
   async function handleExport(format: "md" | "pdf" | "docx") {
     if (!selectedId) return;
+    await api.setModalOpen(true);
     try {
       const path = await save({
         // The meeting's own name, sanitised by the backend, so a folder of
@@ -734,6 +740,8 @@ function AppShell({
       await api.exportMeeting(selectedId, path, format);
     } catch (e) {
       setError(String(e));
+    } finally {
+      await api.setModalOpen(false);
     }
   }
 

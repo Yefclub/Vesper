@@ -199,6 +199,30 @@ pub fn run() {
                         let state = handle.state::<Arc<AppState>>();
                         commands::sync_overlay_for(&handle, &state);
                     }
+                    // Close means hide, when the user asked for that. The window
+                    // goes away and the tray icon is what brings it back — the
+                    // recording, if there is one, carries on, which is the whole
+                    // point of the setting.
+                    //
+                    // A recording is NOT a reason to override this. Somebody who
+                    // turned the switch on has said what they want a close to
+                    // mean, and a close that quits anyway during the one state
+                    // where staying matters would be the setting failing at its
+                    // own job.
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        let state = handle.state::<Arc<AppState>>();
+                        let to_tray = state.settings.lock().close_to_tray;
+                        if to_tray {
+                            api.prevent_close();
+                            if let Some(w) = handle.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                            // Hidden is not focused, so the card has to be
+                            // reconsidered — this is exactly the case it exists
+                            // for.
+                            commands::sync_overlay_for(&handle, &state);
+                        }
+                    }
                     // A hidden window is still a window and Tauri only exits once
                     // every one is destroyed, so closing the main window has to
                     // take the card with it or Vesper keeps running invisibly.
@@ -248,6 +272,7 @@ pub fn run() {
             commands::refine_summary_section,
             commands::restore_summary_version,
             commands::set_overlay_expanded,
+            commands::set_modal_open,
             commands::chat_meeting,
             commands::list_chat,
             commands::add_context_note,

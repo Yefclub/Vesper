@@ -71,6 +71,22 @@ pub struct AppSettings {
     /// least once, and the user can turn it off after the first time.
     #[serde(default = "default_true")]
     pub confirm_before_recording: bool,
+    /// Where the floating record card docks: `right_top`, `right_center`,
+    /// `right_bottom` or `top`.
+    ///
+    /// A string rather than the enum, like `compute_backend` beside it: the
+    /// WebView sends whatever the select holds, and `OverlayPosition::from_id`
+    /// is the one place that decides what an unknown value means.
+    #[serde(default = "default_overlay_position")]
+    pub overlay_position: String,
+    /// Closing the window leaves Vesper running in the notification area
+    /// instead of quitting.
+    ///
+    /// Off by default. A close button that does not close is a surprise, and
+    /// the first surprise a new user would meet is an application they cannot
+    /// get rid of.
+    #[serde(default)]
+    pub close_to_tray: bool,
     /// OpenRouter chat models the user picked, most recent first, capped at five.
     ///
     /// `#[serde(default)]` is load-bearing: `AppState::new` reads the row with
@@ -99,6 +115,11 @@ fn default_true() -> bool {
 fn default_backend() -> String {
     "auto".into()
 }
+fn default_overlay_position() -> String {
+    crate::domain::overlay::OverlayPosition::default()
+        .id()
+        .into()
+}
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -124,6 +145,8 @@ impl Default for AppSettings {
             system_device_id: None,
             compute_backend: "auto".into(),
             confirm_before_recording: true,
+            overlay_position: default_overlay_position(),
+            close_to_tray: false,
             recent_openrouter_llm_models: Vec::new(),
             theme: "light".into(),
         }
