@@ -282,6 +282,7 @@ pub fn run() {
             commands::import_audio,
             commands::retranscribe,
             commands::rename_meeting,
+            commands::set_speaker_name,
             commands::export_meeting_cmd,
             commands::export_all_cmd,
             commands::wipe_all_cmd,

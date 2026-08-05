@@ -287,6 +287,9 @@ fn en_dict() -> HashMap<&'static str, &'static str> {
         ("cap.recommended", "Recommended setup"),
         ("speaker.me", "Me"),
         ("speaker.others", "Others"),
+        ("speaker.rename", "Rename this speaker"),
+        ("settings.speaker_me_name", "Microphone name in the transcript"),
+        ("settings.speaker_others_name", "System audio name in the transcript"),
     ])
 }
 
@@ -537,6 +540,9 @@ fn pt_dict() -> HashMap<&'static str, &'static str> {
         ("cap.recommended", "Configuração recomendada"),
         ("speaker.me", "Eu"),
         ("speaker.others", "Outros"),
+        ("speaker.rename", "Renomear este participante"),
+        ("settings.speaker_me_name", "Nome do microfone na transcrição"),
+        ("settings.speaker_others_name", "Nome do áudio do sistema na transcrição"),
     ])
 }
 

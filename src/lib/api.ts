@@ -38,6 +38,14 @@ export interface MeetingRecord {
   /// fields above, which are still written for the templates that have them.
   sections?: SummarySection[];
   project?: string | null;
+  /// What this meeting calls the microphone and the system audio.
+  ///
+  /// Null is the absence of a name, not a name: the window falls back to
+  /// `speaker.me` / `speaker.others` in the user's language, and that fallback
+  /// is never written back — so a meeting nobody renamed follows the language
+  /// they pick next.
+  speaker_me?: string | null;
+  speaker_others?: string | null;
 }
 
 /** One section of a summary, as the template declared it. `key` is stable and
@@ -84,6 +92,11 @@ export interface AppSettings {
   overlay_position: string;
   /// Closing the window hides it instead of quitting.
   close_to_tray: boolean;
+  /// What new meetings start out calling their two channels. Copied onto a
+  /// meeting when it is created, so changing them here leaves every meeting
+  /// already recorded exactly as it was.
+  default_speaker_me?: string | null;
+  default_speaker_others?: string | null;
 }
 
 export interface ChannelLevels {
@@ -346,6 +359,14 @@ export const api = {
   // rather than showing a title the database does not carry.
   renameMeeting: (id: string, title: string) =>
     invoke<MeetingRecord>("rename_meeting", { id, title }),
+  // One channel per call, never the pair: a caller that sends both sends its
+  // idea of the other one too, and that idea is stale the moment anything else
+  // writes. `null` clears rather than storing an empty name, which is what puts
+  // the channel back to the app's own words. The backend cleans what it is
+  // given — the name reaches a model prompt and an exported document — so the
+  // record that comes back is the truth, not what was typed.
+  setSpeakerName: (id: string, speaker: Speaker, name: string | null) =>
+    invoke<MeetingRecord>("set_speaker_name", { id, speaker, name }),
   // The title, sanitised for the filesystem by the side that owns the rule
   // table. Every caller must have a fallback name — it lands with the backend
   // change and rejects until then.

@@ -910,6 +910,19 @@ export function SettingsPanel({
                   ))}
                 </select>
               </label>
+              {/* What a NEW meeting starts out calling this channel. The
+                  placeholder is the word the transcript uses when the field is
+                  left alone, so leaving it blank is a visible choice rather than
+                  a gap. A meeting keeps the names it was created with — changing
+                  these does not reach back into last month's. */}
+              <Field
+                label={t("settings.speaker_me_name")}
+                placeholder={t("speaker.me")}
+                value={draft.default_speaker_me ?? ""}
+                onChange={(v) =>
+                  setDraft((d) => ({ ...d, default_speaker_me: v || null }))
+                }
+              />
               <label className="block text-sm">
                 <span className="mb-1 block text-xs text-fg-subtle">
                   {t("onboarding.system")}
@@ -933,6 +946,14 @@ export function SettingsPanel({
                   ))}
                 </select>
               </label>
+              <Field
+                label={t("settings.speaker_others_name")}
+                placeholder={t("speaker.others")}
+                value={draft.default_speaker_others ?? ""}
+                onChange={(v) =>
+                  setDraft((d) => ({ ...d, default_speaker_others: v || null }))
+                }
+              />
             </div>
           )}
 

@@ -27,6 +27,7 @@ import {
   RecorderStatus,
   SearchHit,
   ShortcutStatus,
+  Speaker,
   StartGate,
 } from "./lib/api";
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
@@ -237,6 +238,12 @@ function AppShell({
   /// Whether the meeting header's title is being edited. A generated title is a
   /// guess, and a guess the user cannot correct is worse than a date.
   const [renaming, setRenaming] = useState(false);
+  /// The segment whose turn header is being renamed, or null. The segment and
+  /// not the channel: a channel names every turn it opens, and keying on it
+  /// would turn all of them into an input at once.
+  const [renamingSpeakerAt, setRenamingSpeakerAt] = useState<string | null>(
+    null,
+  );
   /// Which section is being improved, or null. One at a time: the two calls
   /// would each read the meeting row and write a version from it, and the second
   /// to land would carry a copy of the first section from before the first
@@ -898,6 +905,57 @@ function AppShell({
     }
   }
 
+  /// The name this meeting stored for a channel, or "" when it stored none.
+  ///
+  /// What the rename field is filled with. Never the fallback: a field
+  /// pre-filled with "Me" that somebody opens and walks away from would store
+  /// the English word, and freeze the meeting in a language they may not read.
+  function ownSpeakerName(speaker: Speaker) {
+    return (
+      (speaker === "me" ? selected?.speaker_me : selected?.speaker_others) ?? ""
+    );
+  }
+
+  /// What this meeting calls a channel: its own name if it has one, otherwise
+  /// the app's own word in the user's language. The fallback is computed here
+  /// and never sent back — a meeting nobody renamed has to follow the language
+  /// they pick next.
+  function speakerName(speaker: Speaker) {
+    return (
+      ownSpeakerName(speaker) ||
+      t(speaker === "me" ? "speaker.me" : "speaker.others")
+    );
+  }
+
+  /// Nothing is written optimistically, for the reason the title rename is not:
+  /// the backend cleans what it is given — the name reaches a model prompt and
+  /// an exported file — so what comes back is what is true, and a refusal leaves
+  /// the header showing what the database holds.
+  ///
+  /// One channel, never the pair. Sending both would send this snapshot's idea
+  /// of the other one too, and renaming the second while the first is still in
+  /// flight would carry that stale value back over a rename that had already
+  /// succeeded.
+  async function commitSpeakerRename(
+    meeting: MeetingRecord,
+    speaker: Speaker,
+    next: string,
+  ) {
+    setRenamingSpeakerAt(null);
+    // Blank clears. `null` is the absence of a name, which is what puts the
+    // channel back to the app's own word — and it is what typing nothing means.
+    const name = next.trim() || null;
+    const was =
+      (speaker === "me" ? meeting.speaker_me : meeting.speaker_others) ?? null;
+    if (name === was) return;
+    try {
+      const m = await api.setSpeakerName(meeting.id, speaker, name);
+      setMeetings((prev) => prev.map((x) => (x.id === m.id ? m : x)));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function handleDelete(id: string) {
     // Dismiss first. Leaving the dialog up after the meeting is gone offers a
     // Delete button for something that no longer exists.
@@ -1482,11 +1540,9 @@ function AppShell({
                         text={transcript.segments
                           .map(
                             (s) =>
-                              `[${formatDuration(s.start_ms)}] ${
-                                s.speaker === "me"
-                                  ? t("speaker.me")
-                                  : t("speaker.others")
-                              }: ${s.text}`,
+                              `[${formatDuration(s.start_ms)}] ${speakerName(
+                                s.speaker,
+                              )}: ${s.text}`,
                           )
                           .join("\n")}
                       />
@@ -1579,9 +1635,63 @@ function AppShell({
                                         me && "flex-row-reverse",
                                       )}
                                     >
-                                      <span className="font-medium">
-                                        {me ? t("speaker.me") : t("speaker.others")}
-                                      </span>
+
+                                      {/* Click the name to change it, in place
+                                          and at the same size, like the title
+                                          in the header above. The name belongs
+                                          to the meeting, so editing it here
+                                          renames every turn — and the export,
+                                          the copy and the model's copy with
+                                          them. */}
+                                      {renamingSpeakerAt === s.id ? (
+                                        <input
+                                          autoFocus
+                                          aria-label={t("speaker.rename")}
+                                          // The word the transcript falls back
+                                          // to, shown but not stored: clearing
+                                          // the field is how a channel goes
+                                          // back to it.
+                                          placeholder={speakerName(s.speaker)}
+                                          defaultValue={ownSpeakerName(s.speaker)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === "Enter") {
+                                              e.preventDefault();
+                                              void commitSpeakerRename(
+                                                selected,
+                                                s.speaker,
+                                                e.currentTarget.value,
+                                              );
+                                            } else if (e.key === "Escape") {
+                                              e.preventDefault();
+                                              // Put the name back before
+                                              // closing, so the blur that
+                                              // follows commits nothing.
+                                              e.currentTarget.value =
+                                                ownSpeakerName(s.speaker);
+                                              setRenamingSpeakerAt(null);
+                                            }
+                                          }}
+                                          onBlur={(e) =>
+                                            void commitSpeakerRename(
+                                              selected,
+                                              s.speaker,
+                                              e.currentTarget.value,
+                                            )
+                                          }
+                                          className={`w-32 rounded-sm bg-transparent text-2xs font-medium ${FOCUS}`}
+                                        />
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setRenamingSpeakerAt(s.id)
+                                          }
+                                          aria-label={t("speaker.rename")}
+                                          className={`cursor-text rounded-sm font-medium ${FOCUS}`}
+                                        >
+                                          {speakerName(s.speaker)}
+                                        </button>
+                                      )}
                                       {/* The offset was already the seek target
                                           in everything but function, so it is
                                           the one control that starts playing.
@@ -1604,6 +1714,7 @@ function AppShell({
                                           {formatDuration(s.start_ms)}
                                         </span>
                                       )}
+
                                     </div>
                                   )}
                                   {/* The corner nearest the speaker's own edge
