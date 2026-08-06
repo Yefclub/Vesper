@@ -39,6 +39,7 @@ import { Button, FOCUS, PANEL } from "./components/Button";
 import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { RecoveryDialog } from "./components/RecoveryDialog";
 import { CopyButton } from "./components/CopyButton";
 import { SummaryHistory } from "./components/SummaryHistory";
 import { ChatPanel } from "./components/ChatPanel";
@@ -246,6 +247,11 @@ function AppShell({
   const [confirmingRecord, setConfirmingRecord] = useState(false);
   const [skipRecordReminder, setSkipRecordReminder] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<MeetingRecord | null>(null);
+  /// Meetings the app was recording when it last stopped running, still waiting
+  /// to be answered for. A queue rather than one: a machine that lost power
+  /// twice has two, and each one is its own decision. The head is on screen and
+  /// answering it uncovers the next.
+  const [interrupted, setInterrupted] = useState<MeetingRecord[]>([]);
   /// Whether the meeting header's title is being edited. A generated title is a
   /// guess, and a guess the user cannot correct is worse than a date.
   const [renaming, setRenaming] = useState(false);
@@ -292,9 +298,10 @@ function AppShell({
   );
 
   /// Ask where this meeting's recording is, whenever which meeting or what it is
-  /// doing changes. The status is a dependency and not decoration: the file is
-  /// written when the recorder stops, so a meeting asked about while it was
-  /// still being captured has to be asked again once it is not.
+  /// doing changes. The status is a dependency and not decoration: the backend
+  /// refuses to name the file of a recording in progress, so a meeting asked
+  /// about while it was still being captured has to be asked again once it is
+  /// not.
   ///
   /// The late answer to an abandoned request is dropped. Selecting two meetings
   /// quickly would otherwise leave the first one's recording under the second
@@ -526,6 +533,13 @@ function AppShell({
       // in-app listener works regardless, so a rejection here leaves the note
       // off rather than putting an error banner on the first screen.
       setShortcut(await api.shortcutStatus().catch(() => null));
+      // Asked once, at launch, and only here: `recording` and `paused` are
+      // states nothing but an interrupted run leaves behind, so asking again
+      // later would be asking about a recording that is under way.
+      //
+      // A failure loses the offer for this launch rather than raising a banner.
+      // The rows are untouched, so the next start of the app asks again.
+      void api.interruptedMeetings().then(setInterrupted).catch(() => {});
       try {
         await refreshMeetings();
         setModels(await api.listModels());
@@ -1007,6 +1021,44 @@ function AppShell({
     try {
       await api.deleteMeeting(id);
       if (selectedId === id) clearWorkspace();
+      await refreshMeetings();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /// Take the answered offer off the queue, whichever way it was answered.
+  function dismissRecovery() {
+    setInterrupted((queue) => queue.slice(1));
+  }
+
+  /// Finish a meeting whose recording was cut short.
+  ///
+  /// The offer comes down first: this reads the whole recording, which on a long
+  /// meeting is minutes, and a dialog left over it would sit there through all
+  /// of them. The `meeting://progress` events are what narrate the wait, the
+  /// same ones a stop raises.
+  async function handleRecover(id: string) {
+    dismissRecovery();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.recoverMeeting(id);
+      await refreshMeetings();
+      await loadMeeting(id);
+    } catch (e) {
+      // The meeting is untouched by a recovery that failed, so it is offered
+      // again the next time the app starts. Nothing here has to put it back.
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDiscardInterrupted(id: string) {
+    dismissRecovery();
+    try {
+      await api.discardInterruptedMeeting(id);
       await refreshMeetings();
     } catch (e) {
       setError(String(e));
@@ -1557,8 +1609,8 @@ function AppShell({
                       own directly beneath the header's would read as one.
                       Nothing is drawn while the answer is in flight — see
                       `audioPath` — and nothing is drawn for the meeting being
-                      recorded either, where the file does not exist yet because
-                      it is still being captured. Saying "not on this computer"
+                      recorded either, whose file the backend refuses to name
+                      while it is still growing. Saying "not on this computer"
                       about audio that is arriving is worse than saying nothing. */}
                   {audioPath !== undefined &&
                     selected.status !== "recording" &&
@@ -2187,6 +2239,19 @@ function AppShell({
               setSkipRecordReminder(false);
               await handleStart();
             }}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* One at a time, oldest first. Two crashes are two decisions, and a
+          stack of dialogs is a way to answer the wrong one. */}
+      <AnimatePresence>
+        {interrupted[0] && (
+          <RecoveryDialog
+            title={interrupted[0].title}
+            onRecover={() => handleRecover(interrupted[0].id)}
+            onDiscard={() => handleDiscardInterrupted(interrupted[0].id)}
+            onLater={dismissRecovery}
           />
         )}
       </AnimatePresence>

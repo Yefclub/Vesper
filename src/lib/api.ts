@@ -313,6 +313,20 @@ export const api = {
   meetingAudioPath: (id: string) =>
     invoke<string | null>("meeting_audio_path", { id }),
   deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
+  /// The meetings the app was recording when it last stopped running — a row
+  /// left in `recording` or `paused` is one nothing came back for.
+  ///
+  /// Asked once at launch. Reading it changes nothing: until the user answers,
+  /// the recording stays exactly where it is.
+  interruptedMeetings: () => invoke<MeetingRecord[]>("interrupted_meetings"),
+  /// Finish one of them. Resolves once the whole recording has been read, which
+  /// on a long meeting is minutes — the `meeting://progress` events say where
+  /// it is up to.
+  recoverMeeting: (id: string) => invoke<MeetingRecord>("recover_meeting", { id }),
+  /// Throw one away, with its partial audio. Refused by the backend for any
+  /// meeting that is not waiting to be recovered.
+  discardInterruptedMeeting: (id: string) =>
+    invoke<void>("discard_interrupted_meeting", { id }),
   search: (query: string) => invoke<SearchHit[]>("search_meetings_cmd", { query }),
   getSettings: () => invoke<AppSettings>("get_settings"),
   saveSettings: (settings: AppSettings) => invoke<AppSettings>("save_settings", { settings }),

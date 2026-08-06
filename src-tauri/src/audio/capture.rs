@@ -3,11 +3,14 @@
 //! PipeWire (Linux) for system audio — never fakes Others from the mic.
 
 use crate::audio::levels::ChannelLevels;
+use crate::domain::recovery::{wav_header_fix, RIFF_SIZE_OFFSET};
 use crate::domain::segmenter::has_speech;
 use crate::domain::speaker::merge_dual_channel;
 use flexaudio::{open, OutputFormat, SourceKind, StreamConfig};
 use hound::{WavSpec, WavWriter};
 use parking_lot::Mutex;
+use std::fs::File;
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,6 +43,19 @@ struct RecorderInner {
     elapsed_before_pause_ms: u64,
     /// True when a real system-loopback stream is active.
     system_loopback_active: bool,
+    /// The recording's file, open for as long as the recording lasts.
+    ///
+    /// `None` before a recording, once `stop` has closed it, and after a write
+    /// that failed — which is what selects the whole-buffer fallback, so the
+    /// meeting survives a disk that refused this.
+    writer: Option<WavWriter<BufWriter<File>>>,
+    /// How many interleaved frames of the recording are already in the file.
+    written: usize,
+    /// Whether each capture thread has finished. A channel that has ended will
+    /// never produce another sample, which is what lets the other one carry on
+    /// being written — see `flush_frontier`.
+    mic_ended: bool,
+    sys_ended: bool,
 }
 
 pub struct DualChannelRecorder {
@@ -64,6 +80,10 @@ impl DualChannelRecorder {
                 start: None,
                 elapsed_before_pause_ms: 0,
                 system_loopback_active: false,
+                writer: None,
+                written: 0,
+                mic_ended: false,
+                sys_ended: false,
             })),
             running: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
@@ -109,6 +129,14 @@ impl DualChannelRecorder {
         }
 
         let sample_rate = 16_000u32;
+        // The file is opened here, before a single sample exists, and written
+        // as the meeting goes on. It used to be created in `stop`, which meant
+        // a two-hour meeting had nothing at all on disk until the moment the
+        // user pressed the button — so a crash cost all of it rather than the
+        // last write. Failing here rather than there is also the better place
+        // to find out: a recording that cannot be saved should refuse to start,
+        // not discover it two hours later.
+        let writer = open_dual_wav(&out_path, sample_rate)?;
         {
             let mut g = self.inner.lock();
             g.mic_samples.clear();
@@ -121,6 +149,10 @@ impl DualChannelRecorder {
             g.elapsed_before_pause_ms = 0;
             g.levels = ChannelLevels::default();
             g.system_loopback_active = false;
+            g.writer = Some(writer);
+            g.written = 0;
+            g.mic_ended = false;
+            g.sys_ended = false;
         }
 
         self.stop_flag.store(false, Ordering::SeqCst);
@@ -153,11 +185,18 @@ impl DualChannelRecorder {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("mic open failed: {e}");
+                        // Said out loud on every way out, because the streaming
+                        // write holds the file back to whatever both channels
+                        // have reached. A microphone that never opened would
+                        // otherwise hold it at nothing for the whole meeting,
+                        // and the system audio would never reach disk either.
+                        inner_mic.lock().mic_ended = true;
                         return;
                     }
                 };
                 if let Err(e) = stream.start() {
                     eprintln!("mic start failed: {e}");
+                    inner_mic.lock().mic_ended = true;
                     return;
                 }
                 let mut stream_paused = false;
@@ -225,6 +264,7 @@ impl DualChannelRecorder {
                     let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                     inner_mic.lock().mic_samples.extend_from_slice(&pcm);
                 }
+                inner_mic.lock().mic_ended = true;
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
 
@@ -247,11 +287,16 @@ impl DualChannelRecorder {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("system loopback open failed: {e}");
+                        // See the mic thread: a machine with no loopback at all
+                        // is the ordinary case here, and without this the
+                        // microphone's audio would never be written either.
+                        inner_sys.lock().sys_ended = true;
                         return;
                     }
                 };
                 if let Err(e) = stream.start() {
                     eprintln!("system loopback start failed: {e}");
+                    inner_sys.lock().sys_ended = true;
                     return;
                 }
                 {
@@ -318,7 +363,9 @@ impl DualChannelRecorder {
                     let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                     inner_sys.lock().sys_samples.extend_from_slice(&pcm);
                 }
-                inner_sys.lock().system_loopback_active = false;
+                let mut g = inner_sys.lock();
+                g.system_loopback_active = false;
+                g.sys_ended = true;
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
 
@@ -368,15 +415,70 @@ impl DualChannelRecorder {
             let _ = h.join();
         }
 
-        let mut g = self.inner.lock();
-        if let Some(start) = g.start.take() {
-            g.elapsed_before_pause_ms += start.elapsed().as_millis() as u64;
+        {
+            let mut g = self.inner.lock();
+            if let Some(start) = g.start.take() {
+                g.elapsed_before_pause_ms += start.elapsed().as_millis() as u64;
+            }
         }
+        self.close_file()
+    }
+
+    /// Write everything both channels have reached, and put the file's header
+    /// in step with it.
+    ///
+    /// Called from the live-STT ticker, never from a capture thread. That
+    /// thread is the one in this application that must not stall — a disk that
+    /// takes 200ms to answer would cost it a chunk of the meeting — whereas the
+    /// ticker is already doing I/O at this cadence and can afford to wait. The
+    /// price is that the file is at worst one tick behind; before this it was
+    /// the whole meeting behind.
+    pub fn flush_to_disk(&self) {
+        let mut g = self.inner.lock();
+        let frontier = flush_frontier(
+            g.mic_samples.len(),
+            g.sys_samples.len(),
+            g.mic_ended,
+            g.sys_ended,
+        );
+        if let Err(e) = write_frames(&mut g, frontier) {
+            // Not fatal, and deliberately so: the buffers are still whole in
+            // memory and `close_file` writes the recording in one go when the
+            // streaming writer is gone, which is exactly what this did before
+            // anything was streamed. Dropping the writer is what selects that
+            // fallback, and it also stops a file already refused from being
+            // appended to for the rest of the meeting.
+            tracing::warn!("the recording could not be written as it was captured: {e}");
+            g.writer = None;
+        }
+    }
+
+    /// Finish the recording's file and answer with where it is.
+    ///
+    /// The frontier is `max` here rather than `flush_frontier`: both capture
+    /// threads have been joined by the time this runs, so every sample either
+    /// of them will ever produce is already in the buffers and the shorter
+    /// channel is padded with silence exactly as `write_dual_wav` would.
+    fn close_file(&self) -> Result<PathBuf, CaptureError> {
+        let mut g = self.inner.lock();
         let path = g
             .out_path
             .clone()
             .ok_or_else(|| CaptureError::Device("missing output path".into()))?;
-        write_dual_wav(&path, g.sample_rate, &g.mic_samples, &g.sys_samples)?;
+        let frontier = g.mic_samples.len().max(g.sys_samples.len());
+        if let Err(e) = write_frames(&mut g, frontier) {
+            tracing::warn!("the recording's last frames could not be appended: {e}");
+            g.writer = None;
+        }
+        match g.writer.take() {
+            Some(writer) => writer
+                .finalize()
+                .map_err(|e| CaptureError::Device(e.to_string()))?,
+            // Never opened, or a write along the way failed. The whole meeting
+            // is in memory either way, so the file is written in one go — the
+            // path this took before any of it was streamed.
+            None => write_dual_wav(&path, g.sample_rate, &g.mic_samples, &g.sys_samples)?,
+        }
         Ok(path)
     }
 
@@ -445,6 +547,16 @@ impl DualChannelRecorder {
         let g = self.inner.lock();
         write_dual_wav(path, g.sample_rate, &g.mic_samples, &g.sys_samples)
     }
+
+    /// Test/helper: open the streaming file as `start` does, without a device.
+    #[cfg(test)]
+    fn begin_file_for_test(&self, path: &Path, sample_rate: u32) {
+        let mut g = self.inner.lock();
+        g.sample_rate = sample_rate;
+        g.out_path = Some(path.to_path_buf());
+        g.writer = Some(open_dual_wav(path, sample_rate).unwrap());
+        g.written = 0;
+    }
 }
 
 /// What a capture worker owes the backend on this tick.
@@ -490,6 +602,67 @@ fn elapsed(start: Option<Instant>, before_ms: u64, paused: bool, now: Instant) -
     }
 }
 
+/// How far into the two channels the file may be written while capture runs.
+///
+/// A frame carries one sample from each channel, so while both streams are live
+/// the boundary is whichever has delivered less: writing past it would put the
+/// far channel's later samples at an earlier moment than they were spoken, and
+/// they can only be appended once.
+///
+/// A stream that has *ended* will never deliver again, so the silence in its
+/// place from there on is final and stops holding the other back. That case is
+/// not exotic — a machine with no system loopback is the ordinary one on Linux
+/// — and without it the boundary would sit at zero for the whole meeting and
+/// nothing would be streamed at all.
+fn flush_frontier(mic_len: usize, sys_len: usize, mic_ended: bool, sys_ended: bool) -> usize {
+    match (mic_ended, sys_ended) {
+        (false, false) => mic_len.min(sys_len),
+        (false, true) => mic_len,
+        (true, false) => sys_len,
+        (true, true) => mic_len.max(sys_len),
+    }
+}
+
+/// Append frames `written..frontier` to the open file and advance the cursor.
+///
+/// A no-op when there is no writer, which is how a failed write earlier in the
+/// meeting keeps the rest of it out of a file that is already wrong.
+fn write_frames(g: &mut RecorderInner, frontier: usize) -> Result<(), CaptureError> {
+    // Destructured so the writer and the buffers are borrowed separately.
+    let RecorderInner {
+        writer,
+        written,
+        mic_samples,
+        sys_samples,
+        ..
+    } = g;
+    let Some(writer) = writer.as_mut() else {
+        return Ok(());
+    };
+    if frontier <= *written {
+        return Ok(());
+    }
+    // Both slices start at the same frame, so `merge_dual_channel` pads the
+    // short one exactly where `write_dual_wav` would have — which is what makes
+    // the streamed file byte-for-byte the one the single write produced.
+    let from = *written;
+    let mic = &mic_samples[from.min(mic_samples.len())..frontier.min(mic_samples.len())];
+    let sys = &sys_samples[from.min(sys_samples.len())..frontier.min(sys_samples.len())];
+    for (_, sample) in merge_dual_channel(mic, sys) {
+        writer
+            .write_sample(sample)
+            .map_err(|e| CaptureError::Device(e.to_string()))?;
+    }
+    *written = frontier;
+    // `hound`'s flush rewrites the length in the header as well as emptying the
+    // buffer, so what is on disk after this is a whole, readable WAV rather
+    // than a header from the start of the meeting with bytes behind it.
+    writer
+        .flush()
+        .map_err(|e| CaptureError::Device(e.to_string()))?;
+    Ok(())
+}
+
 /// Copy samples from `read_pos` to end, then advance the cursor.
 /// Full `samples` buffer is left intact for final WAV persistence.
 pub fn drain_stt_window(samples: &[i16], read_pos: &mut usize) -> Vec<i16> {
@@ -524,6 +697,68 @@ fn f32_to_i16_mono(data: &[f32], frames: usize, channels: usize) -> Vec<i16> {
     out
 }
 
+/// The one shape a Vesper recording has: left is Me, right is Others.
+///
+/// Named because two writers have to agree on it — the one that streams the
+/// meeting as it happens and the one that writes it in a single pass when the
+/// first could not be opened.
+fn dual_wav_spec(sample_rate: u32) -> WavSpec {
+    WavSpec {
+        channels: 2,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    }
+}
+
+/// Create the recording's file and write its header, ready to be appended to.
+fn open_dual_wav(
+    path: &Path,
+    sample_rate: u32,
+) -> Result<WavWriter<BufWriter<File>>, CaptureError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    WavWriter::create(path, dual_wav_spec(sample_rate))
+        .map_err(|e| CaptureError::Device(e.to_string()))
+}
+
+/// How much of a file to read looking for its two length fields. A WAV written
+/// here has both inside the first 44 bytes; the slack is for one somebody
+/// else's tool wrote with a chunk of its own in front of the audio.
+const WAV_HEAD_BYTES: u64 = 4_096;
+
+/// Make a recording whose writer never finished readable again.
+///
+/// A process that is killed mid-meeting leaves a header from the last flush
+/// with real audio behind it, and every reader stops where the header says.
+/// This is the one thing that recovers those seconds, and it is why an
+/// interrupted recording is worth offering back at all.
+///
+/// Answers whether anything was changed, and treats a file it cannot make sense
+/// of as needing nothing: a recording that is already whole is the common case
+/// and must not be rewritten on the strength of a misread header.
+pub fn repair_wav_header(path: &Path) -> Result<bool, CaptureError> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let len = file.metadata()?.len();
+    let mut head = Vec::new();
+    Read::by_ref(&mut file)
+        .take(WAV_HEAD_BYTES)
+        .read_to_end(&mut head)?;
+    let Some(fix) = wav_header_fix(&head, len) else {
+        return Ok(false);
+    };
+    file.seek(SeekFrom::Start(RIFF_SIZE_OFFSET))?;
+    file.write_all(&fix.riff_size.to_le_bytes())?;
+    file.seek(SeekFrom::Start(fix.data_size_offset))?;
+    file.write_all(&fix.data_size.to_le_bytes())?;
+    file.flush()?;
+    Ok(true)
+}
+
 pub fn write_dual_wav(
     path: &Path,
     sample_rate: u32,
@@ -533,14 +768,8 @@ pub fn write_dual_wav(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let spec = WavSpec {
-        channels: 2,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer =
-        WavWriter::create(path, spec).map_err(|e| CaptureError::Device(e.to_string()))?;
+    let mut writer = WavWriter::create(path, dual_wav_spec(sample_rate))
+        .map_err(|e| CaptureError::Device(e.to_string()))?;
     let merged = merge_dual_channel(mic, system);
     for chunk in merged.chunks(2) {
         let l = chunk.first().map(|(_, s)| *s).unwrap_or(0);
@@ -689,6 +918,113 @@ mod tests {
         assert_eq!(elapsed(Some(start), 10_000, false, now), 40_000);
         // `pause()` takes `start`, so a paused recorder has none to run from.
         assert_eq!(elapsed(None, 10_000, false, now), 10_000);
+    }
+
+    /// The whole promise of the streaming write: what a meeting written in
+    /// pieces leaves on disk is the file the single write at the end produced,
+    /// byte for byte — including the padding of whichever channel arrived last.
+    #[test]
+    fn a_recording_written_in_pieces_is_the_same_file_as_one_written_at_the_end() {
+        let dir = tempdir().unwrap();
+        let mic: Vec<i16> = (0..1_000).map(|i| i as i16).collect();
+        // Shorter, and it never catches up — the tail is where the two writers
+        // could most easily disagree.
+        let sys: Vec<i16> = (0..940).map(|i| -(i as i16)).collect();
+
+        let once = dir.path().join("once.wav");
+        write_dual_wav(&once, 16_000, &mic, &sys).unwrap();
+
+        let streamed = dir.path().join("streamed.wav");
+        let rec = DualChannelRecorder::new();
+        rec.begin_file_for_test(&streamed, 16_000);
+        // Three arrivals, with the two channels never quite in step.
+        for (m, s) in [(300usize, 250usize), (700, 700), (1_000, 940)] {
+            let (have_m, have_s) = rec.recording_len();
+            rec.push_samples_for_test(&mic[have_m..m], &sys[have_s..s]);
+            rec.flush_to_disk();
+        }
+        rec.close_file().unwrap();
+
+        assert_eq!(
+            std::fs::read(&once).unwrap(),
+            std::fs::read(&streamed).unwrap(),
+            "streaming must not change what the meeting's file contains"
+        );
+    }
+
+    /// A flush that never ran, because a stop landed before the first tick.
+    #[test]
+    fn closing_without_a_single_flush_still_writes_the_whole_recording() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("short.wav");
+        let rec = DualChannelRecorder::new();
+        rec.begin_file_for_test(&path, 16_000);
+        rec.push_samples_for_test(&[7i16; 400], &[9i16; 400]);
+        rec.close_file().unwrap();
+        let (mic, sys, _) = read_dual_wav(&path).unwrap();
+        assert_eq!(mic.len(), 400);
+        assert_eq!(sys[0], 9);
+    }
+
+    /// Both channels live: the file may only reach as far as the one that has
+    /// delivered less, because the other's samples can only be appended.
+    #[test]
+    fn a_live_channel_holds_the_write_back_and_an_ended_one_does_not() {
+        assert_eq!(flush_frontier(1_000, 600, false, false), 600);
+        // The case that makes this exist: no system loopback on the machine.
+        // Holding at zero for the whole meeting would stream nothing at all.
+        assert_eq!(flush_frontier(1_000, 0, false, true), 1_000);
+        assert_eq!(flush_frontier(0, 1_000, true, false), 1_000);
+        // Both joined — everything, with the short side padded.
+        assert_eq!(flush_frontier(1_000, 600, true, true), 1_000);
+    }
+
+    /// The file a force-kill leaves: a header from the last flush, with real
+    /// audio behind it that nothing is pointing at.
+    #[test]
+    fn repairing_a_stale_header_recovers_the_audio_written_past_it() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("killed.wav");
+        // The last flush: a whole, valid file of 800 frames.
+        write_dual_wav(&path, 16_000, &[100i16; 800], &[200i16; 800]).unwrap();
+        // And the 800 frames captured after it, which reached the disk without
+        // the header ever being told about them.
+        let mut tail = Vec::new();
+        for _ in 0..800 {
+            tail.extend_from_slice(&101i16.to_le_bytes());
+            tail.extend_from_slice(&201i16.to_le_bytes());
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&tail).unwrap();
+        drop(file);
+
+        let (before, _, _) = read_dual_wav(&path).unwrap();
+        assert_eq!(before.len(), 800, "the header knows only the last flush");
+
+        assert!(repair_wav_header(&path).unwrap());
+        let (mic, sys, _) = read_dual_wav(&path).unwrap();
+        assert_eq!(mic.len(), 1_600);
+        assert_eq!(sys.len(), 1_600);
+        // And the two channels are still the two channels.
+        assert_eq!(mic[1_500], 101);
+        assert_eq!(sys[1_500], 201);
+        // Nothing left to do the second time.
+        assert!(!repair_wav_header(&path).unwrap());
+    }
+
+    /// A recording that was closed properly must come out of recovery
+    /// untouched — repair runs over every meeting that is offered back.
+    #[test]
+    fn a_finished_recording_is_not_rewritten() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("whole.wav");
+        write_dual_wav(&path, 16_000, &[1i16; 400], &[2i16; 400]).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(!repair_wav_header(&path).unwrap());
+        assert_eq!(before, std::fs::read(&path).unwrap());
     }
 
     #[test]
