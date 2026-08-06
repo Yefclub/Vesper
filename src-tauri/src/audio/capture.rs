@@ -581,11 +581,21 @@ const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(2);
 /// once and drops its sender straight after, so the channel running dry early
 /// means nothing more is coming — and what was never reported was never opened.
 ///
-/// A timeout is a backend still inside its own `open`, which is the one thing
-/// this cannot get an answer about. It is answered the way the recorder
-/// answered before the handshake existed: let the recording run. Refusing would
-/// take a meeting away from a device that was about to work, and waiting would
-/// leave the window on a Record button that never comes back.
+/// A timeout is a backend still inside its own `open`, and it is the one thing
+/// this cannot get an answer about. Waiting longer is a Record button that
+/// never comes back — this runs on the thread that answers it. So the recording
+/// runs, which is what the recorder did before the handshake existed.
+///
+/// Not refused, though the failing case above is, and the difference is what
+/// happens to the thread afterwards. A worker blocked inside a foreign
+/// blocking call cannot be cancelled: `stop_flag` is only read once it returns.
+/// Letting the recording start leaves that thread owned — its handle is stored,
+/// and `stop` joins it, so whenever the driver comes back it winds down into
+/// the meeting it belongs to. Refusing would drop the handle with the thread
+/// still inside the backend, and it would surface later, appending to whatever
+/// recording happened to be running by then. A stalled device is rare; a
+/// recording carrying a few seconds of a previous one is not something the user
+/// could ever untangle.
 fn streams_are_running(ready: &mpsc::Receiver<bool>, expected: usize, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     let mut opened = 0usize;
