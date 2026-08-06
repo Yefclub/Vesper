@@ -1,0 +1,66 @@
+# Third-party notices
+
+Vesper is MIT — see `LICENSE`. This file is about everything else that ends up
+inside the installer.
+
+**Generated, not written.** `npm run notices` rebuilds it from the two
+lockfiles. Editing it by hand puts it out of step with what actually ships. The
+allow-list of acceptable terms is in `src-tauri/about.toml`, and a dependency
+arriving under anything outside it fails that command rather than shipping
+quietly.
+
+Nothing here is copyleft that reaches you: none of it asks you to publish work
+of your own. `symphonia`, which decodes imported audio files, is MPL-2.0 — weak
+copyleft, scoped to its own files, and its obligation falls on this project
+rather than on you.
+
+## Vendored C and C++
+
+The speech and language engines are C++ compiled into the binary through `-sys`
+crates, and the crates do not always carry the notice of the project they
+vendor. These are written out here because generating them is not possible:
+
+- **llama.cpp** and **ggml** — MIT. `llama-cpp-sys-2` publishes with an
+  `include` allowlist that leaves `llama.cpp/LICENSE` out of the packaged crate,
+  so there is no file for a generator to find and the headers carry no inline
+  copyright. The text below is the one from the upstream repository.
+- **whisper.cpp** — MIT, same authors. Its `LICENSE` *is* in the vendored tree,
+  but the crate's own metadata says Unlicense — that is `whisper-rs`'s licence,
+  not whisper.cpp's, so a generator credits the wrong terms.
+
+```
+MIT License
+
+Copyright (c) 2023-2024 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## Rust crates
+
+{{#each licenses}}
+### {{{name}}}
+
+{{#each used_by}}`{{crate.name}} {{crate.version}}`{{#unless @last}} · {{/unless}}{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}

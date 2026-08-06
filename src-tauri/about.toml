@@ -1,0 +1,44 @@
+# What may end up inside an installer this project publishes.
+#
+# An allow-list, and the point of it is the failure it forces: a dependency
+# arriving under terms nobody read fails the notices build rather than shipping
+# quietly. Everything below is permissive — none of it obliges the person who
+# installs Vesper to publish anything of their own.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    # `webpki-roots` — the Mozilla CA bundle, which is data rather than code and
+    # carries a data licence to match. Permissive: it may be used and
+    # redistributed, and the obligation is attribution.
+    "CDLA-Permissive-2.0",
+    # Weak copyleft, file-scoped. It obliges this project to point at the
+    # source of those files and obliges the user nothing. `symphonia` is the
+    # direct dependency that brings it, and it is what decodes an imported
+    # audio file.
+    "MPL-2.0",
+    # `ring`, through rustls. Its terms are `Apache-2.0 AND ISC` — both, not a
+    # choice — plus the old OpenSSL notice for the assembly it inherited.
+    "OpenSSL",
+]
+
+# Only what actually ships. Resolving for every target would list crates no
+# installer of ours contains, which reads as a longer obligation than the one
+# this project really has.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+
+# Neither reaches the person who installs it, so neither belongs in a notice
+# addressed to them.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

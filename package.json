@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "preflight": "python scripts/check-workflows.py"
+    "preflight": "python scripts/check-workflows.py",
+    "notices": "python scripts/notices.py"
   },
   "dependencies": {
     "@animateicons/react": "^0.4.1",
