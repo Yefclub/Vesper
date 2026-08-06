@@ -52,7 +52,11 @@
   },
   "bundle": {
     "active": true,
-    "resources": { "gpu-backends/*": "" },
+    "resources": {
+      "gpu-backends/*": "",
+      "../THIRD-PARTY-NOTICES.md": ""
+    },
+    "licenseFile": "../LICENSE",
     "targets": [
       "nsis",
       "msi",
