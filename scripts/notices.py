@@ -96,16 +96,29 @@ def runtime_packages() -> list[str]:
     if not done.stdout:
         sys.exit(done.stderr or "`npm ls` returned nothing — run `npm ci` first")
     names: set[str] = set()
+    # Keyed on name and version, and only for nodes that HAVE children. npm
+    # prints a package once per place it is required, and only one of those
+    # copies carries its dependency list — `react-dom` appears empty beside the
+    # other direct entries and full underneath. Skipping on the name alone lost
+    # whichever copy came second, which is how `scheduler` went missing.
+    walked: set[tuple[str, str]] = set()
 
     def walk(node: dict) -> None:
         for name, child in (node.get("dependencies") or {}).items():
-            # A node with no version is an unmet optional peer — npm lists it as
-            # an empty object because something *could* use it. `framer-motion`
-            # asks for `@emotion/is-prop-valid` this way. It is not on disk and
-            # not in the bundle, so it has no notice to give.
-            if name in names or not child.get("version"):
+            version = child.get("version")
+            # No version means an unmet optional peer — npm lists it as an empty
+            # object because something *could* use it. `framer-motion` asks for
+            # `@emotion/is-prop-valid` this way. Not on disk, not in the bundle,
+            # nothing to give notice of.
+            if not version:
                 continue
             names.add(name)
+            if not (child.get("dependencies") or {}):
+                continue
+            key = (name, version)
+            if key in walked:
+                continue
+            walked.add(key)
             walk(child)
 
     walk(json.loads(done.stdout))
