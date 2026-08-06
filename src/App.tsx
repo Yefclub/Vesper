@@ -219,6 +219,9 @@ function AppShell({
   /// is still there. Cleared by an answer, by somebody speaking, or by the stop
   /// that follows an unanswered question.
   const [silent, setSilent] = useState(false);
+  // Picks the catalogue no longer offers, moved to the nearest tier at
+  // startup. Read once — the command drains what it returns.
+  const [retired, setRetired] = useState<[string, string][]>([]);
   /// The last phase the backend reported for a meeting being finished. `null`
   /// until the first event, and permanently `null` on a build whose backend
   /// does not emit them — in which case none of the UI below renders and Stop
@@ -515,6 +518,10 @@ function AppShell({
   useEffect(() => {
     (async () => {
       void refreshDevices();
+      // Drains on read, so a failure here loses the notice rather than
+      // repeating it. Not worth an error banner of its own: the pick has
+      // already been moved, and the picker shows what it moved to.
+      void api.retiredModels().then(setRetired).catch(() => {});
       // Whether the OS granted the accelerator is not a startup failure: the
       // in-app listener works regardless, so a rejection here leaves the note
       // off rather than putting an error banner on the first screen.
@@ -1336,6 +1343,31 @@ function AppShell({
                 banners rather than as a modal — a dialog over a running meeting
                 is a thing to dismiss before you can see the transcript, and the
                 whole point is that the user may not be at the machine. */}
+            {/* Which model writes a user's summaries is not something to
+                change under them in a log file. Dismissible, and it does not
+                come back: the command that fed it drained the list. */}
+            {retired.length > 0 && (
+              <div
+                role="status"
+                className="flex flex-wrap items-center gap-3 border-b border-warn/30 bg-warn/10 px-6 py-2 text-sm text-warn"
+              >
+                <span className="text-fg-muted">
+                  {retired
+                    .map(([from, to]) =>
+                      t("model.retired").replace("{from}", from).replace("{to}", to),
+                    )
+                    .join(" ")}
+                </span>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  className="ml-auto"
+                  onClick={() => setRetired([])}
+                >
+                  {t("action.dismiss")}
+                </Button>
+              </div>
+            )}
             {silent && status?.recording && (
               <div
                 role="status"

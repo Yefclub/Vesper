@@ -272,6 +272,50 @@ impl AppSettings {
         }
     }
 
+    /// Move a selection off a model the catalogue no longer offers.
+    ///
+    /// The catalogue was cut to three tiers per engine, and four of the models
+    /// that went were removed over their licence rather than their quality —
+    /// somebody is running one right now. Leaving the row pointing at an id
+    /// nothing knows about is the worst of the options: the file is still on
+    /// disk, `catalog_sha256` answers `None` for it, so it can never be
+    /// verified, and the gate refuses to record with a reason naming a model
+    /// the picker does not list. A dead end with no way out of it from inside
+    /// the app.
+    ///
+    /// So the pick moves to the nearest surviving tier, and the weights are left
+    /// exactly where they are. Deleting gigabytes somebody paid for in bandwidth
+    /// because the licence changed under them is not this function's business,
+    /// and the file is theirs.
+    ///
+    /// Returns what was replaced, so the window can say so rather than quietly
+    /// summarising with a different model than it did yesterday.
+    pub fn migrate_retired_models(&mut self) -> Vec<(String, String)> {
+        // Nearest by size within the same engine, which is the axis the user
+        // chose on: whoever picked the 3B wanted the big one and gets the new
+        // big one, not the smallest thing that still exists.
+        const RETIRED: &[(&str, &str)] = &[
+            ("whisper-base", "whisper-small"),
+            ("llama32-1b", "qwen2.5-0.5b"),
+            ("llama32-3b", "qwen3-4b-instruct"),
+            ("gemma3-4b", "qwen3-4b-instruct"),
+            ("qwen2.5-1.5b", "qwen3-4b-instruct"),
+            ("qwen2.5-3b", "qwen3-4b-instruct"),
+        ];
+        let mut moved = Vec::new();
+        for (from, to) in RETIRED {
+            if self.local_stt_model == *from {
+                self.local_stt_model = (*to).into();
+                moved.push(((*from).to_string(), (*to).to_string()));
+            }
+            if self.local_llm_model == *from {
+                self.local_llm_model = (*to).into();
+                moved.push(((*from).to_string(), (*to).to_string()));
+            }
+        }
+        moved
+    }
+
     pub fn validate_models(&self) -> Result<(), SettingsError> {
         if self.local_stt_model.trim().is_empty()
             || self.local_llm_model.trim().is_empty()
@@ -312,6 +356,77 @@ impl AppSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every retirement has to land on something the catalogue still lists, or
+    /// the migration swaps one dead end for another.
+    #[test]
+    fn every_retirement_lands_on_a_model_that_exists() {
+        let offered: Vec<String> = crate::models::list_models()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        for from in [
+            "whisper-base",
+            "llama32-1b",
+            "llama32-3b",
+            "gemma3-4b",
+            "qwen2.5-1.5b",
+            "qwen2.5-3b",
+        ] {
+            let mut s = AppSettings {
+                local_stt_model: from.into(),
+                local_llm_model: from.into(),
+                ..AppSettings::default()
+            };
+            let moved = s.migrate_retired_models();
+            assert!(!moved.is_empty(), "`{from}` was not migrated");
+            assert!(
+                offered.contains(&s.local_stt_model),
+                "stt landed on `{}`, which the catalogue does not offer",
+                s.local_stt_model
+            );
+            assert!(
+                offered.contains(&s.local_llm_model),
+                "llm landed on `{}`, which the catalogue does not offer",
+                s.local_llm_model
+            );
+        }
+    }
+
+    /// A pick the catalogue still offers is left exactly where it is — the
+    /// migration must not reshuffle somebody who is happy.
+    #[test]
+    fn a_current_model_is_not_migrated() {
+        let mut s = AppSettings::default();
+        let before = (s.local_stt_model.clone(), s.local_llm_model.clone());
+        assert!(s.migrate_retired_models().is_empty());
+        assert_eq!(
+            (s.local_stt_model.clone(), s.local_llm_model.clone()),
+            before
+        );
+    }
+
+    /// The shipped defaults have to be in the catalogue too. A default naming a
+    /// model that was dropped is the same dead end, reached by a fresh install
+    /// rather than by an upgrade.
+    #[test]
+    fn the_defaults_are_models_the_catalogue_offers() {
+        let offered: Vec<String> = crate::models::list_models()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        let s = AppSettings::default();
+        assert!(
+            offered.contains(&s.local_stt_model),
+            "{}",
+            s.local_stt_model
+        );
+        assert!(
+            offered.contains(&s.local_llm_model),
+            "{}",
+            s.local_llm_model
+        );
+    }
 
     #[test]
     fn default_is_local_offline() {

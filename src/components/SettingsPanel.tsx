@@ -1562,7 +1562,19 @@ const ModelRow = memo(function ModelRow({
     <div className="rounded-md border border-border bg-surface-2 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-sm">{model.label}</div>
+          <div className="flex items-baseline gap-2">
+            <div className="text-sm">{model.label}</div>
+            {/* Beside the name rather than behind a link. Vesper chooses
+                a model for the user on first run and fetches it for them,
+                which makes this the moment they are told what they have
+                taken on — and the catalogue is small enough now that the
+                answer is always one word. */}
+            {model.license && (
+              <span className="shrink-0 rounded-xs bg-surface-3 px-1.5 py-0.5 text-2xs text-fg-muted">
+                {model.license}
+              </span>
+            )}
+          </div>
           <div
             className={`flex items-center gap-2 text-2xs tabular-nums ${failed ? "text-danger" : "text-fg-muted"}`}
           >

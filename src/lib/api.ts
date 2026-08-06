@@ -207,6 +207,10 @@ export interface ModelInfo {
   /** What the catalog says the finished artifact weighs. Already on the wire;
    *  it was simply never declared on this side. */
   size_hint_bytes?: number | null;
+  /** SPDX identifier of the licence the weights are published under.
+   *  Shown beside the model, because the app picks one for the user on
+   *  first run and downloads it on their behalf. */
+  license?: string;
   /** Bytes of a `.part` file sitting beside the artifact — a download that was
    *  started and never finished. Optional because the backend that reports it
    *  is a separate change: until it lands the field is absent and the slot
@@ -324,6 +328,9 @@ export const api = {
   /// Answer the "still there?" question. Whatever the user clicked, they are
   /// there, and the vigil starts over.
   keepRecording: () => invoke<void>("keep_recording"),
+  /** Picks moved off a model the catalogue dropped, as `[from, to]`.
+   *  Drained by the read, so this answers once per launch. */
+  retiredModels: () => invoke<[string, string][]>("retired_models"),
   recorderStatus: () => invoke<RecorderStatus>("recorder_status"),
   canRecord: () => invoke<StartGate>("can_record"),
   /// Ask the OS for a different record accelerator.
