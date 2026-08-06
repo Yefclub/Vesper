@@ -1002,6 +1002,10 @@ pub fn start_recording(
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
     spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
+    // After it, and only after: the ticker is what bumps the generation both of
+    // them are retired by, so starting this first would leave it comparing
+    // against a number that is already stale and stop it on its first tick.
+    spawn_recording_flush(Arc::clone(&state));
     // A recording can be started by the tray or the accelerator while the window
     // is already minimized, so the card has to be considered here and not only
     // when the window is minimized.
@@ -1430,6 +1434,14 @@ async fn final_stt_pass(
 /// Cadence of the backend live-STT ticker.
 const LIVE_STT_INTERVAL_MS: u64 = 1200;
 
+/// How often the recording is written to disk.
+///
+/// The same 1200ms as the live-STT tick, because that is the interval the
+/// trade was decided at: never more than that much speech held only in memory.
+/// It is a constant of its own because the two run on separate clocks — see
+/// `spawn_recording_flush`.
+const RECORDING_FLUSH_INTERVAL_MS: u64 = 1200;
+
 /// How much of the previous utterance is handed to the model as context.
 ///
 /// whisper decodes each call from nothing unless told otherwise, which is why
@@ -1677,6 +1689,41 @@ async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), St
     Ok(())
 }
 
+/// Write the recording to disk for as long as this recording lasts.
+///
+/// Its own thread, and not a line inside the live-STT ticker where this began.
+/// That loop awaits a transcription before it comes back round, and a model
+/// answering in four seconds would make this a four-second tick — so the audio
+/// held only in memory would be bounded by however long the slowest chunk took,
+/// which is not a bound at all. A clock of its own is the only way the interval
+/// above is the interval.
+///
+/// A plain thread rather than a task, because the write blocks: it belongs
+/// somewhere blocking is what the thread is for, not on the async runtime the
+/// rest of the app shares.
+///
+/// Retired by generation like the live ticker, and by the same reasoning — a
+/// stop followed quickly by a start must not leave two of these writing into
+/// one file.
+fn spawn_recording_flush(state: Arc<AppState>) {
+    let generation = state.live_stt_generation.load(Ordering::SeqCst);
+    let _ = std::thread::Builder::new()
+        .name("vesper-flush".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(
+                RECORDING_FLUSH_INTERVAL_MS,
+            ));
+            if state.live_stt_generation.load(Ordering::SeqCst) != generation
+                || !state.recorder.is_recording()
+            {
+                // Nothing is lost by stopping here: `stop` writes whatever
+                // these ticks did not reach before it hands the file over.
+                break;
+            }
+            state.recorder.flush_to_disk();
+        });
+}
+
 /// Drive live transcription from the backend for as long as this recording lasts.
 ///
 /// Retired by generation rather than by a stop flag: a stop followed quickly by a
@@ -1694,14 +1741,6 @@ fn spawn_live_stt_ticker(app: AppHandle, state: Arc<AppState>) {
             {
                 break;
             }
-            // The audio's trip to disk, on the thread that is already doing I/O
-            // at this cadence rather than on a capture thread, which is the one
-            // that must not stall. Before the transcription and not after it: a
-            // model can take longer to answer than the tick that started it, and
-            // the recording must not be waiting behind that. Nothing is lost by
-            // stopping here either — the stop writes what these flushes have not
-            // reached before it hands the file over.
-            state.recorder.flush_to_disk();
             if let Err(e) = drive_live_stt(&app, &state).await {
                 // The window has to be told, or a provider rejecting every chunk
                 // is a screen that simply never fills. The audio is still being
@@ -2212,7 +2251,7 @@ pub async fn recover_meeting(
     // `retranscribe`: this writes a meeting, so a wipe has to wait for it
     // instead of deleting the row underneath.
     let _flight = state.stt_flight.lock().await;
-    let mut meeting = state
+    let meeting = state
         .db
         .get_meeting(&id)?
         .ok_or_else(|| "meeting not found".to_string())?;
@@ -2258,6 +2297,18 @@ pub async fn recover_meeting(
         apply_stt_chunks(&mut live, &chunks);
     }
 
+    // The row is read again rather than the copy taken before the transcription
+    // being written over it. Minutes can have gone by, and nothing stops the
+    // user renaming this meeting in that time — writing the snapshot would take
+    // the name they typed straight back off it.
+    //
+    // `None` is a meeting deleted while the pass was decoding, and it ends the
+    // walk: `upsert_meeting` would put a meeting somebody removed back on
+    // screen, pointing at a recording that is no longer there.
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "that meeting was removed while it was being recovered".to_string())?;
     // Only now, and in one write. `duration_ms` is stamped by the stop that
     // never happened, so the file's own length is the only record of how long
     // the meeting was.
@@ -2286,11 +2337,19 @@ pub async fn recover_meeting(
 /// matters: this deletes a recording, and an id that is stale — a window that
 /// asked before a recording started, an offer answered twice — must not be able
 /// to reach a meeting the user still has.
+///
+/// Behind the transcription lock for that reason and not for its own work,
+/// which touches no model. A recovery of this same meeting is minutes long and
+/// leaves the row saying `Recording` until it finishes; without waiting for it,
+/// this would delete the recording out from under a user who had asked to keep
+/// it. Past the lock the row has been moved on, the check below refuses, and
+/// the answer is that there is nothing left to discard.
 #[tauri::command]
-pub fn discard_interrupted_meeting(
+pub async fn discard_interrupted_meeting(
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<(), String> {
+    let _flight = state.stt_flight.lock().await;
     let meeting = state
         .db
         .get_meeting(&id)?

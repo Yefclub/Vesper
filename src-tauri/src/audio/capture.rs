@@ -43,14 +43,6 @@ struct RecorderInner {
     elapsed_before_pause_ms: u64,
     /// True when a real system-loopback stream is active.
     system_loopback_active: bool,
-    /// The recording's file, open for as long as the recording lasts.
-    ///
-    /// `None` before a recording, once `stop` has closed it, and after a write
-    /// that failed — which is what selects the whole-buffer fallback, so the
-    /// meeting survives a disk that refused this.
-    writer: Option<WavWriter<BufWriter<File>>>,
-    /// How many interleaved frames of the recording are already in the file.
-    written: usize,
     /// Whether each capture thread has finished. A channel that has ended will
     /// never produce another sample, which is what lets the other one carry on
     /// being written — see `flush_frontier`.
@@ -58,8 +50,29 @@ struct RecorderInner {
     sys_ended: bool,
 }
 
+/// The recording's file, and how far into the capture it has been written.
+///
+/// Behind a lock of its own rather than inside `RecorderInner`, and that is the
+/// whole point of it being a separate type: writing is the one thing here that
+/// can block on hardware, and both capture threads need `inner` before they can
+/// hand over the chunks they have just polled. Holding one lock across a disk
+/// write would stall them, and flexaudio's ring drops its oldest chunk when
+/// nobody is draining it — so a slow disk would cost the meeting exactly the
+/// audio this exists to save.
+///
+/// Anything that touches both takes this one first.
+struct FileSink {
+    /// `None` before a recording, once `stop` has closed it, and after a write
+    /// that failed — which is what selects the whole-buffer fallback, so the
+    /// meeting survives a disk that refused this.
+    writer: Option<WavWriter<BufWriter<File>>>,
+    /// How many interleaved frames of the recording are already in the file.
+    written: usize,
+}
+
 pub struct DualChannelRecorder {
     inner: Arc<Mutex<RecorderInner>>,
+    sink: Mutex<FileSink>,
     running: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
@@ -80,11 +93,13 @@ impl DualChannelRecorder {
                 start: None,
                 elapsed_before_pause_ms: 0,
                 system_loopback_active: false,
-                writer: None,
-                written: 0,
                 mic_ended: false,
                 sys_ended: false,
             })),
+            sink: Mutex::new(FileSink {
+                writer: None,
+                written: 0,
+            }),
             running: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
             stop_flag: Arc::new(AtomicBool::new(false)),
@@ -138,6 +153,11 @@ impl DualChannelRecorder {
         // not discover it two hours later.
         let writer = open_dual_wav(&out_path, sample_rate)?;
         {
+            // The file's lock before the capture one, the order everything
+            // here takes them in.
+            let mut sink = self.sink.lock();
+            sink.writer = Some(writer);
+            sink.written = 0;
             let mut g = self.inner.lock();
             g.mic_samples.clear();
             g.sys_samples.clear();
@@ -149,8 +169,6 @@ impl DualChannelRecorder {
             g.elapsed_before_pause_ms = 0;
             g.levels = ChannelLevels::default();
             g.system_loopback_active = false;
-            g.writer = Some(writer);
-            g.written = 0;
             g.mic_ended = false;
             g.sys_ended = false;
         }
@@ -427,21 +445,12 @@ impl DualChannelRecorder {
     /// Write everything both channels have reached, and put the file's header
     /// in step with it.
     ///
-    /// Called from the live-STT ticker, never from a capture thread. That
-    /// thread is the one in this application that must not stall — a disk that
-    /// takes 200ms to answer would cost it a chunk of the meeting — whereas the
-    /// ticker is already doing I/O at this cadence and can afford to wait. The
-    /// price is that the file is at worst one tick behind; before this it was
-    /// the whole meeting behind.
+    /// Called from the flush ticker, never from a capture thread: that thread
+    /// is the one in this application that must not stall, and a disk that
+    /// takes 200ms to answer would cost it a chunk of the meeting.
     pub fn flush_to_disk(&self) {
-        let mut g = self.inner.lock();
-        let frontier = flush_frontier(
-            g.mic_samples.len(),
-            g.sys_samples.len(),
-            g.mic_ended,
-            g.sys_ended,
-        );
-        if let Err(e) = write_frames(&mut g, frontier) {
+        let mut sink = self.sink.lock();
+        if let Err(e) = self.append(&mut sink, Frontier::WhileCapturing) {
             // Not fatal, and deliberately so: the buffers are still whole in
             // memory and `close_file` writes the recording in one go when the
             // streaming writer is gone, which is exactly what this did before
@@ -449,35 +458,93 @@ impl DualChannelRecorder {
             // fallback, and it also stops a file already refused from being
             // appended to for the rest of the meeting.
             tracing::warn!("the recording could not be written as it was captured: {e}");
-            g.writer = None;
+            sink.writer = None;
         }
     }
 
-    /// Finish the recording's file and answer with where it is.
+    /// Copy out the frames the file does not have yet, then write them with the
+    /// capture lock released.
     ///
-    /// The frontier is `max` here rather than `flush_frontier`: both capture
-    /// threads have been joined by the time this runs, so every sample either
-    /// of them will ever produce is already in the buffers and the shorter
-    /// channel is padded with silence exactly as `write_dual_wav` would.
+    /// The copy is the point. Everything a capture thread produces has to pass
+    /// through `inner`, so anything held across a write is time those threads
+    /// are not draining the backend's ring — and what falls out of a ring
+    /// nobody drains is the recording.
+    fn append(&self, sink: &mut FileSink, frontier: Frontier) -> Result<(), CaptureError> {
+        if sink.writer.is_none() {
+            return Ok(());
+        }
+        let (frames, reached) = {
+            let g = self.inner.lock();
+            let reached = match frontier {
+                Frontier::WhileCapturing => flush_frontier(
+                    g.mic_samples.len(),
+                    g.sys_samples.len(),
+                    g.mic_ended,
+                    g.sys_ended,
+                ),
+                // Both capture threads have been joined by the time this is
+                // asked for, so every sample either of them will ever produce
+                // is already here and the shorter channel is padded with
+                // silence exactly as `write_dual_wav` would pad it.
+                Frontier::Everything => g.mic_samples.len().max(g.sys_samples.len()),
+            };
+            if reached <= sink.written {
+                return Ok(());
+            }
+            // Both slices start at the same frame, so `merge_dual_channel` pads
+            // the short one exactly where `write_dual_wav` would have — which
+            // is what makes the streamed file byte-for-byte the one the single
+            // write produced.
+            let from = sink.written;
+            let mic =
+                &g.mic_samples[from.min(g.mic_samples.len())..reached.min(g.mic_samples.len())];
+            let sys =
+                &g.sys_samples[from.min(g.sys_samples.len())..reached.min(g.sys_samples.len())];
+            (merge_dual_channel(mic, sys), reached)
+        };
+        let Some(writer) = sink.writer.as_mut() else {
+            return Ok(());
+        };
+        for (_, sample) in frames {
+            writer
+                .write_sample(sample)
+                .map_err(|e| CaptureError::Device(e.to_string()))?;
+        }
+        sink.written = reached;
+        // `hound`'s flush rewrites the length in the header as well as emptying
+        // the buffer, so what is on disk after this is a whole, readable WAV
+        // rather than a header from the start of the meeting with bytes behind
+        // it.
+        writer
+            .flush()
+            .map_err(|e| CaptureError::Device(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Finish the recording's file and answer with where it is.
     fn close_file(&self) -> Result<PathBuf, CaptureError> {
-        let mut g = self.inner.lock();
-        let path = g
+        let mut sink = self.sink.lock();
+        let path = self
+            .inner
+            .lock()
             .out_path
             .clone()
             .ok_or_else(|| CaptureError::Device("missing output path".into()))?;
-        let frontier = g.mic_samples.len().max(g.sys_samples.len());
-        if let Err(e) = write_frames(&mut g, frontier) {
+        if let Err(e) = self.append(&mut sink, Frontier::Everything) {
             tracing::warn!("the recording's last frames could not be appended: {e}");
-            g.writer = None;
+            sink.writer = None;
         }
-        match g.writer.take() {
+        match sink.writer.take() {
             Some(writer) => writer
                 .finalize()
                 .map_err(|e| CaptureError::Device(e.to_string()))?,
             // Never opened, or a write along the way failed. The whole meeting
             // is in memory either way, so the file is written in one go — the
             // path this took before any of it was streamed.
-            None => write_dual_wav(&path, g.sample_rate, &g.mic_samples, &g.sys_samples)?,
+            None => {
+                let g = self.inner.lock();
+                write_dual_wav(&path, g.sample_rate, &g.mic_samples, &g.sys_samples)?
+            }
         }
         Ok(path)
     }
@@ -551,11 +618,12 @@ impl DualChannelRecorder {
     /// Test/helper: open the streaming file as `start` does, without a device.
     #[cfg(test)]
     fn begin_file_for_test(&self, path: &Path, sample_rate: u32) {
+        let mut sink = self.sink.lock();
+        sink.writer = Some(open_dual_wav(path, sample_rate).unwrap());
+        sink.written = 0;
         let mut g = self.inner.lock();
         g.sample_rate = sample_rate;
         g.out_path = Some(path.to_path_buf());
-        g.writer = Some(open_dual_wav(path, sample_rate).unwrap());
-        g.written = 0;
     }
 }
 
@@ -623,44 +691,14 @@ fn flush_frontier(mic_len: usize, sys_len: usize, mic_ended: bool, sys_ended: bo
     }
 }
 
-/// Append frames `written..frontier` to the open file and advance the cursor.
-///
-/// A no-op when there is no writer, which is how a failed write earlier in the
-/// meeting keeps the rest of it out of a file that is already wrong.
-fn write_frames(g: &mut RecorderInner, frontier: usize) -> Result<(), CaptureError> {
-    // Destructured so the writer and the buffers are borrowed separately.
-    let RecorderInner {
-        writer,
-        written,
-        mic_samples,
-        sys_samples,
-        ..
-    } = g;
-    let Some(writer) = writer.as_mut() else {
-        return Ok(());
-    };
-    if frontier <= *written {
-        return Ok(());
-    }
-    // Both slices start at the same frame, so `merge_dual_channel` pads the
-    // short one exactly where `write_dual_wav` would have — which is what makes
-    // the streamed file byte-for-byte the one the single write produced.
-    let from = *written;
-    let mic = &mic_samples[from.min(mic_samples.len())..frontier.min(mic_samples.len())];
-    let sys = &sys_samples[from.min(sys_samples.len())..frontier.min(sys_samples.len())];
-    for (_, sample) in merge_dual_channel(mic, sys) {
-        writer
-            .write_sample(sample)
-            .map_err(|e| CaptureError::Device(e.to_string()))?;
-    }
-    *written = frontier;
-    // `hound`'s flush rewrites the length in the header as well as emptying the
-    // buffer, so what is on disk after this is a whole, readable WAV rather
-    // than a header from the start of the meeting with bytes behind it.
-    writer
-        .flush()
-        .map_err(|e| CaptureError::Device(e.to_string()))?;
-    Ok(())
+/// How much of the capture a write is allowed to reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frontier {
+    /// A tick during the meeting: only what both channels have delivered.
+    WhileCapturing,
+    /// The close, once the capture threads are joined and nothing more is
+    /// coming: everything, short channel padded.
+    Everything,
 }
 
 /// Copy samples from `read_pos` to end, then advance the cursor.
