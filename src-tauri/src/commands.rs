@@ -2293,6 +2293,15 @@ pub async fn recover_meeting(
             .stt
             .transcribe_dual(&settings, &mic, &sys, sr, 0)
             .await?;
+        // Charged as soon as the provider has answered, before the transcript
+        // is written. A crash in the gap leaves this meeting to be offered
+        // again, and a second recovery pays the provider a second time — but
+        // the figure the window shows is then the sum of what was actually
+        // spent, which is the property worth keeping. Recording the cost after
+        // the transcript would make a crash lose a charge that really happened,
+        // and a meeting that quietly under-reports what it cost is the worse of
+        // the two. Nothing here retries on its own: the second call only
+        // happens because somebody was asked and said yes.
         bill_chunks(&state.db, &id, &chunks);
         apply_stt_chunks(&mut live, &chunks);
     }
