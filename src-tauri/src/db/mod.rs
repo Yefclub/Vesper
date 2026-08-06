@@ -1159,8 +1159,10 @@ impl Database {
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         if let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let v: String = row.get(0).map_err(|e| e.to_string())?;
-            let mut settings: AppSettings = serde_json::from_str(&v).map_err(|e| e.to_string())?;
-            settings.migrate_model_ids();
+            let settings: AppSettings = serde_json::from_str(&v).map_err(|e| e.to_string())?;
+            // Not migrated here. A row naming a retired model is repointed
+            // once, in `AppState::new`, which is the only place that can
+            // also tell the user their summaries changed hands.
             Ok(settings)
         } else {
             Ok(AppSettings::default())

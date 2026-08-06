@@ -65,22 +65,26 @@ pub fn recommend_from_probe(probe: &CapabilityProbe) -> CapabilityReport {
             "{} MB of video memory — large local models will fit.",
             vram_mb
         ));
-        ("whisper-large-v3-turbo", "gemma3-4b")
+        ("whisper-large-v3-turbo", "mistral-7b-instruct")
     } else if gpu && vram_mb >= 5_000 {
         notes.push(format!(
             "{} MB of video memory — mid-sized models fit.",
             vram_mb
         ));
-        ("whisper-small", "llama32-3b")
+        ("whisper-small", "qwen3-4b-instruct")
     } else if gpu {
         notes.push(format!(
             "{} MB of video memory — small models only, but on the GPU.",
             vram_mb
         ));
-        ("whisper-base", "llama32-1b")
+        // The light tier, and the note beside it is the reason. This branch
+        // starts at 3 GB, and the middle model is 2.5 GB of weights before the
+        // context and the runtime ask for anything — the rule this function
+        // sizes by is what has to be resident at once, not what fits on paper.
+        ("whisper-small", "qwen2.5-0.5b")
     } else if cores >= 8 {
         notes.push("No usable GPU — running on the CPU, which has cores to spare.".into());
-        ("whisper-base", "qwen2.5-0.5b")
+        ("whisper-small", "qwen2.5-0.5b")
     } else {
         notes.push("No usable GPU — using the smallest local models.".into());
         ("whisper-tiny", "qwen2.5-0.5b")
@@ -235,7 +239,7 @@ mod tests {
             cpu_cores: 16,
             ..Default::default()
         });
-        assert_eq!(r.recommended_stt_model, "whisper-base");
+        assert_eq!(r.recommended_stt_model, "whisper-small");
         assert_eq!(r.recommended_llm_model, "qwen2.5-0.5b");
         assert_eq!(r.recommended_backend, "cpu");
     }
@@ -251,7 +255,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(r.recommended_stt_model, "whisper-large-v3-turbo");
-        assert_eq!(r.recommended_llm_model, "gemma3-4b");
+        assert_eq!(r.recommended_llm_model, "mistral-7b-instruct");
         assert_eq!(r.vram_mb, 24 * 1024);
         assert_eq!(r.cuda_device_name.as_deref(), Some("RTX 4090"));
     }
@@ -266,7 +270,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(r.recommended_stt_model, "whisper-small");
-        assert_eq!(r.recommended_llm_model, "llama32-3b");
+        assert_eq!(r.recommended_llm_model, "qwen3-4b-instruct");
         assert_eq!(r.recommended_backend, "auto");
     }
 
