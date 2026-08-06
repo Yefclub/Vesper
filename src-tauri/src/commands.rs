@@ -2309,9 +2309,17 @@ pub async fn recover_meeting(
         .db
         .get_meeting(&id)?
         .ok_or_else(|| "that meeting was removed while it was being recovered".to_string())?;
-    // Only now, and in one write. `duration_ms` is stamped by the stop that
-    // never happened, so the file's own length is the only record of how long
-    // the meeting was.
+    // The segments first and the status last, which is the order the stop path
+    // writes them in and for a sharper reason here: the row leaving `Recording`
+    // is what takes this meeting off the list of ones to offer back. A status
+    // committed before the transcript would, if the write after it failed, mean
+    // a meeting nothing offers to recover and nothing is left to transcribe —
+    // the audio still on disk and no way to reach it. Failing before that leaves
+    // the meeting exactly as it was, and the next launch asks again.
+    let names = speaker_names(&state, &meeting);
+    state.db.save_transcript(&id, &live, &names)?;
+    // `duration_ms` is stamped by the stop that never happened, so the file's
+    // own length is the only record of how long the meeting was.
     meeting.duration_ms = (mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64;
     meeting.status = meeting
         .status
@@ -2319,10 +2327,8 @@ pub async fn recover_meeting(
         .and_then(|s| s.transition(MeetingEvent::TranscribeDone))
         .map_err(|e| e.to_string())?;
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
-    let names = speaker_names(&state, &meeting);
     meeting.transcript_text = live.plain_text(&names);
     state.db.upsert_meeting(&meeting)?;
-    state.db.save_transcript(&id, &live, &names)?;
     state.live.lock().insert(id.clone(), live);
     let _ = app.emit(
         "meeting://progress",
