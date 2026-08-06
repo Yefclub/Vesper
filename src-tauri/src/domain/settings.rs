@@ -63,6 +63,22 @@ pub struct AppSettings {
     /// Selected system/loopback device id
     #[serde(default)]
     pub system_device_id: Option<String>,
+    /// Whether each channel is captured at all — `Me` is the microphone,
+    /// `Others` the system audio.
+    ///
+    /// A switch of its own rather than a third state on the device ids above,
+    /// because `None` there already means "the system's default device". See
+    /// `domain::channels` for the pair as the recorder receives it.
+    ///
+    /// `#[serde(default = "default_true")]` on both, and load-bearing for the
+    /// reason `recent_openrouter_llm_models` states below: `AppState::new`
+    /// reads the row with `unwrap_or_default()`, so a required field an older
+    /// row does not carry resets the whole configuration in silence. On, so a
+    /// row written before the switches existed records what it always did.
+    #[serde(default = "default_true")]
+    pub capture_me: bool,
+    #[serde(default = "default_true")]
+    pub capture_others: bool,
     /// Preferred compute backend: `cpu` | `cuda` | `auto`
     #[serde(default = "default_backend")]
     pub compute_backend: String,
@@ -183,6 +199,8 @@ impl Default for AppSettings {
             onboarding_complete: false,
             mic_device_id: None,
             system_device_id: None,
+            capture_me: true,
+            capture_others: true,
             compute_backend: "auto".into(),
             confirm_before_recording: true,
             record_shortcut: default_shortcut(),
@@ -546,6 +564,24 @@ mod tests {
         assert_eq!(s.theme, "light");
         assert_eq!(s.default_speaker_me, None);
         assert_eq!(s.default_speaker_others, None);
+        // Both channels, which is the only reading of a row written before
+        // there was a way to turn one off.
+        assert!(s.capture_me);
+        assert!(s.capture_others);
+    }
+
+    /// A channel switched off survives a save and a load. The pair is written
+    /// into the same JSON blob as everything else, so a field serde could not
+    /// read back would take the rest of the configuration down with it.
+    #[test]
+    fn a_channel_switched_off_roundtrips_serde() {
+        let s = AppSettings {
+            capture_others: false,
+            ..Default::default()
+        };
+        let s2: AppSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(s2.capture_me);
+        assert!(!s2.capture_others);
     }
 
     /// A row written before the field existed still has to load, and has to load

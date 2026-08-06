@@ -3,6 +3,7 @@
 //! PipeWire (Linux) for system audio — never fakes Others from the mic.
 
 use crate::audio::levels::ChannelLevels;
+use crate::domain::channels::ChannelSelection;
 use crate::domain::segmenter::has_speech;
 use crate::domain::speaker::merge_dual_channel;
 use flexaudio::{open, OutputFormat, SourceKind, StreamConfig};
@@ -40,6 +41,14 @@ struct RecorderInner {
     elapsed_before_pause_ms: u64,
     /// True when a real system-loopback stream is active.
     system_loopback_active: bool,
+    /// The channels this recording was started with.
+    ///
+    /// Kept here rather than read back from settings, because the two stop
+    /// agreeing the moment a recording is running: `start` copies the selection
+    /// into the streams, so a switch flipped afterwards belongs to the next
+    /// recording. A meter reading zero has two meanings — nobody is talking,
+    /// or nothing is listening — and this is what tells them apart.
+    channels: ChannelSelection,
 }
 
 pub struct DualChannelRecorder {
@@ -64,6 +73,7 @@ impl DualChannelRecorder {
                 start: None,
                 elapsed_before_pause_ms: 0,
                 system_loopback_active: false,
+                channels: ChannelSelection::default(),
             })),
             running: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
@@ -88,6 +98,13 @@ impl DualChannelRecorder {
         self.inner.lock().system_loopback_active
     }
 
+    /// The channels the running capture is listening to. After a stop it is
+    /// whatever the last `start` was given, the same way `elapsed_ms` keeps the
+    /// last recording's clock.
+    pub fn channels(&self) -> ChannelSelection {
+        self.inner.lock().channels
+    }
+
     pub fn elapsed_ms(&self) -> u64 {
         let g = self.inner.lock();
         elapsed(
@@ -101,6 +118,7 @@ impl DualChannelRecorder {
     pub fn start(
         &self,
         out_path: PathBuf,
+        channels: ChannelSelection,
         mic_device_id: Option<String>,
         system_device_id: Option<String>,
     ) -> Result<(), CaptureError> {
@@ -121,213 +139,219 @@ impl DualChannelRecorder {
             g.elapsed_before_pause_ms = 0;
             g.levels = ChannelLevels::default();
             g.system_loopback_active = false;
+            g.channels = channels;
         }
 
         self.stop_flag.store(false, Ordering::SeqCst);
         self.paused.store(false, Ordering::SeqCst);
 
-        let stop = self.stop_flag.clone();
-        let paused = self.paused.clone();
-        let inner_mic = self.inner.clone();
-        let inner_sys = self.inner.clone();
-        let stop_sys = self.stop_flag.clone();
-        let paused_sys = self.paused.clone();
-        let mic_id = mic_device_id.clone();
-        let sys_id = system_device_id.clone();
+        // One handle per channel that is on, so a recording with a channel
+        // switched off has one worker and one open stream. Nothing is opened
+        // and thrown away: an open stream is a microphone light on the user's
+        // machine and a device another application then cannot take exclusively
+        // — a recorder told not to listen must not be holding the hardware.
+        let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
         // —— Microphone (Me) ——
-        let mic_handle = thread::Builder::new()
-            .name("vesper-mic".into())
-            .spawn(move || {
-                let cfg = StreamConfig {
-                    kind: SourceKind::Mic,
-                    device_id: mic_id,
-                    output: OutputFormat {
-                        sample_rate,
-                        channels: 1,
-                    },
-                    exclude_self: false,
-                    ..Default::default()
-                };
-                let mut stream = match open(cfg) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("mic open failed: {e}");
+        if channels.me {
+            let stop = self.stop_flag.clone();
+            let paused = self.paused.clone();
+            let inner_mic = self.inner.clone();
+            let mic_handle = thread::Builder::new()
+                .name("vesper-mic".into())
+                .spawn(move || {
+                    let cfg = StreamConfig {
+                        kind: SourceKind::Mic,
+                        device_id: mic_device_id,
+                        output: OutputFormat {
+                            sample_rate,
+                            channels: 1,
+                        },
+                        exclude_self: false,
+                        ..Default::default()
+                    };
+                    let mut stream = match open(cfg) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("mic open failed: {e}");
+                            return;
+                        }
+                    };
+                    if let Err(e) = stream.start() {
+                        eprintln!("mic start failed: {e}");
                         return;
                     }
-                };
-                if let Err(e) = stream.start() {
-                    eprintln!("mic start failed: {e}");
-                    return;
-                }
-                let mut stream_paused = false;
-                while !stop.load(Ordering::SeqCst) {
-                    let want_pause = paused.load(Ordering::SeqCst);
-                    match capture_step(want_pause, stream_paused) {
-                        StreamAction::EnterPause => {
-                            stream.pause();
-                            stream_paused = true;
-                            // Chunks already in the ring are pre-pause audio and
-                            // belong in the recording, so take them now.
-                            while let Some(chunk) = stream.poll_chunk() {
-                                let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                                inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                    let mut stream_paused = false;
+                    while !stop.load(Ordering::SeqCst) {
+                        let want_pause = paused.load(Ordering::SeqCst);
+                        match capture_step(want_pause, stream_paused) {
+                            StreamAction::EnterPause => {
+                                stream.pause();
+                                stream_paused = true;
+                                // Chunks already in the ring are pre-pause audio and
+                                // belong in the recording, so take them now.
+                                while let Some(chunk) = stream.poll_chunk() {
+                                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                                }
                             }
+                            StreamAction::LeavePause => {
+                                stream.resume();
+                                stream_paused = false;
+                            }
+                            StreamAction::StayPaused | StreamAction::Poll => {}
                         }
-                        StreamAction::LeavePause => {
-                            stream.resume();
-                            stream_paused = false;
+                        if want_pause {
+                            // Nothing is arriving; a meter frozen at the last
+                            // pre-pause value says the opposite.
+                            {
+                                let mut g = inner_mic.lock();
+                                g.levels.me_peak = 0.0;
+                                g.levels.me_rms = 0.0;
+                            }
+                            thread::sleep(Duration::from_millis(20));
+                            continue;
                         }
-                        StreamAction::StayPaused | StreamAction::Poll => {}
-                    }
-                    if want_pause {
-                        // Nothing is arriving; a meter frozen at the last
-                        // pre-pause value says the opposite.
-                        {
+                        while let Some(chunk) = stream.poll_chunk() {
+                            let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                             let mut g = inner_mic.lock();
-                            g.levels.me_peak = 0.0;
-                            g.levels.me_rms = 0.0;
+                            g.levels.me_peak = chunk.peak;
+                            g.levels.me_rms = chunk.rms;
+                            g.mic_samples.extend_from_slice(&pcm);
                         }
-                        thread::sleep(Duration::from_millis(20));
-                        continue;
+                        thread::sleep(Duration::from_millis(5));
                     }
+                    // Pause, then drain, then stop. Stop can arrive between a pause
+                    // and the loop noticing it, leaving pre-pause chunks in the ring
+                    // with nothing left to take them — real audio the user already
+                    // recorded, and on a very short take all of it.
+                    //
+                    // `pause()` rather than draining straight away: it halts the
+                    // producer while leaving the ring readable, which is the property
+                    // `EnterPause` above is already built on. Draining first leaves a
+                    // window for one more chunk to land behind the sweep, and
+                    // `stop()` first would take the queue down with the producer.
+                    stream.pause();
                     while let Some(chunk) = stream.poll_chunk() {
                         let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                        let mut g = inner_mic.lock();
-                        g.levels.me_peak = chunk.peak;
-                        g.levels.me_rms = chunk.rms;
-                        g.mic_samples.extend_from_slice(&pcm);
+                        inner_mic.lock().mic_samples.extend_from_slice(&pcm);
                     }
-                    thread::sleep(Duration::from_millis(5));
-                }
-                // Pause, then drain, then stop. Stop can arrive between a pause
-                // and the loop noticing it, leaving pre-pause chunks in the ring
-                // with nothing left to take them — real audio the user already
-                // recorded, and on a very short take all of it.
-                //
-                // `pause()` rather than draining straight away: it halts the
-                // producer while leaving the ring readable, which is the property
-                // `EnterPause` above is already built on. Draining first leaves a
-                // window for one more chunk to land behind the sweep, and
-                // `stop()` first would take the queue down with the producer.
-                stream.pause();
-                while let Some(chunk) = stream.poll_chunk() {
-                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
-                }
-                stream.stop();
-                // And once more after the join. The intake worker can have read
-                // `paused == false` and enqueued one last chunk between the sweep
-                // above and the pause taking effect; `stop()` joins it without
-                // discarding the queue, so that chunk is still there to take.
-                // Costs nothing when there is nothing: `poll_chunk` answers None.
-                while let Some(chunk) = stream.poll_chunk() {
-                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
-                }
-            })
-            .map_err(|e| CaptureError::Device(e.to_string()))?;
+                    stream.stop();
+                    // And once more after the join. The intake worker can have read
+                    // `paused == false` and enqueued one last chunk between the sweep
+                    // above and the pause taking effect; `stop()` joins it without
+                    // discarding the queue, so that chunk is still there to take.
+                    // Costs nothing when there is nothing: `poll_chunk` answers None.
+                    while let Some(chunk) = stream.poll_chunk() {
+                        let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                        inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                    }
+                })
+                .map_err(|e| CaptureError::Device(e.to_string()))?;
+            workers.push(mic_handle);
+        }
 
         // —— System loopback (Others) — real WASAPI/CoreAudio/PipeWire via flexaudio ——
-        let sys_handle = thread::Builder::new()
-            .name("vesper-system".into())
-            .spawn(move || {
-                let cfg = StreamConfig {
-                    kind: SourceKind::SystemLoopback,
-                    device_id: sys_id,
-                    output: OutputFormat {
-                        sample_rate,
-                        channels: 1,
-                    },
-                    // Avoid feedback of Vesper's own UI sounds into the mix.
-                    exclude_self: true,
-                    ..Default::default()
-                };
-                let mut stream = match open(cfg) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("system loopback open failed: {e}");
+        if channels.others {
+            let stop_sys = self.stop_flag.clone();
+            let paused_sys = self.paused.clone();
+            let inner_sys = self.inner.clone();
+            let sys_handle = thread::Builder::new()
+                .name("vesper-system".into())
+                .spawn(move || {
+                    let cfg = StreamConfig {
+                        kind: SourceKind::SystemLoopback,
+                        device_id: system_device_id,
+                        output: OutputFormat {
+                            sample_rate,
+                            channels: 1,
+                        },
+                        // Avoid feedback of Vesper's own UI sounds into the mix.
+                        exclude_self: true,
+                        ..Default::default()
+                    };
+                    let mut stream = match open(cfg) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("system loopback open failed: {e}");
+                            return;
+                        }
+                    };
+                    if let Err(e) = stream.start() {
+                        eprintln!("system loopback start failed: {e}");
                         return;
                     }
-                };
-                if let Err(e) = stream.start() {
-                    eprintln!("system loopback start failed: {e}");
-                    return;
-                }
-                {
-                    inner_sys.lock().system_loopback_active = true;
-                }
-                let mut stream_paused = false;
-                while !stop_sys.load(Ordering::SeqCst) {
-                    let want_pause = paused_sys.load(Ordering::SeqCst);
-                    match capture_step(want_pause, stream_paused) {
-                        StreamAction::EnterPause => {
-                            stream.pause();
-                            stream_paused = true;
-                            // Chunks already in the ring are pre-pause audio and
-                            // belong in the recording, so take them now.
-                            while let Some(chunk) = stream.poll_chunk() {
-                                let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                                inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                    {
+                        inner_sys.lock().system_loopback_active = true;
+                    }
+                    let mut stream_paused = false;
+                    while !stop_sys.load(Ordering::SeqCst) {
+                        let want_pause = paused_sys.load(Ordering::SeqCst);
+                        match capture_step(want_pause, stream_paused) {
+                            StreamAction::EnterPause => {
+                                stream.pause();
+                                stream_paused = true;
+                                // Chunks already in the ring are pre-pause audio and
+                                // belong in the recording, so take them now.
+                                while let Some(chunk) = stream.poll_chunk() {
+                                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                                }
                             }
+                            StreamAction::LeavePause => {
+                                stream.resume();
+                                stream_paused = false;
+                            }
+                            StreamAction::StayPaused | StreamAction::Poll => {}
                         }
-                        StreamAction::LeavePause => {
-                            stream.resume();
-                            stream_paused = false;
+                        if want_pause {
+                            // Nothing is arriving; a meter frozen at the last
+                            // pre-pause value says the opposite.
+                            {
+                                let mut g = inner_sys.lock();
+                                g.levels.others_peak = 0.0;
+                                g.levels.others_rms = 0.0;
+                            }
+                            thread::sleep(Duration::from_millis(20));
+                            continue;
                         }
-                        StreamAction::StayPaused | StreamAction::Poll => {}
-                    }
-                    if want_pause {
-                        // Nothing is arriving; a meter frozen at the last
-                        // pre-pause value says the opposite.
-                        {
+                        while let Some(chunk) = stream.poll_chunk() {
+                            let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                             let mut g = inner_sys.lock();
-                            g.levels.others_peak = 0.0;
-                            g.levels.others_rms = 0.0;
+                            g.levels.others_peak = chunk.peak;
+                            g.levels.others_rms = chunk.rms;
+                            g.sys_samples.extend_from_slice(&pcm);
                         }
-                        thread::sleep(Duration::from_millis(20));
-                        continue;
+                        thread::sleep(Duration::from_millis(5));
                     }
+                    // Pause, then drain, then stop. Stop can arrive between a pause
+                    // and the loop noticing it, leaving pre-pause chunks in the ring
+                    // with nothing left to take them — real audio the user already
+                    // recorded, and on a very short take all of it.
+                    //
+                    // `pause()` rather than draining straight away: it halts the
+                    // producer while leaving the ring readable, which is the property
+                    // `EnterPause` above is already built on. Draining first leaves a
+                    // window for one more chunk to land behind the sweep, and
+                    // `stop()` first would take the queue down with the producer.
+                    stream.pause();
                     while let Some(chunk) = stream.poll_chunk() {
                         let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                        let mut g = inner_sys.lock();
-                        g.levels.others_peak = chunk.peak;
-                        g.levels.others_rms = chunk.rms;
-                        g.sys_samples.extend_from_slice(&pcm);
+                        inner_sys.lock().sys_samples.extend_from_slice(&pcm);
                     }
-                    thread::sleep(Duration::from_millis(5));
-                }
-                // Pause, then drain, then stop. Stop can arrive between a pause
-                // and the loop noticing it, leaving pre-pause chunks in the ring
-                // with nothing left to take them — real audio the user already
-                // recorded, and on a very short take all of it.
-                //
-                // `pause()` rather than draining straight away: it halts the
-                // producer while leaving the ring readable, which is the property
-                // `EnterPause` above is already built on. Draining first leaves a
-                // window for one more chunk to land behind the sweep, and
-                // `stop()` first would take the queue down with the producer.
-                stream.pause();
-                while let Some(chunk) = stream.poll_chunk() {
-                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
-                }
-                stream.stop();
-                // And once more after the join — see the mic thread above.
-                while let Some(chunk) = stream.poll_chunk() {
-                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
-                }
-                inner_sys.lock().system_loopback_active = false;
-            })
-            .map_err(|e| CaptureError::Device(e.to_string()))?;
-
-        {
-            let mut w = self.workers.lock();
-            w.clear();
-            w.push(mic_handle);
-            w.push(sys_handle);
+                    stream.stop();
+                    // And once more after the join — see the mic thread above.
+                    while let Some(chunk) = stream.poll_chunk() {
+                        let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                        inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                    }
+                    inner_sys.lock().system_loopback_active = false;
+                })
+                .map_err(|e| CaptureError::Device(e.to_string()))?;
+            workers.push(sys_handle);
         }
+
+        *self.workers.lock() = workers;
 
         self.running.store(true, Ordering::SeqCst);
         Ok(())
@@ -524,6 +548,20 @@ fn f32_to_i16_mono(data: &[f32], frames: usize, channels: usize) -> Vec<i16> {
     out
 }
 
+/// Always two channels, including when only one of them was ever captured.
+///
+/// A recording with a channel switched off writes silence into that channel
+/// rather than coming out as a mono file. Everything downstream is built on
+/// L=Me, R=Others — `read_dual_wav`, the player, the waveform, the final pass —
+/// and a mono file walks into `read_dual_wav`'s single-channel branch, which
+/// hands the samples back as Me with Others silent. On a system-only recording
+/// that is not merely a smaller file: it is the other side of the meeting
+/// attributed to the user, in the transcript and in every export made from it.
+///
+/// Silence costs two bytes a frame and nothing else. It is not transcribed
+/// either — `transcribe_channel` and `whole_channel` both floor a channel with
+/// no peak in it before a decoder is opened, so an hour of zeros is skipped
+/// rather than listened to.
 pub fn write_dual_wav(
     path: &Path,
     sample_rate: u32,
@@ -702,6 +740,33 @@ mod tests {
         assert_eq!(sr, 16_000);
         assert_eq!(m2, mic);
         assert_eq!(s2, sys);
+    }
+
+    /// A channel that was switched off never produced a sample, and the file
+    /// still has to be the stereo one every reader expects — with that channel
+    /// silent, and as long as the one that did record.
+    #[test]
+    fn a_recording_with_one_channel_off_is_still_a_stereo_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mic-only.wav");
+        let mic = vec![1000i16; 800];
+        write_dual_wav(&path, 16_000, &mic, &[]).unwrap();
+        let (m, s, _) = read_dual_wav(&path).unwrap();
+        assert_eq!(m, mic);
+        assert_eq!(
+            s,
+            vec![0i16; 800],
+            "the absent channel must be silence of the same length, not missing"
+        );
+
+        // And the other way round, which is the case a mono file would get
+        // wrong: these samples belong to Others and must not come back as Me.
+        let path = dir.path().join("system-only.wav");
+        let sys = vec![-1000i16; 800];
+        write_dual_wav(&path, 16_000, &[], &sys).unwrap();
+        let (m, s, _) = read_dual_wav(&path).unwrap();
+        assert_eq!(m, vec![0i16; 800]);
+        assert_eq!(s, sys);
     }
 
     #[test]

@@ -916,6 +916,15 @@ export function SettingsPanel({
 
           {tab === "devices" && (
             <div className="space-y-4" data-testid="settings-devices">
+              {/* The same switch the dock's channel button carries, reachable
+                  from here because the dock is only on screen while no meeting
+                  is open. The device select below stays live either way: it is
+                  what the channel comes back to. */}
+              <CheckBox
+                label={t("settings.capture_me")}
+                checked={draft.capture_me ?? true}
+                onChange={(v) => setDraft((d) => ({ ...d, capture_me: v }))}
+              />
               <label className="block text-sm">
                 <span className="mb-1 block text-xs text-fg-subtle">
                   {t("onboarding.mic")}
@@ -954,6 +963,11 @@ export function SettingsPanel({
                 onChange={(v) =>
                   setDraft((d) => ({ ...d, default_speaker_me: v || null }))
                 }
+              />
+              <CheckBox
+                label={t("settings.capture_others")}
+                checked={draft.capture_others ?? true}
+                onChange={(v) => setDraft((d) => ({ ...d, capture_others: v }))}
               />
               <label className="block text-sm">
                 <span className="mb-1 block text-xs text-fg-subtle">

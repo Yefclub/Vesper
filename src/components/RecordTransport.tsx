@@ -68,7 +68,11 @@ export function RecordTransport({ status, busy, onStop, onPauseResume }: Props) 
         {formatDuration(status.elapsed_ms)}
       </span>
 
-      <LevelMeter levels={status.levels} compact />
+      {/* The channels come from the status, not from settings: a switch flipped
+          while this is on screen belongs to the next recording, and a meter
+          that changed with it would be describing a capture that is not the one
+          running. */}
+      <LevelMeter levels={status.levels} channels={status.channels} compact />
 
       <Button
         variant="ghost"
