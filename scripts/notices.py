@@ -2,8 +2,8 @@
 
 Two package managers ship into one installer, so one file has to cover both.
 `cargo about` does the Rust half against `src-tauri/about.toml`; the npm half is
-walked here, because the runtime tree is fourteen packages and a second tool for
-that is more to keep working than to read.
+walked here, because the runtime tree is under twenty packages and a second tool
+for that is more to keep working than to read.
 
 Run it with `npm run notices`. It fails rather than writing a partial file: a
 notices document that is quietly missing a dependency is worse than one that is
@@ -95,7 +95,7 @@ def runtime_packages() -> list[str]:
     # matters rather than the code.
     if not done.stdout:
         sys.exit(done.stderr or "`npm ls` returned nothing — run `npm ci` first")
-    names: set[str] = set()
+    found: dict[str, set[str]] = {}
     # Keyed on name and version, and only for nodes that HAVE children. npm
     # prints a package once per place it is required, and only one of those
     # copies carries its dependency list — `react-dom` appears empty beside the
@@ -112,7 +112,7 @@ def runtime_packages() -> list[str]:
             # nothing to give notice of.
             if not version:
                 continue
-            names.add(name)
+            found.setdefault(name, set()).add(version)
             if not (child.get("dependencies") or {}):
                 continue
             key = (name, version)
@@ -122,7 +122,23 @@ def runtime_packages() -> list[str]:
             walk(child)
 
     walk(json.loads(done.stdout))
-    return sorted(names)
+    # Two versions of one package is a layout npm allows — one hoisted, one
+    # nested — and this cannot describe it: `npm ls` reports `path: null` here,
+    # so the only way back to a directory is `node_modules/<name>`, which is the
+    # hoisted copy and nothing else. Emitting that one silently would put a
+    # version in the table that is not the version beside it on disk.
+    #
+    # Stopped rather than guessed, which is the same rule the rest of this file
+    # follows. Nothing in the tree does this today; the day something does, the
+    # message is the instruction.
+    doubled = {n: sorted(v) for n, v in found.items() if len(v) > 1}
+    if doubled:
+        sys.exit(
+            f"more than one version of {doubled} is installed, and this script "
+            "resolves a package by name alone — teach it to carry each instance "
+            "before trusting the file it writes"
+        )
+    return sorted(found)
 
 
 def npm() -> str:
