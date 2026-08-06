@@ -11,6 +11,7 @@ use hound::{WavSpec, WavWriter};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -151,12 +152,22 @@ impl DualChannelRecorder {
         // machine and a device another application then cannot take exclusively
         // — a recorder told not to listen must not be holding the hardware.
         let mut workers: Vec<JoinHandle<()>> = Vec::new();
+        // Each worker says once whether its stream opened, and `start` waits to
+        // hear from every one it spawned before calling this a recording.
+        //
+        // Opening happens on the worker rather than here, so without this the
+        // failure had nowhere to go: the thread printed and returned while this
+        // marked the recorder running. With two channels that cost half a
+        // meeting; with one selected it cost all of it, and the user found out
+        // when they pressed Stop on a silent file.
+        let (ready_tx, ready_rx) = mpsc::channel::<bool>();
 
         // —— Microphone (Me) ——
         if channels.me {
             let stop = self.stop_flag.clone();
             let paused = self.paused.clone();
             let inner_mic = self.inner.clone();
+            let ready = ready_tx.clone();
             let mic_handle = thread::Builder::new()
                 .name("vesper-mic".into())
                 .spawn(move || {
@@ -174,13 +185,23 @@ impl DualChannelRecorder {
                         Ok(s) => s,
                         Err(e) => {
                             eprintln!("mic open failed: {e}");
+                            let _ = ready.send(false);
                             return;
                         }
                     };
                     if let Err(e) = stream.start() {
                         eprintln!("mic start failed: {e}");
+                        let _ = ready.send(false);
                         return;
                     }
+                    let _ = ready.send(true);
+                    // Dropped here rather than at the end of the thread, and
+                    // load-bearing: a worker that dies without reporting has to
+                    // show up as the channel closing. Held for the length of
+                    // the capture, the surviving worker's copy would keep it
+                    // open and `start` would wait for a message nobody is left
+                    // to send.
+                    drop(ready);
                     let mut stream_paused = false;
                     while !stop.load(Ordering::SeqCst) {
                         let want_pause = paused.load(Ordering::SeqCst);
@@ -256,6 +277,7 @@ impl DualChannelRecorder {
             let stop_sys = self.stop_flag.clone();
             let paused_sys = self.paused.clone();
             let inner_sys = self.inner.clone();
+            let ready = ready_tx.clone();
             let sys_handle = thread::Builder::new()
                 .name("vesper-system".into())
                 .spawn(move || {
@@ -274,13 +296,19 @@ impl DualChannelRecorder {
                         Ok(s) => s,
                         Err(e) => {
                             eprintln!("system loopback open failed: {e}");
+                            let _ = ready.send(false);
                             return;
                         }
                     };
                     if let Err(e) = stream.start() {
                         eprintln!("system loopback start failed: {e}");
+                        let _ = ready.send(false);
                         return;
                     }
+                    // See the microphone worker above for why the sender goes
+                    // as soon as it has spoken.
+                    let _ = ready.send(true);
+                    drop(ready);
                     {
                         inner_sys.lock().system_loopback_active = true;
                     }
@@ -349,6 +377,25 @@ impl DualChannelRecorder {
                 })
                 .map_err(|e| CaptureError::Device(e.to_string()))?;
             workers.push(sys_handle);
+        }
+
+        // This side's own sender goes before the wait, or a worker that died
+        // without reporting would leave the channel open on a copy nobody is
+        // holding and the loop below with nothing to end it.
+        drop(ready_tx);
+        let opened = wait_for_streams(&ready_rx, workers.len());
+        if opened == 0 {
+            // Refused only when nothing opened, never when something did: a
+            // two-channel meeting whose microphone failed still has the room,
+            // and half a recording beats none. With one channel selected the
+            // two are the same question — and answering it wrongly is a meeting
+            // recorded to silence with nothing on screen having said so.
+            //
+            // Nothing to tear down: every worker that could not open its stream
+            // has already returned, which is what it just reported.
+            return Err(CaptureError::Device(
+                "no capture device could be opened".into(),
+            ));
         }
 
         *self.workers.lock() = workers;
@@ -512,6 +559,27 @@ fn elapsed(start: Option<Instant>, before_ms: u64, paused: bool, now: Instant) -
         Some(start) if !paused => before_ms + now.duration_since(start).as_millis() as u64,
         _ => before_ms,
     }
+}
+
+/// How many of the `expected` workers reported a stream they had opened.
+///
+/// Lifted out of `start` for the reason `elapsed` above it is: the decision is
+/// worth testing and the thing that produces the reports needs an audio device.
+///
+/// A closed channel ends the count instead of waiting on it. Every worker sends
+/// once and drops its sender straight after, so the channel running dry early
+/// means a thread died without reporting — and what it never reported, it never
+/// opened.
+fn wait_for_streams(ready: &mpsc::Receiver<bool>, expected: usize) -> usize {
+    let mut opened = 0;
+    for _ in 0..expected {
+        match ready.recv() {
+            Ok(true) => opened += 1,
+            Ok(false) => {}
+            Err(_) => break,
+        }
+    }
+    opened
 }
 
 /// Copy samples from `read_pos` to end, then advance the cursor.
@@ -740,6 +808,54 @@ mod tests {
         assert_eq!(sr, 16_000);
         assert_eq!(m2, mic);
         assert_eq!(s2, sys);
+    }
+
+    /// One stream that opened is a recording; none is not. The mixed case is
+    /// what keeps a two-channel meeting whose microphone failed working exactly
+    /// as it does today — half a recording rather than a refusal.
+    #[test]
+    fn a_recording_needs_one_stream_that_opened() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(false).unwrap();
+        tx.send(true).unwrap();
+        assert_eq!(wait_for_streams(&rx, 2), 1);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(false).unwrap();
+        drop(tx);
+        assert_eq!(wait_for_streams(&rx, 1), 0);
+    }
+
+    /// A worker that died before reporting must not leave the start waiting on
+    /// a message nobody is left to send.
+    #[test]
+    fn a_worker_that_never_reported_does_not_hang_the_start() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(true).unwrap();
+        // One reported and let go of its sender; the other went down without
+        // saying anything, which is the channel closing a report short.
+        drop(tx);
+        assert_eq!(wait_for_streams(&rx, 2), 1);
+    }
+
+    /// Neither channel selected opens no device at all, and the recorder says
+    /// so rather than running with no worker behind it. `domain::gate` refuses
+    /// this before the user can reach it; this is the floor under that.
+    #[test]
+    fn starting_with_both_channels_off_is_refused() {
+        let rec = DualChannelRecorder::new();
+        let dir = tempdir().unwrap();
+        let started = rec.start(
+            dir.path().join("nothing.wav"),
+            ChannelSelection {
+                me: false,
+                others: false,
+            },
+            None,
+            None,
+        );
+        assert!(started.is_err());
+        assert!(!rec.is_recording());
     }
 
     /// A channel that was switched off never produced a sample, and the file
