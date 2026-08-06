@@ -383,8 +383,7 @@ impl DualChannelRecorder {
         // without reporting would leave the channel open on a copy nobody is
         // holding and the loop below with nothing to end it.
         drop(ready_tx);
-        let opened = wait_for_streams(&ready_rx, workers.len());
-        if opened == 0 {
+        if !streams_are_running(&ready_rx, workers.len(), STREAM_READY_TIMEOUT) {
             // Refused only when nothing opened, never when something did: a
             // two-channel meeting whose microphone failed still has the room,
             // and half a recording beats none. With one channel selected the
@@ -561,25 +560,44 @@ fn elapsed(start: Option<Instant>, before_ms: u64, paused: bool, now: Instant) -
     }
 }
 
-/// How many of the `expected` workers reported a stream they had opened.
+/// How long `start` waits to hear that its streams are open.
 ///
-/// Lifted out of `start` for the reason `elapsed` above it is: the decision is
+/// Slack rather than a budget: opening a capture stream is tens of
+/// milliseconds, and a device that is going to refuse refuses about as quickly.
+/// It is bounded at all because a wedged driver can block inside the backend
+/// without ever returning or erroring, and this wait runs on the thread that
+/// answers the Record button.
+const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Whether `start` may call the capture running: did any of the `expected`
+/// workers report a stream it had opened.
+///
+/// Lifted out of `start` for the reason `elapsed` above it is — the decision is
 /// worth testing and the thing that produces the reports needs an audio device.
 ///
-/// A closed channel ends the count instead of waiting on it. Every worker sends
+/// Three ways out, and only one of them is the full count:
+///
+/// A closed channel is a thread that died without reporting. Every worker sends
 /// once and drops its sender straight after, so the channel running dry early
-/// means a thread died without reporting — and what it never reported, it never
-/// opened.
-fn wait_for_streams(ready: &mpsc::Receiver<bool>, expected: usize) -> usize {
-    let mut opened = 0;
+/// means nothing more is coming — and what was never reported was never opened.
+///
+/// A timeout is a backend still inside its own `open`, which is the one thing
+/// this cannot get an answer about. It is answered the way the recorder
+/// answered before the handshake existed: let the recording run. Refusing would
+/// take a meeting away from a device that was about to work, and waiting would
+/// leave the window on a Record button that never comes back.
+fn streams_are_running(ready: &mpsc::Receiver<bool>, expected: usize, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut opened = 0usize;
     for _ in 0..expected {
-        match ready.recv() {
+        match ready.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(true) => opened += 1,
             Ok(false) => {}
-            Err(_) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => return true,
         }
     }
-    opened
+    opened > 0
 }
 
 /// Copy samples from `read_pos` to end, then advance the cursor.
@@ -818,12 +836,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         tx.send(false).unwrap();
         tx.send(true).unwrap();
-        assert_eq!(wait_for_streams(&rx, 2), 1);
+        assert!(streams_are_running(&rx, 2, STREAM_READY_TIMEOUT));
 
         let (tx, rx) = mpsc::channel();
         tx.send(false).unwrap();
         drop(tx);
-        assert_eq!(wait_for_streams(&rx, 1), 0);
+        assert!(!streams_are_running(&rx, 1, STREAM_READY_TIMEOUT));
     }
 
     /// A worker that died before reporting must not leave the start waiting on
@@ -835,7 +853,19 @@ mod tests {
         // One reported and let go of its sender; the other went down without
         // saying anything, which is the channel closing a report short.
         drop(tx);
-        assert_eq!(wait_for_streams(&rx, 2), 1);
+        assert!(streams_are_running(&rx, 2, STREAM_READY_TIMEOUT));
+    }
+
+    /// A backend wedged inside its own `open` never reports and never lets go
+    /// of its sender, so the wait has to end on its own — this runs on the
+    /// thread that answers the Record button. It ends the way the recorder
+    /// behaved before the handshake existed: the recording runs.
+    #[test]
+    fn a_backend_that_never_answers_lets_the_recording_run() {
+        // Held, exactly as a stalled worker holds it: the channel neither
+        // delivers nor disconnects.
+        let (_tx, rx) = mpsc::channel::<bool>();
+        assert!(streams_are_running(&rx, 1, Duration::from_millis(10)));
     }
 
     /// Neither channel selected opens no device at all, and the recorder says
