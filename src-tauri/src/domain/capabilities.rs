@@ -77,7 +77,11 @@ pub fn recommend_from_probe(probe: &CapabilityProbe) -> CapabilityReport {
             "{} MB of video memory — small models only, but on the GPU.",
             vram_mb
         ));
-        ("whisper-small", "qwen3-4b-instruct")
+        // The light tier, and the note beside it is the reason. This branch
+        // starts at 3 GB, and the middle model is 2.5 GB of weights before the
+        // context and the runtime ask for anything — the rule this function
+        // sizes by is what has to be resident at once, not what fits on paper.
+        ("whisper-small", "qwen2.5-0.5b")
     } else if cores >= 8 {
         notes.push("No usable GPU — running on the CPU, which has cores to spare.".into());
         ("whisper-small", "qwen2.5-0.5b")
