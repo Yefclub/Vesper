@@ -229,25 +229,6 @@ impl AppSettings {
         Ok(())
     }
 
-    /// Repoint a stored model id that has left the catalog.
-    ///
-    /// Settings hold an id, and the catalog is what gives an id a digest. Drop
-    /// an id from the catalog and `catalog_sha256` returns `None`, so weights
-    /// already on disk stop verifying, the summary quietly falls back to the
-    /// extractive one, and the picker offers nothing that matches what is
-    /// stored. The replacement is named here instead, which lands the user on
-    /// a model the app can still describe and download.
-    pub fn migrate_model_ids(&mut self) {
-        let replacement = match self.local_llm_model.as_str() {
-            "qwen2.5-1.5b" => Some("llama32-1b"),
-            "qwen2.5-3b" => Some("llama32-3b"),
-            _ => None,
-        };
-        if let Some(id) = replacement {
-            self.local_llm_model = id.into();
-        }
-    }
-
     pub fn set_reasoning(&mut self, enabled: bool) {
         self.reasoning_enabled = enabled;
     }
@@ -270,6 +251,60 @@ impl AppSettings {
             Some(k) if !k.trim().is_empty() => Ok(()),
             _ => Err(SettingsError::MissingOpenRouterKey),
         }
+    }
+
+    /// Move a selection off a model the catalogue no longer offers.
+    ///
+    /// The catalogue was cut to three tiers per engine, and four of the models
+    /// that went were removed over their licence rather than their quality —
+    /// somebody is running one right now. Leaving the row pointing at an id
+    /// nothing knows about is the worst of the options: the file is still on
+    /// disk, `catalog_sha256` answers `None` for it, so it can never be
+    /// verified, and the gate refuses to record with a reason naming a model
+    /// the picker does not list. A dead end with no way out of it from inside
+    /// the app.
+    ///
+    /// So the pick moves to the nearest surviving tier, and the weights are left
+    /// exactly where they are. Deleting gigabytes somebody paid for in bandwidth
+    /// because the licence changed under them is not this function's business,
+    /// and the file is theirs.
+    ///
+    /// Returns what was replaced, so the window can say so rather than quietly
+    /// summarising with a different model than it did yesterday.
+    pub fn migrate_retired_models(&mut self) -> Vec<(String, String)> {
+        // Nearest by size within the same engine, which is the axis the user
+        // chose on: whoever picked the 3B wanted the big one and gets the new
+        // big one, not the smallest thing that still exists.
+        // By the tier the user was on rather than by file size. Somebody
+        // running the middle model wanted the middle one; landing them on the
+        // smallest thing that still exists because it happens to be nearest in
+        // megabytes is not the same answer.
+        //
+        // This is also the only table now. `load_settings` used to run a second
+        // one that mapped `qwen2.5-1.5b` onto `llama32-1b` — an id this change
+        // retires — so a 1.5B user reached here already renamed and took the
+        // wrong exit. Two migrations chained in the wrong order is how a middle
+        // tier becomes the smallest one without anybody deciding that.
+        const RETIRED: &[(&str, &str)] = &[
+            ("whisper-base", "whisper-small"),
+            ("llama32-1b", "qwen3-4b-instruct"),
+            ("llama32-3b", "qwen3-4b-instruct"),
+            ("gemma3-4b", "qwen3-4b-instruct"),
+            ("qwen2.5-1.5b", "qwen3-4b-instruct"),
+            ("qwen2.5-3b", "mistral-7b-instruct"),
+        ];
+        let mut moved = Vec::new();
+        for (from, to) in RETIRED {
+            if self.local_stt_model == *from {
+                self.local_stt_model = (*to).into();
+                moved.push(((*from).to_string(), (*to).to_string()));
+            }
+            if self.local_llm_model == *from {
+                self.local_llm_model = (*to).into();
+                moved.push(((*from).to_string(), (*to).to_string()));
+            }
+        }
+        moved
     }
 
     pub fn validate_models(&self) -> Result<(), SettingsError> {
@@ -313,6 +348,77 @@ impl AppSettings {
 mod tests {
     use super::*;
 
+    /// Every retirement has to land on something the catalogue still lists, or
+    /// the migration swaps one dead end for another.
+    #[test]
+    fn every_retirement_lands_on_a_model_that_exists() {
+        let offered: Vec<String> = crate::models::list_models()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        for from in [
+            "whisper-base",
+            "llama32-1b",
+            "llama32-3b",
+            "gemma3-4b",
+            "qwen2.5-1.5b",
+            "qwen2.5-3b",
+        ] {
+            let mut s = AppSettings {
+                local_stt_model: from.into(),
+                local_llm_model: from.into(),
+                ..AppSettings::default()
+            };
+            let moved = s.migrate_retired_models();
+            assert!(!moved.is_empty(), "`{from}` was not migrated");
+            assert!(
+                offered.contains(&s.local_stt_model),
+                "stt landed on `{}`, which the catalogue does not offer",
+                s.local_stt_model
+            );
+            assert!(
+                offered.contains(&s.local_llm_model),
+                "llm landed on `{}`, which the catalogue does not offer",
+                s.local_llm_model
+            );
+        }
+    }
+
+    /// A pick the catalogue still offers is left exactly where it is — the
+    /// migration must not reshuffle somebody who is happy.
+    #[test]
+    fn a_current_model_is_not_migrated() {
+        let mut s = AppSettings::default();
+        let before = (s.local_stt_model.clone(), s.local_llm_model.clone());
+        assert!(s.migrate_retired_models().is_empty());
+        assert_eq!(
+            (s.local_stt_model.clone(), s.local_llm_model.clone()),
+            before
+        );
+    }
+
+    /// The shipped defaults have to be in the catalogue too. A default naming a
+    /// model that was dropped is the same dead end, reached by a fresh install
+    /// rather than by an upgrade.
+    #[test]
+    fn the_defaults_are_models_the_catalogue_offers() {
+        let offered: Vec<String> = crate::models::list_models()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        let s = AppSettings::default();
+        assert!(
+            offered.contains(&s.local_stt_model),
+            "{}",
+            s.local_stt_model
+        );
+        assert!(
+            offered.contains(&s.local_llm_model),
+            "{}",
+            s.local_llm_model
+        );
+    }
+
     #[test]
     fn default_is_local_offline() {
         let s = AppSettings::default();
@@ -332,24 +438,29 @@ mod tests {
         assert!(s.switch_stt(SttProvider::Local).is_ok());
     }
 
+    /// The chain that used to exist: `load_settings` renamed `qwen2.5-1.5b` to
+    /// `llama32-1b`, and this then had to decide what `llama32-1b` meant. Both
+    /// land on the same tier now, whichever door the row came through.
     #[test]
-    fn a_model_that_left_the_catalog_is_repointed() {
+    fn the_middle_tier_stays_the_middle_tier() {
+        for from in ["qwen2.5-1.5b", "llama32-1b", "llama32-3b", "gemma3-4b"] {
+            let mut s = AppSettings {
+                local_llm_model: from.into(),
+                ..AppSettings::default()
+            };
+            s.migrate_retired_models();
+            assert_eq!(s.local_llm_model, "qwen3-4b-instruct", "from `{from}`");
+        }
+    }
+
+    #[test]
+    fn the_biggest_stays_the_biggest() {
         let mut s = AppSettings {
             local_llm_model: "qwen2.5-3b".into(),
             ..AppSettings::default()
         };
-        s.migrate_model_ids();
-        assert_eq!(s.local_llm_model, "llama32-3b");
-    }
-
-    #[test]
-    fn a_model_still_in_the_catalog_is_left_alone() {
-        let mut s = AppSettings {
-            local_llm_model: "qwen2.5-0.5b".into(),
-            ..AppSettings::default()
-        };
-        s.migrate_model_ids();
-        assert_eq!(s.local_llm_model, "qwen2.5-0.5b");
+        s.migrate_retired_models();
+        assert_eq!(s.local_llm_model, "mistral-7b-instruct");
     }
 
     #[test]

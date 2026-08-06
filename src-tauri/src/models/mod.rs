@@ -38,6 +38,14 @@ pub struct ModelInfo {
     /// Expected SHA-256 of the artifact served by `download_url`.
     /// Taken from the Hugging Face LFS oid, which is the file digest.
     pub sha256: String,
+    /// The licence the weights are published under, as an SPDX identifier.
+    ///
+    /// Carried so the picker can say it. The application chooses a model for the
+    /// user on first run and downloads it on their behalf, which makes it the
+    /// thing telling them what they have agreed to — and the catalogue is small
+    /// enough now that every answer is `MIT` or `Apache-2.0`, so the line is one
+    /// word rather than a dialog nobody reads.
+    pub license: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,28 +115,63 @@ impl DownloadProgress {
 /// point the downloader somewhere else: a model artifact is parsed by whisper.cpp and
 /// llama.cpp, so an attacker-chosen file is an attacker-chosen input to a C++ parser.
 pub fn list_models() -> Vec<ModelInfo> {
+    // Three tiers per engine — light, middle, heavy — and every one of them on a
+    // licence that lets the person who installed this use it for their work.
+    //
+    // The licences are the reason the list is this short rather than a taste for
+    // tidiness. What was here before offered Qwen2.5 3B under the Qwen Research
+    // License, which is **non-commercial**, and Llama 3.2 and Gemma 3 under terms
+    // that carry naming obligations and use restrictions. The application picked
+    // one of those for the user, downloaded it on their behalf, and never showed
+    // them a word of it. Whisper is MIT and everything below is Apache-2.0, so
+    // there is nothing left to disclose that the picker cannot say in a line.
+    //
+    // The ladder is measured, not ranked by release date, and the measurement is
+    // the same one the previous ladder recorded: this application's real summary
+    // prompt, a real Portuguese transcript, greedy sampling, the 512-token budget
+    // `summarize` actually passes.
+    //
+    // | model                     | size    | time   | prose      | headings |
+    // |---------------------------|---------|--------|------------|----------|
+    // | Qwen2.5 0.5B              | 491 MB  | 10.3s  | Portuguese | correct  |
+    // | Qwen3 4B Instruct 2507    | 2.5 GB  | 11.2s  | Portuguese | correct  |
+    // | Mistral 7B Instruct v0.3  | 4.4 GB  | 16.0s  | Portuguese | correct  |
+    //
+    // Two models were measured and rejected, and both are worth writing down so
+    // nobody spends the download again:
+    //
+    // - **Qwen3 4B and 8B, the thinking releases.** Unusable here, not merely
+    //   worse. A thinking model spends the token budget reasoning before it
+    //   answers, and 512 tokens is not enough for both — the answer came back
+    //   empty, `done_reason: length`. Turning thinking off does not rescue it:
+    //   with the flag off *and* `/no_think` in the prompt it deliberates in
+    //   English prose inside the answer instead, hits the same ceiling, and emits
+    //   no headings at all, which collapses the whole summary into one section.
+    // - **Qwen2.5 1.5B**, which the previous ladder had already caught answering
+    //   in English against a prompt that asks twice for Portuguese.
+    //
+    // Mistral 7B is the heavy tier on size and licence rather than on this
+    // transcript: it was slower and got one causal relation backwards that the
+    // 4B got right — it named the missing progress bar as the *cause* of the
+    // support tickets, where the transcript has it as the fix. One transcript is
+    // evidence and not proof, and a 7B has room the 4B does not on a long meeting,
+    // so it stays as the tier somebody with the memory for it can choose.
     let catalog = [
         (
             "whisper-tiny",
             "stt",
             "Whisper Tiny (local STT, ggml)",
+            "MIT",
             // Official ggerganov whisper.cpp release asset (direct ggml binary)
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
             77_691_713u64,
             "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
         ),
         (
-            "whisper-base",
-            "stt",
-            "Whisper Base (local STT, ggml)",
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-            147_951_465u64,
-            "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
-        ),
-        (
             "whisper-small",
             "stt",
             "Whisper Small (local STT, ggml)",
+            "MIT",
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
             487_601_967u64,
             "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
@@ -137,6 +180,7 @@ pub fn list_models() -> Vec<ModelInfo> {
             "whisper-large-v3-turbo",
             "stt",
             "Whisper Large v3 Turbo (local STT, ggml)",
+            "MIT",
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
             1_624_555_275u64,
             "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
@@ -145,57 +189,42 @@ pub fn list_models() -> Vec<ModelInfo> {
             "qwen2.5-0.5b",
             "llm",
             "Qwen2.5 0.5B Instruct Q4_K_M (local LLM)",
+            "Apache-2.0",
             "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
             491_400_032u64,
             "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
         ),
-        // The ladder above 0.5B is Llama 3.2 and Gemma 3, and it got there by
-        // measurement rather than by release date. Summarising the same real
-        // Portuguese transcript with the same prompt this app sends, on one
-        // RTX 4070:
-        //
-        // | model            | size   | CUDA  | prose      |
-        // |------------------|--------|-------|------------|
-        // | Qwen2.5 0.5B     | 469 MB | 1.22s | Portuguese |
-        // | Llama 3.2 1B     | 807 MB | 2.38s | Portuguese |
-        // | Qwen2.5 1.5B     | 1.1 GB | 2.95s | **English**|
-        // | Llama 3.2 3B     | 2.0 GB | 4.32s | Portuguese |
-        // | Gemma 3 4B       | 2.5 GB | 6.40s | Portuguese |
-        //
-        // The prompt says "write all prose in Brazilian Portuguese"; Qwen2.5
-        // 1.5B answered in English anyway, and it was the model recommended to
-        // most machines with a GPU. Llama 3.2 1B replaces it at a third less
-        // weight and half a second less time. Sampling is greedy, so these runs
-        // reproduce, but they are one transcript — the ranking is evidence, not
-        // proof.
         (
-            "llama32-1b",
+            "qwen3-4b-instruct",
             "llm",
-            "Llama 3.2 1B Instruct Q4_K_M (local LLM)",
-            "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-            807_694_464u64,
-            "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
+            "Qwen3 4B Instruct 2507 Q4_K_M (local LLM)",
+            "Apache-2.0",
+            // The 2507 refresh is the non-thinking half of Qwen3 and the reason
+            // this line is usable at all. Qwen publishes GGUF for the thinking
+            // releases and not for these, so the artifact comes from unsloth,
+            // which is where the Llama and Gemma entries came from too — and the
+            // digest below is what makes the source a convenience rather than a
+            // thing to trust.
+            "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+            2_497_281_120u64,
+            "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
         ),
         (
-            "llama32-3b",
+            "mistral-7b-instruct",
             "llm",
-            "Llama 3.2 3B Instruct Q4_K_M (local LLM)",
-            "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-            2_019_377_696u64,
-            "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
-        ),
-        (
-            "gemma3-4b",
-            "llm",
-            "Gemma 3 4B Instruct Q4_K_M (local LLM)",
-            "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
-            2_489_894_016u64,
-            "04a43a22e8d2003deda5acc262f68ec1005fa76c735a9962a8c77042a74a7d19",
+            "Mistral 7B Instruct v0.3 Q4_K_M (local LLM)",
+            "Apache-2.0",
+            "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+            4_372_812_000u64,
+            "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
         ),
         (
             "cuda-backend",
             "backend",
             "CUDA (NVIDIA) — aceleração opcional",
+            // Vesper's own build of llama.cpp and whisper.cpp against the CUDA
+            // toolkit. MIT, like the two projects it is built from.
+            "MIT",
             // Built by `.github/workflows/cuda-pack.yml` and published on its
             // own tag. Pinned to a release rather than to `latest`, so the file
             // this digest describes is the file that gets downloaded.
@@ -209,7 +238,7 @@ pub fn list_models() -> Vec<ModelInfo> {
         // The CUDA pack is built on Windows and carries `.dll`s. Offering it
         // anywhere else is offering a download that cannot be used.
         .filter(|(_, kind, ..)| *kind != "backend" || cfg!(windows))
-        .map(|(id, kind, label, url, size, sha256)| {
+        .map(|(id, kind, label, license, url, size, sha256)| {
             let path = model_artifact_path(id, kind);
             // For a pack, "present" is the unpacked libraries: the archive is
             // deleted once it has been read, so asking whether it is still
@@ -243,6 +272,7 @@ pub fn list_models() -> Vec<ModelInfo> {
                 path: path.display().to_string(),
                 download_url: Some(url.into()),
                 size_hint_bytes: Some(size),
+                license: license.into(),
                 sha256: sha256.into(),
             }
         })
@@ -925,6 +955,38 @@ mod tests {
         );
     }
 
+    /// The rule the catalogue was cut down to enforce. Vesper picks a model for
+    /// the user on first run and downloads it on their behalf, so a licence that
+    /// forbids their work, or demands attribution nobody showed them, is
+    /// something the application did to them rather than something they chose.
+    ///
+    /// An allow-list rather than a "not this one" list: the way this breaks is a
+    /// future entry arriving under terms nobody read, and only naming what is
+    /// permitted catches that.
+    #[test]
+    fn every_catalog_entry_is_permissively_licensed() {
+        const ALLOWED: &[&str] = &["MIT", "Apache-2.0"];
+        for m in list_models() {
+            assert!(
+                ALLOWED.contains(&m.license.as_str()),
+                "`{}` is offered under `{}`, which is not on the allow-list",
+                m.id,
+                m.license
+            );
+        }
+    }
+
+    /// Three tiers per engine, which is what makes the picker a choice rather
+    /// than a list to read. A fourth is not a bug in itself — it is a sign the
+    /// ladder stopped being a ladder, and it should be argued for here.
+    #[test]
+    fn the_ladder_is_three_deep() {
+        for kind in ["stt", "llm"] {
+            let n = list_models().iter().filter(|m| m.kind == kind).count();
+            assert_eq!(n, 3, "`{kind}` offers {n} models");
+        }
+    }
+
     #[test]
     fn sha256_comparison_rejects_a_different_artifact() {
         let dir = tempdir().unwrap();
@@ -973,7 +1035,7 @@ mod tests {
         assert!(!artifact_is_verified(&artifact, "whisper-tiny"));
 
         // Marker from a different model must not vouch for this one.
-        write_artifact_marker(&artifact, &catalog_sha256("whisper-base").unwrap()).unwrap();
+        write_artifact_marker(&artifact, &catalog_sha256("whisper-small").unwrap()).unwrap();
         assert!(!artifact_is_verified(&artifact, "whisper-tiny"));
 
         write_artifact_marker(&artifact, &expected).unwrap();

@@ -133,6 +133,10 @@ fn en_dict() -> HashMap<&'static str, &'static str> {
         ("model.continue", "Continue"),
         ("gate.fix", "Open settings"),
         ("live.stt_failing", "Transcription is failing. The recording is still being captured and saved."),
+        (
+            "model.retired",
+            "{from} is no longer offered, so Vesper switched to {to}. The old file is still on disk.",
+        ),
         ("silence.title", "Still there?"),
         ("silence.body", "Nobody has said anything for three minutes. Vesper stops recording in five unless you answer — or just start talking."),
         ("silence.keep", "Keep recording"),
@@ -403,6 +407,10 @@ fn pt_dict() -> HashMap<&'static str, &'static str> {
         ("model.continue", "Continuar"),
         ("gate.fix", "Abrir configurações"),
         ("live.stt_failing", "A transcrição está falhando. A gravação continua sendo capturada e salva."),
+        (
+            "model.retired",
+            "O {from} não é mais oferecido, então a Vesper passou para o {to}. O arquivo antigo continua no disco.",
+        ),
         ("silence.title", "Ainda aí?"),
         ("silence.body", "Ninguém falou nada há três minutos. A Vesper para de gravar em cinco, a menos que você responda — ou simplesmente volte a falar."),
         ("silence.keep", "Continuar gravando"),

@@ -107,6 +107,14 @@ pub struct AppState {
     /// Both live here rather than in the segmenter: it drops silence without
     /// counting it, which is right for transcription and useless for noticing
     /// that a room has been empty for three minutes.
+    /// Picks moved off a model the catalogue no longer offers, waiting to be
+    /// said out loud once.
+    ///
+    /// The migration runs in `new`, before there is a window to tell — and a
+    /// summary written by a different model than yesterday's is not something
+    /// to leave in a log file. Drained by the command that reads it, so the
+    /// notice appears once rather than at every launch.
+    pub retired_models: Mutex<Vec<(String, String)>>,
     pub vigil: Mutex<crate::domain::silence::Vigil>,
     pub last_speech_ms: AtomicU64,
     pub stt: SttService,
@@ -119,8 +127,32 @@ impl AppState {
         let data = crate::paths::app_data_dir();
         let db = Database::open(&data)?;
         let mut settings = db.load_settings().unwrap_or_default();
+        // Before anything reads the pick. A row still naming a model the
+        // catalogue dropped cannot be verified and cannot be recorded with, and
+        // the picker does not list it — so the user would find the application
+        // refusing to record over a model they can neither fix nor see.
+        //
+        // Written back, not only held: the next save would otherwise carry the
+        // dead id again from whatever the drawer had loaded.
+        let retired = settings.migrate_retired_models();
         let (key, in_keychain) = load_or_migrate_api_key(&db);
         settings.openrouter_api_key = key;
+        // After the key is resolved, and told where the key lives. Writing the
+        // row before this point would have written it with whatever
+        // `load_settings` happened to return and a `Keychain` home — which is
+        // how the row drops its copy, and at that moment the row is still the
+        // only copy on a machine whose keychain has not answered yet.
+        if !retired.is_empty() {
+            for (from, to) in &retired {
+                tracing::info!("model `{from}` is no longer offered — moved to `{to}`");
+            }
+            let home = if in_keychain {
+                KeyHome::Keychain
+            } else {
+                KeyHome::KeepInRow
+            };
+            let _ = db.save_settings_with(&settings, home);
+        }
         Ok(Self {
             db,
             recorder: DualChannelRecorder::new(),
@@ -135,6 +167,7 @@ impl AppState {
             live_stt_passes: Mutex::new(HashSet::new()),
             segmenters: Mutex::new(HashMap::new()),
             modal_open: AtomicBool::new(false),
+            retired_models: Mutex::new(retired),
             vigil: Mutex::new(crate::domain::silence::Vigil::default()),
             last_speech_ms: AtomicU64::new(0),
             stt: SttService::new(),
@@ -1671,6 +1704,16 @@ fn spawn_live_stt_ticker(app: AppHandle, state: Arc<AppState>) {
 /// Whatever they clicked, they are there. The clock of quiet restarts too, not
 /// only the state — otherwise the next tick would find three minutes of silence
 /// still on the counter and ask again immediately.
+/// Picks that were moved off a model the catalogue no longer offers.
+///
+/// Drained: the window asks once at startup and shows what it gets, and a
+/// notice repeated at every launch about a change made months ago is noise.
+/// Nothing else reads this, so taking it is not losing it.
+#[tauri::command]
+pub fn retired_models(state: State<'_, Arc<AppState>>) -> Vec<(String, String)> {
+    std::mem::take(&mut *state.retired_models.lock())
+}
+
 #[tauri::command]
 pub fn keep_recording(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // Both under the vigil lock, which guards the pair: the watcher reads the
