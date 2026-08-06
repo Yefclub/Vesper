@@ -43,6 +43,21 @@ pub struct AppSettings {
     /// be enforced by somebody who wants it enforced.
     #[serde(default)]
     pub offline_mode: bool,
+    /// Ask GitHub at launch whether a newer version exists, and fetch the
+    /// installer when one does.
+    ///
+    /// Defaults on, including for rows written before it existed: an application
+    /// that stops telling people about a fix is a worse default than one request
+    /// per launch. Offline mode already refused this, but only by refusing
+    /// everything — somebody who wants a cloud model and no version check had no
+    /// way to say so.
+    ///
+    /// `#[serde(default = ...)]` is load-bearing for the reason the fields below
+    /// already state: `AppState::new` reads the row with `unwrap_or_default()`,
+    /// so a field this struct requires and an older row does not carry would
+    /// reset every existing user's settings in silence.
+    #[serde(default = "default_true")]
+    pub auto_update_check: bool,
     /// Base URL of the OpenAI-compatible server, e.g. `http://localhost:11434/v1`.
     /// Checked by `domain::endpoint` before it is used, never on the way in: a
     /// settings file written by an older build must still load.
@@ -174,6 +189,7 @@ impl Default for AppSettings {
             reasoning_enabled: false,
             auto_summarize: true,
             offline_mode: false,
+            auto_update_check: true,
             // Ollama's own default, which is the server most people already
             // have running.
             endpoint_base_url: "http://localhost:11434/v1".into(),
@@ -573,6 +589,52 @@ mod tests {
         assert!(s.final_stt_pass);
         assert!(s.hot_words.is_empty());
         assert!(s.wants_final_stt_pass());
+    }
+
+    /// A fresh install checks, and so does a row written before the switch
+    /// existed — with the rest of that row intact. The field is required by the
+    /// struct, so without its `serde` default the whole row fails to
+    /// deserialise, and `AppState::new` turns that failure into a factory-fresh
+    /// configuration: cloud provider forgotten, devices forgotten, language back
+    /// to English, and nothing on screen saying why.
+    #[test]
+    fn the_update_check_is_on_for_a_row_that_predates_it() {
+        assert!(AppSettings::default().auto_update_check);
+        let older_row = r#"{
+            "stt_provider": "local",
+            "llm_provider": "openrouter",
+            "openrouter_api_key": null,
+            "openrouter_stt_model": "openai/gpt-4o-mini-transcribe",
+            "openrouter_llm_model": "openai/gpt-4o-mini",
+            "local_stt_model": "whisper-small",
+            "local_llm_model": "qwen3-4b-instruct",
+            "reasoning_enabled": false,
+            "auto_summarize": true,
+            "language": "pt",
+            "ui_locale": "pt-BR",
+            "onboarding_complete": true,
+            "mic_device_id": "mic-1",
+            "compute_backend": "auto",
+            "confirm_before_recording": true
+        }"#;
+        let s: AppSettings = serde_json::from_str(older_row).expect("older rows must still load");
+        assert!(s.auto_update_check);
+        assert_eq!(s.llm_provider, LlmProvider::OpenRouter);
+        assert_eq!(s.ui_locale, "pt-BR");
+        assert_eq!(s.mic_device_id.as_deref(), Some("mic-1"));
+        assert!(s.onboarding_complete);
+    }
+
+    /// And a row that carries it off keeps it off — the one state a default of
+    /// `true` could quietly overwrite.
+    #[test]
+    fn a_row_that_turned_the_update_check_off_keeps_it_off() {
+        let s = AppSettings {
+            auto_update_check: false,
+            ..AppSettings::default()
+        };
+        let back: AppSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(!back.auto_update_check);
     }
 
     /// Off means off: a meeting stopped with the switch down does exactly what

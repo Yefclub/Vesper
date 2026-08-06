@@ -541,6 +541,12 @@ function AppShell({
         // about versions would be the kind of small lie that makes the rest of
         // the promise unbelievable.
         if (settings.offline_mode) return;
+        // Nor when the user has turned the check itself off, which is the
+        // narrower version of the same wish: no launch-time request, and no
+        // installer pulled behind it. It governs what happens on its own and
+        // nothing else — an update already found and offered can still be
+        // installed by clicking, because that is the user asking.
+        if (!settings.auto_update_check) return;
         // Offered, never applied on its own: installing relaunches the app, and
         // relaunching can throw away a recording in progress. Deciding that for
         // someone is not ours to do.

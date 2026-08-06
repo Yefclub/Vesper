@@ -74,6 +74,9 @@ export interface AppSettings {
   auto_summarize: boolean;
   /// Nothing this application does may reach the network.
   offline_mode: boolean;
+  /// Ask GitHub at launch whether a newer version exists, and fetch the
+  /// installer when one does. Nothing else about the update is automatic.
+  auto_update_check: boolean;
   language: string;
   ui_locale: string;
   /** `light` | `dark`. Optional because the field lands with the backend change;

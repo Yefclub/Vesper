@@ -254,6 +254,11 @@ fn en_dict() -> HashMap<&'static str, &'static str> {
         ("update.offline", "Offline mode is on, so the update was not downloaded."),
         ("settings.offline_mode_on", "Cloud models, cloud transcription, model downloads and update checks are all refused while this is on. Local models keep working, and so does a server on this machine or this network."),
         ("settings.offline_hides", "Offline mode is on, so the cloud options are not shown."),
+        ("settings.auto_update_check", "Check for updates at launch"),
+        // Said as "we did not look", never as "there is nothing". A user who
+        // turned the check off is owed the difference, and the address so that
+        // turning it off is not a dead end.
+        ("settings.auto_update_check_off", "Vesper does not contact github.com and will not tell you when a new version exists. New releases are at github.com/Yefclub/Vesper/releases."),
         // The egress badge. Rendered only while something is actually leaving,
         // so each one names what does.
         ("egress.audio", "Audio leaves this machine"),
@@ -523,6 +528,8 @@ fn pt_dict() -> HashMap<&'static str, &'static str> {
         ("update.offline", "Modo offline está ligado, então a atualização não foi baixada."),
         ("settings.offline_mode_on", "Modelos de nuvem, transcrição na nuvem, download de modelo e verificação de atualização são todos recusados enquanto isso estiver ligado. Modelos locais continuam funcionando, e um servidor nesta máquina ou nesta rede também."),
         ("settings.offline_hides", "Modo offline está ligado, então as opções de nuvem não aparecem."),
+        ("settings.auto_update_check", "Verificar atualizações ao iniciar"),
+        ("settings.auto_update_check_off", "O Vesper não contata o github.com e não vai avisar quando existir uma versão nova. As versões ficam em github.com/Yefclub/Vesper/releases."),
         ("egress.audio", "Áudio sai desta máquina"),
         ("egress.text", "Texto sai desta máquina"),
         ("egress.both", "Áudio e texto saem desta máquina"),
