@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -62,36 +63,47 @@ def signature(tag: str, name: str, work: Path) -> str:
     return out.read_text(encoding="utf-8").strip()
 
 
-def build(tag: str, version: str, notes: str, pub_date: str, work: Path) -> dict:
+def build(
+    tag: str, version: str, notes: str, pub_date: str, built_after: str, work: Path
+) -> dict:
     have = {a["name"]: a for a in assets(tag)}
     # Only this version's artifacts. A release whose assets are replaced in
     # place — the dev channel is one — still holds every previous build, and
     # matching on the extension alone would pick whichever sorted first.
-    mine = {n: a for n, a in have.items() if version in n}
+    #
+    # Bounded on both sides, because a bare `in` is wrong in a way that reads
+    # fine: `0.3.0-1` is inside `0.3.0-10`, so re-running an old build after a
+    # newer one would produce a manifest labelled `0.3.0-1` pointing at the
+    # `-10` installer. Every bundler here puts a separator either side.
+    token = re.compile(rf"[_\-.]{re.escape(version)}[_\-.]")
+    mine = {n: a for n, a in have.items() if token.search(n)}
     if not mine:
         sys.exit(f"{tag} holds no artifact naming version {version}")
-    # macOS is the exception and it has to be handled rather than filtered out:
-    # `Vesper_aarch64.app.tar.gz` carries no version, so there is one of them and
-    # each build overwrites it. Taking it on the name alone would hand back the
-    # previous build's bundle whenever the macOS job failed, which is the bug
-    # this file exists to stop — so it has to be newer than this build's own
-    # artifacts to count.
-    floor = min(a["updatedAt"] for a in mine.values())
     platforms: dict[str, dict] = {}
     for base, bundles in WANTED.items():
         for suffix, ext in bundles:
-            pool = mine if any(version in n for n in have if n.endswith(ext)) else have
+            # macOS is the exception and has to be handled rather than filtered
+            # out: `Vesper_aarch64.app.tar.gz` carries no version, so there is
+            # one of them and each build overwrites it.
+            versioned = any(token.search(n) for n in have if n.endswith(ext))
+            pool = mine if versioned else have
             artifact = next(
                 (n for n in sorted(pool) if n.endswith(ext) and not n.endswith(".sig")),
                 None,
             )
             if artifact is None:
                 continue
-            if pool is have and have[artifact]["updatedAt"] < floor:
+            # An unversioned name is only this build's if this build wrote it.
+            # Compared against when the run started rather than against the other
+            # artifacts: the jobs finish in whatever order the runners allow, and
+            # on the build this was written for macOS finished first — so a floor
+            # taken from its siblings would have rejected a bundle that was
+            # perfectly current.
+            if not versioned and have[artifact]["updatedAt"] < built_after:
                 sys.exit(
-                    f"{artifact} is older than the rest of {version} "
-                    f"({have[artifact]['updatedAt']} < {floor}) — its build did not "
-                    "replace it, and the manifest would ship the previous one"
+                    f"{artifact} predates this run ({have[artifact]['updatedAt']} < "
+                    f"{built_after}) — its build did not replace it, and the manifest "
+                    "would ship the previous one"
                 )
             sig_name = artifact + ".sig"
             if sig_name not in have:
@@ -124,12 +136,18 @@ def main() -> None:
     p.add_argument("--version", required=True, help="version string the manifest declares")
     p.add_argument("--notes", default="")
     p.add_argument("--pub-date", required=True, help="RFC 3339, from the workflow")
+    p.add_argument(
+        "--built-after",
+        required=True,
+        help="RFC 3339 start of the run; an unversioned artifact older than this "
+        "belongs to a previous build",
+    )
     p.add_argument("--work", default=".manifest", help="where signatures are downloaded")
     a = p.parse_args()
 
     work = Path(a.work)
     work.mkdir(parents=True, exist_ok=True)
-    manifest = build(a.tag, a.version, a.notes, a.pub_date, work)
+    manifest = build(a.tag, a.version, a.notes, a.pub_date, a.built_after, work)
 
     out = work / "latest.json"
     out.write_text(json.dumps(manifest, indent=2), encoding="utf-8", newline="\n")

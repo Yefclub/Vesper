@@ -161,6 +161,14 @@ jobs:
           releaseDraft: false
           prerelease: true
           args: ${{ matrix.args }}
+          # Never from a build. Three jobs writing one `latest.json` is the
+          # race this change exists to end, and skipping the `manifest` job
+          # on a partial failure would otherwise leave whichever child did
+          # finish holding the release's manifest, describing a build that
+          # is not complete. With nobody writing it here, a failed matrix
+          # leaves the previous manifest untouched — which is the honest
+          # outcome, because no new build finished.
+          includeUpdaterJson: false
 
   # The manifest is written here rather than by the builds, and the reason is a
   # real failure: on `dev-10` the Windows job finished last, at 01:39:39 against
@@ -179,8 +187,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # When this run began, from the API rather than from a context
+          # variable — there is none — because the macOS bundle carries no
+          # version in its name and this is what proves the one in the release
+          # belongs to this build.
+          started=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .run_started_at)
+          version="$(python -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")-${GITHUB_RUN_NUMBER}"
           python scripts/updater-manifest.py \
             --tag dev-channel \
-            --version "$(python -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")-${GITHUB_RUN_NUMBER}" \
+            --version "$version" \
             --notes "Build of ${GITHUB_REF_NAME} from the integration branch." \
-            --pub-date "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+            --pub-date "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+            --built-after "$started"
