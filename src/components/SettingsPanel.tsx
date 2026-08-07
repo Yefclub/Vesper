@@ -801,6 +801,28 @@ export function SettingsPanel({
                     {t("settings.offline_mode_on")}
                   </p>
                 )}
+                {/* Directly under the switch above, because the sentence that
+                    switch prints already names update checks among the things it
+                    refuses — somebody who reads that and wants only this part
+                    stopped should find the narrower control without going
+                    looking. Not hidden while offline mode is on, for the same
+                    reason: it is the setting that still applies once the broad
+                    switch goes back down. */}
+                <CheckBox
+                  label={t("settings.auto_update_check")}
+                  checked={draft.auto_update_check}
+                  onChange={(v) =>
+                    setDraft((d) => ({ ...d, auto_update_check: v }))
+                  }
+                />
+                {/* Only while it is off, and it says Vesper did not look rather
+                    than that there was nothing to find. Those are different
+                    facts and only one of them is true here. */}
+                {!draft.auto_update_check && (
+                  <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                    {t("settings.auto_update_check_off")}
+                  </p>
+                )}
                 {/* Only while it is off. A promise about what the app does not
                     do is worth reading in the state where it applies, and is
                     noise in the state where it does not. */}

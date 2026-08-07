@@ -36,7 +36,7 @@ This is the complete list. Four situations, and one of them happens without you 
 
 | Destination | When | What it carries |
 |---|---|---|
-| `github.com` | **At every launch, on its own** — unless offline mode is on, which skips it. Vesper asks whether a newer version exists, and if one does it downloads the installer in the background so the Update button is instant. Nothing installs until you click. | The request itself, and the installer coming back. No meeting data. Offline mode is currently the only way to stop it; a switch of its own is [#77](https://github.com/Yefclub/Vesper/issues/77). |
+| `github.com` | **At every launch, on its own** — unless you turn it off. Vesper asks whether a newer version exists, and if one does it downloads the installer in the background so the Update button is instant. Nothing installs until you click. | The request itself, and the installer coming back. No meeting data. Two ways to stop it: turn off *Check for updates at launch* in Settings, which stops this and nothing else, or turn on offline mode, which stops everything. Either way no launch reaches `github.com`, and Settings says so rather than reporting that you are up to date. |
 | `huggingface.co` | You download a model in Settings | The request for that file. Origins come from a fixed internal catalogue, never from anything the interface can compose, and every download is checked against a known hash before it is loaded. |
 | A server **you** run | Only if you configure an OpenAI-compatible endpoint | Transcript text, and your notes, for summaries and chat. The address is checked: loopback and the private network ranges are accepted and anything routable on the public internet is refused, so a model on a public VPS will not work. That refusal is deliberate. A machine on your LAN is still not this machine — if that distinction matters to you, keep the endpoint on `127.0.0.1`. |
 | `openrouter.ai` | Only if you select OpenRouter as the provider | Your meeting **audio** for transcription, or transcript text for summaries. This is a third party, and it is the one place where the recording itself leaves your machine. |
@@ -126,7 +126,7 @@ CMAKE_GENERATOR=Ninja CARGO_TARGET_DIR=/c/vt cargo build --features gpu-vulkan
 
 ## Auto-update
 
-Release builds check `https://github.com/Yefclub/Vesper/releases/latest/download/latest.json`. The signing public key lives in `src-tauri/tauri.conf.json` under `plugins.updater`.
+Release builds check `https://github.com/Yefclub/Vesper/releases/latest/download/latest.json`. The signing public key lives in `src-tauri/tauri.conf.json` under `plugins.updater`. The check runs at launch and is governed by *Check for updates at launch* in Settings, on by default; turning it off also stops the installer being fetched ahead of the click.
 
 ## License
 

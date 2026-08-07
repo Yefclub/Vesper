@@ -74,6 +74,9 @@ export interface AppSettings {
   auto_summarize: boolean;
   /// Nothing this application does may reach the network.
   offline_mode: boolean;
+  /// Ask GitHub at launch whether a newer version exists, and fetch the
+  /// installer when one does. Nothing else about the update is automatic.
+  auto_update_check: boolean;
   language: string;
   ui_locale: string;
   /** `light` | `dark`. Optional because the field lands with the backend change;
@@ -329,6 +332,20 @@ export const api = {
   meetingAudioPath: (id: string) =>
     invoke<string | null>("meeting_audio_path", { id }),
   deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
+  /// The meetings the app was recording when it last stopped running — a row
+  /// left in `recording` or `paused` is one nothing came back for.
+  ///
+  /// Asked once at launch. Reading it changes nothing: until the user answers,
+  /// the recording stays exactly where it is.
+  interruptedMeetings: () => invoke<MeetingRecord[]>("interrupted_meetings"),
+  /// Finish one of them. Resolves once the whole recording has been read, which
+  /// on a long meeting is minutes — the `meeting://progress` events say where
+  /// it is up to.
+  recoverMeeting: (id: string) => invoke<MeetingRecord>("recover_meeting", { id }),
+  /// Throw one away, with its partial audio. Refused by the backend for any
+  /// meeting that is not waiting to be recovered.
+  discardInterruptedMeeting: (id: string) =>
+    invoke<void>("discard_interrupted_meeting", { id }),
   search: (query: string) => invoke<SearchHit[]>("search_meetings_cmd", { query }),
   getSettings: () => invoke<AppSettings>("get_settings"),
   saveSettings: (settings: AppSettings) => invoke<AppSettings>("save_settings", { settings }),

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Two variants rather than one because they are two different events. `Missing`
 /// is ordinary — an imported meeting whose audio was never retained, a file the
-/// user deleted, a recording still being captured. `Outside` is a row pointing
+/// user deleted. `Outside` is a row pointing
 /// somewhere it has no business pointing, which is worth a line in the log even
 /// though the window shows the same thing for both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
