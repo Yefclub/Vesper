@@ -1,4 +1,4 @@
-use crate::audio::capture::{read_dual_wav, DualChannelRecorder};
+use crate::audio::capture::{read_dual_wav, repair_wav_header, DualChannelRecorder};
 use crate::audio::decode::decode_audio_file;
 use crate::audio::devices::{list_audio_devices, AudioDevice};
 use crate::db::{Database, KeyHome};
@@ -13,6 +13,7 @@ use crate::domain::job::{
 };
 use crate::domain::overlay::{dock_at, footprints, overlay_visible, OverlayPosition};
 use crate::domain::playback::{playable_recording, Unplayable};
+use crate::domain::recovery::{interrupted, is_interrupted};
 use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, SummaryVersion};
 use crate::domain::search::SearchHit;
 use crate::domain::segmenter::{Segmenter, Utterance};
@@ -527,16 +528,23 @@ pub fn get_transcript(
 ///
 /// `None` for every way there is nothing to play: an imported meeting whose
 /// audio was not retained, a file deleted from under the app, a row pointing
-/// outside the recordings directory, and a meeting still being recorded — the
-/// recorder writes the WAV when it stops, so until then there is nothing at
-/// that path to resolve. The window shows the same thing for all of them; only
-/// the row pointing outside gets a line in the log.
+/// outside the recordings directory, and a meeting still being recorded. The
+/// window shows the same thing for all of them; only the row pointing outside
+/// gets a line in the log.
 #[tauri::command]
 pub fn meeting_audio_path(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<Option<String>, String> {
+    // Said here now, rather than left to the file not existing yet. The
+    // recording is written as it is captured, so the WAV of a meeting in
+    // progress is on disk from the first second — and handing that to the
+    // player would put a transport under a meeting nobody has finished, over a
+    // file that is still growing underneath it.
+    if state.active_meeting.lock().as_deref() == Some(id.as_str()) {
+        return Ok(None);
+    }
     let Some(stored) = state.db.get_meeting(&id)?.and_then(|m| m.audio_path) else {
         return Ok(None);
     };
@@ -994,6 +1002,10 @@ pub fn start_recording(
     // Started here rather than by the window, so transcription keeps running when
     // the window is minimized and its timers are throttled to a crawl.
     spawn_live_stt_ticker(app.clone(), Arc::clone(&state));
+    // After it, and only after: the ticker is what bumps the generation both of
+    // them are retired by, so starting this first would leave it comparing
+    // against a number that is already stale and stop it on its first tick.
+    spawn_recording_flush(Arc::clone(&state));
     // A recording can be started by the tray or the accelerator while the window
     // is already minimized, so the card has to be considered here and not only
     // when the window is minimized.
@@ -1422,6 +1434,14 @@ async fn final_stt_pass(
 /// Cadence of the backend live-STT ticker.
 const LIVE_STT_INTERVAL_MS: u64 = 1200;
 
+/// How often the recording is written to disk.
+///
+/// The same 1200ms as the live-STT tick, because that is the interval the
+/// trade was decided at: never more than that much speech held only in memory.
+/// It is a constant of its own because the two run on separate clocks — see
+/// `spawn_recording_flush`.
+const RECORDING_FLUSH_INTERVAL_MS: u64 = 1200;
+
 /// How much of the previous utterance is handed to the model as context.
 ///
 /// whisper decodes each call from nothing unless told otherwise, which is why
@@ -1667,6 +1687,41 @@ async fn drive_live_stt(app: &AppHandle, state: &Arc<AppState>) -> Result<(), St
     drop(guard);
     let _ = app.emit("transcript://append", &snapshot);
     Ok(())
+}
+
+/// Write the recording to disk for as long as this recording lasts.
+///
+/// Its own thread, and not a line inside the live-STT ticker where this began.
+/// That loop awaits a transcription before it comes back round, and a model
+/// answering in four seconds would make this a four-second tick — so the audio
+/// held only in memory would be bounded by however long the slowest chunk took,
+/// which is not a bound at all. A clock of its own is the only way the interval
+/// above is the interval.
+///
+/// A plain thread rather than a task, because the write blocks: it belongs
+/// somewhere blocking is what the thread is for, not on the async runtime the
+/// rest of the app shares.
+///
+/// Retired by generation like the live ticker, and by the same reasoning — a
+/// stop followed quickly by a start must not leave two of these writing into
+/// one file.
+fn spawn_recording_flush(state: Arc<AppState>) {
+    let generation = state.live_stt_generation.load(Ordering::SeqCst);
+    let _ = std::thread::Builder::new()
+        .name("vesper-flush".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(
+                RECORDING_FLUSH_INTERVAL_MS,
+            ));
+            if state.live_stt_generation.load(Ordering::SeqCst) != generation
+                || !state.recorder.is_recording()
+            {
+                // Nothing is lost by stopping here: `stop` writes whatever
+                // these ticks did not reach before it hands the file over.
+                break;
+            }
+            state.recorder.flush_to_disk();
+        });
 }
 
 /// Drive live transcription from the backend for as long as this recording lasts.
@@ -2167,6 +2222,160 @@ pub async fn retranscribe(
     meeting.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_meeting(&meeting)?;
     Ok(meeting)
+}
+
+/// The meetings the application was recording when it last stopped running.
+///
+/// Asked once at launch. Nothing here changes anything: the answer is an offer,
+/// and until the user takes it the recording stays exactly where it is.
+#[tauri::command]
+pub fn interrupted_meetings(state: State<'_, Arc<AppState>>) -> Result<Vec<MeetingRecord>, String> {
+    let active = state.active_meeting.lock().clone();
+    Ok(interrupted(state.db.list_meetings()?, active.as_deref()))
+}
+
+/// Finish a meeting whose recording was cut short by a crash or a kill.
+///
+/// The stop that never ran, in the order that leaves nothing stuck: the row is
+/// only moved once the transcript exists. A recovery interrupted in its turn —
+/// this reads the whole recording, which on a long meeting is minutes of work —
+/// therefore leaves a meeting that is offered again at the next launch, rather
+/// than one sitting in `Transcribing` with nothing left to move it on.
+#[tauri::command]
+pub async fn recover_meeting(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<MeetingRecord, String> {
+    // The same lock every other transcription takes, and for the same reason as
+    // `retranscribe`: this writes a meeting, so a wipe has to wait for it
+    // instead of deleting the row underneath.
+    let _flight = state.stt_flight.lock().await;
+    let meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    // The id arrives from the WebView, so what it names is checked here rather
+    // than assumed from the list the window was given: only a meeting actually
+    // waiting to be recovered may be walked through this.
+    if !is_interrupted(&meeting, state.active_meeting.lock().clone().as_deref()) {
+        return Err("that meeting is not waiting to be recovered".into());
+    }
+    let stored = meeting
+        .audio_path
+        .clone()
+        .ok_or_else(|| "no audio for meeting".to_string())?;
+    // Through the same guard the player uses. A row is a line in a file on the
+    // user's disk, and this both rewrites the file it names and reads it out.
+    let path = playable_recording(&recordings_dir(), &stored).map_err(|e| match e {
+        Unplayable::Missing => "the recording is not on this computer".to_string(),
+        Unplayable::Outside => {
+            tracing::warn!("refusing to recover a recording stored outside the app directory");
+            "the recording is not where it should be".to_string()
+        }
+    })?;
+    // The header was last written a flush before the crash, so what it declares
+    // is short of what is in the file. Everything below reads through it.
+    repair_wav_header(&path).map_err(|e| e.to_string())?;
+    let (mic, sys, sr) = read_dual_wav(&path).map_err(|e| e.to_string())?;
+
+    let _ = app.emit(
+        "meeting://progress",
+        &MeetingProgress::new(&id, MeetingPhase::Transcribing),
+    );
+    let settings = state.settings.lock().clone();
+    let mut live = LiveTranscript::new();
+    // A crash inside the first tick leaves a file with a header and nothing
+    // behind it. Skipped rather than sent: a provider charges for the call
+    // whatever is in it, and there is nothing here to transcribe.
+    if !mic.is_empty() || !sys.is_empty() {
+        let chunks = state
+            .stt
+            .transcribe_dual(&settings, &mic, &sys, sr, 0)
+            .await?;
+        // Charged as soon as the provider has answered, before the transcript
+        // is written. A crash in the gap leaves this meeting to be offered
+        // again, and a second recovery pays the provider a second time — but
+        // the figure the window shows is then the sum of what was actually
+        // spent, which is the property worth keeping. Recording the cost after
+        // the transcript would make a crash lose a charge that really happened,
+        // and a meeting that quietly under-reports what it cost is the worse of
+        // the two. Nothing here retries on its own: the second call only
+        // happens because somebody was asked and said yes.
+        bill_chunks(&state.db, &id, &chunks);
+        apply_stt_chunks(&mut live, &chunks);
+    }
+
+    // The row is read again rather than the copy taken before the transcription
+    // being written over it. Minutes can have gone by, and nothing stops the
+    // user renaming this meeting in that time — writing the snapshot would take
+    // the name they typed straight back off it.
+    //
+    // `None` is a meeting deleted while the pass was decoding, and it ends the
+    // walk: `upsert_meeting` would put a meeting somebody removed back on
+    // screen, pointing at a recording that is no longer there.
+    let mut meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "that meeting was removed while it was being recovered".to_string())?;
+    // The segments first and the status last, which is the order the stop path
+    // writes them in and for a sharper reason here: the row leaving `Recording`
+    // is what takes this meeting off the list of ones to offer back. A status
+    // committed before the transcript would, if the write after it failed, mean
+    // a meeting nothing offers to recover and nothing is left to transcribe —
+    // the audio still on disk and no way to reach it. Failing before that leaves
+    // the meeting exactly as it was, and the next launch asks again.
+    let names = speaker_names(&state, &meeting);
+    state.db.save_transcript(&id, &live, &names)?;
+    // `duration_ms` is stamped by the stop that never happened, so the file's
+    // own length is the only record of how long the meeting was.
+    meeting.duration_ms = (mic.len().max(sys.len()) as u64 * 1000) / sr.max(1) as u64;
+    meeting.status = meeting
+        .status
+        .transition(MeetingEvent::StopRecording)
+        .and_then(|s| s.transition(MeetingEvent::TranscribeDone))
+        .map_err(|e| e.to_string())?;
+    meeting.updated_at = chrono::Utc::now().to_rfc3339();
+    meeting.transcript_text = live.plain_text(&names);
+    state.db.upsert_meeting(&meeting)?;
+    state.live.lock().insert(id.clone(), live);
+    let _ = app.emit(
+        "meeting://progress",
+        &MeetingProgress::new(&id, MeetingPhase::Ready),
+    );
+    Ok(meeting)
+}
+
+/// Throw away a meeting whose recording was cut short, with its partial audio.
+///
+/// Guarded the same way as `recover_meeting`, and this is the half where it
+/// matters: this deletes a recording, and an id that is stale — a window that
+/// asked before a recording started, an offer answered twice — must not be able
+/// to reach a meeting the user still has.
+///
+/// Behind the transcription lock for that reason and not for its own work,
+/// which touches no model. A recovery of this same meeting is minutes long and
+/// leaves the row saying `Recording` until it finishes; without waiting for it,
+/// this would delete the recording out from under a user who had asked to keep
+/// it. Past the lock the row has been moved on, the check below refuses, and
+/// the answer is that there is nothing left to discard.
+#[tauri::command]
+pub async fn discard_interrupted_meeting(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    let _flight = state.stt_flight.lock().await;
+    let meeting = state
+        .db
+        .get_meeting(&id)?
+        .ok_or_else(|| "meeting not found".to_string())?;
+    if !is_interrupted(&meeting, state.active_meeting.lock().clone().as_deref()) {
+        return Err("that meeting is not waiting to be recovered".into());
+    }
+    // The ordinary delete, which removes the recording before the rows so a
+    // file that could not be deleted leaves the meeting whole and the discard
+    // repeatable.
+    state.db.delete_meeting(&id)
 }
 
 #[tauri::command]
