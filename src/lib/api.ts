@@ -38,6 +38,14 @@ export interface MeetingRecord {
   /// fields above, which are still written for the templates that have them.
   sections?: SummarySection[];
   project?: string | null;
+  /// What this meeting calls the microphone and the system audio.
+  ///
+  /// Null is the absence of a name, not a name: the window falls back to
+  /// `speaker.me` / `speaker.others` in the user's language, and that fallback
+  /// is never written back — so a meeting nobody renamed follows the language
+  /// they pick next.
+  speaker_me?: string | null;
+  speaker_others?: string | null;
 }
 
 /** One section of a summary, as the template declared it. `key` is stable and
@@ -66,6 +74,9 @@ export interface AppSettings {
   auto_summarize: boolean;
   /// Nothing this application does may reach the network.
   offline_mode: boolean;
+  /// Ask GitHub at launch whether a newer version exists, and fetch the
+  /// installer when one does. Nothing else about the update is automatic.
+  auto_update_check: boolean;
   language: string;
   ui_locale: string;
   /** `light` | `dark`. Optional because the field lands with the backend change;
@@ -75,8 +86,36 @@ export interface AppSettings {
   onboarding_complete: boolean;
   mic_device_id?: string | null;
   system_device_id?: string | null;
+  /** Whether each channel is captured at all. Separate from the device ids
+   *  above, where `null` already means "the system default device". Optional
+   *  because the fields land with the backend change; absent reads as on, which
+   *  is what every recording did before they existed. */
+  capture_me?: boolean;
+  capture_others?: boolean;
   compute_backend: string;
   confirm_before_recording: boolean;
+  /// The global record accelerator, one of the combinations the backend offers.
+  record_shortcut: string;
+  /// Where the floating record card docks: right_top | right_center |
+  /// right_bottom | top.
+  overlay_position: string;
+  /// Closing the window hides it instead of quitting.
+  close_to_tray: boolean;
+
+  /** Read the whole recording again once it stops, replacing the live
+   *  transcript. Only ever runs on the local engine — the backend decides that,
+   *  not this side. */
+  final_stt_pass?: boolean;
+  /** Names, products and jargon handed to the engine as context. Already
+   *  normalised by the backend: what comes back is the list in effect. */
+  hot_words?: string[];
+
+  /// What new meetings start out calling their two channels. Copied onto a
+  /// meeting when it is created, so changing them here leaves every meeting
+  /// already recorded exactly as it was.
+  default_speaker_me?: string | null;
+  default_speaker_others?: string | null;
+
 }
 
 export interface ChannelLevels {
@@ -86,12 +125,22 @@ export interface ChannelLevels {
   others_rms: number;
 }
 
+/** Which of the two capture channels a recording listens to. */
+export interface ChannelSelection {
+  me: boolean;
+  others: boolean;
+}
+
 export interface RecorderStatus {
   recording: boolean;
   paused: boolean;
   meeting_id?: string | null;
   elapsed_ms: number;
   levels: ChannelLevels;
+  /** The channels the running capture is listening to — not the settings,
+   *  which can be changed mid-meeting without reaching it. Optional for the
+   *  reason the settings pair above is. */
+  channels?: ChannelSelection;
 }
 
 export interface SearchHit {
@@ -109,9 +158,16 @@ export interface SearchHit {
 export type MeetingPhase =
   | "saving"
   | "transcribing"
+  /** The whole recording being read again, after the live pass. Its own phase
+   *  because it is different work of a different length — seconds of catching
+   *  up versus minutes of re-reading the meeting. */
+  | "final_pass"
   | "summarizing"
   | "ready"
-  | "summary_failed";
+  | "summary_failed"
+  /** The re-read did not finish. An outcome, not a step: the live transcript is
+   *  saved and the meeting is ready either way. */
+  | "final_pass_failed";
 
 /** Payload of the `meeting://progress` event.
  *
@@ -170,6 +226,10 @@ export interface ModelInfo {
   /** What the catalog says the finished artifact weighs. Already on the wire;
    *  it was simply never declared on this side. */
   size_hint_bytes?: number | null;
+  /** SPDX identifier of the licence the weights are published under.
+   *  Shown beside the model, because the app picks one for the user on
+   *  first run and downloads it on their behalf. */
+  license?: string;
   /** Bytes of a `.part` file sitting beside the artifact — a download that was
    *  started and never finished. Optional because the backend that reports it
    *  is a separate change: until it lands the field is absent and the slot
@@ -220,6 +280,9 @@ export interface ShortcutStatus {
   registered: boolean;
   accelerator: string;
   reason_key?: string | null;
+  /// What else may be picked. Sent by the backend rather than kept here: only
+  /// it can actually register a combination, so only it may offer one.
+  choices?: string[];
 }
 
 export interface SummaryVersion {
@@ -258,7 +321,31 @@ export const api = {
   listMeetings: () => invoke<MeetingRecord[]>("list_meetings"),
   getMeeting: (id: string) => invoke<MeetingRecord | null>("get_meeting", { id }),
   getTranscript: (id: string) => invoke<LiveTranscript>("get_transcript", { id }),
+  /// Where this meeting's recording is, for `convertFileSrc`. An id goes out and
+  /// a path comes back — never the other way round, because the path in the
+  /// meeting row is only trustworthy after the backend has proven it resolves
+  /// inside its own recordings directory, and only then does the asset protocol
+  /// learn to serve that one file.
+  ///
+  /// `null` whenever there is nothing to play: still recording, imported with no
+  /// audio retained, or the file has gone. Every caller must render without it.
+  meetingAudioPath: (id: string) =>
+    invoke<string | null>("meeting_audio_path", { id }),
   deleteMeeting: (id: string) => invoke<void>("delete_meeting", { id }),
+  /// The meetings the app was recording when it last stopped running — a row
+  /// left in `recording` or `paused` is one nothing came back for.
+  ///
+  /// Asked once at launch. Reading it changes nothing: until the user answers,
+  /// the recording stays exactly where it is.
+  interruptedMeetings: () => invoke<MeetingRecord[]>("interrupted_meetings"),
+  /// Finish one of them. Resolves once the whole recording has been read, which
+  /// on a long meeting is minutes — the `meeting://progress` events say where
+  /// it is up to.
+  recoverMeeting: (id: string) => invoke<MeetingRecord>("recover_meeting", { id }),
+  /// Throw one away, with its partial audio. Refused by the backend for any
+  /// meeting that is not waiting to be recovered.
+  discardInterruptedMeeting: (id: string) =>
+    invoke<void>("discard_interrupted_meeting", { id }),
   search: (query: string) => invoke<SearchHit[]>("search_meetings_cmd", { query }),
   getSettings: () => invoke<AppSettings>("get_settings"),
   saveSettings: (settings: AppSettings) => invoke<AppSettings>("save_settings", { settings }),
@@ -271,8 +358,21 @@ export const api = {
   switchStt: (provider: string) => invoke<AppSettings>("switch_stt_provider", { provider }),
   switchLlm: (provider: string) => invoke<AppSettings>("switch_llm_provider", { provider }),
   setReasoning: (enabled: boolean) => invoke<AppSettings>("set_reasoning", { enabled }),
+  /// Answer the "still there?" question. Whatever the user clicked, they are
+  /// there, and the vigil starts over.
+  keepRecording: () => invoke<void>("keep_recording"),
+  /** Picks moved off a model the catalogue dropped, as `[from, to]`.
+   *  Drained by the read, so this answers once per launch. */
+  retiredModels: () => invoke<[string, string][]>("retired_models"),
   recorderStatus: () => invoke<RecorderStatus>("recorder_status"),
   canRecord: () => invoke<StartGate>("can_record"),
+  /// Ask the OS for a different record accelerator.
+  ///
+  /// Resolves with the new status either way: a refusal comes back with
+  /// `registered: false` and the combination that was refused, and the previous
+  /// one is put back so the user is never left with none.
+  setRecordShortcut: (accelerator: string) =>
+    invoke<ShortcutStatus>("set_record_shortcut", { accelerator }),
   shortcutStatus: () => invoke<ShortcutStatus>("shortcut_status"),
   listDevices: () => invoke<AudioDevice[]>("list_audio_devices_cmd"),
   i18nCatalog: (locale: string) =>
@@ -298,6 +398,13 @@ export const api = {
   /// The card asking to grow or shrink as the pointer arrives and leaves.
   /// A no-op unless a recording is running and the main window is minimized —
   /// the backend re-derives both rather than trusting a remembered flag.
+  /// Tell the backend a native dialog is on screen.
+  ///
+  /// A file chooser and another application look the same from the Rust side —
+  /// the main window loses focus either way — and the floating record card must
+  /// not appear over Vesper's own chooser.
+  setModalOpen: (open: boolean) =>
+    invoke<void>("set_modal_open", { open }).catch(() => {}),
   setOverlayExpanded: (expanded: boolean) =>
     invoke<void>("set_overlay_expanded", { expanded }),
   summarize: (id: string, template?: string) =>
@@ -309,6 +416,14 @@ export const api = {
   // rather than showing a title the database does not carry.
   renameMeeting: (id: string, title: string) =>
     invoke<MeetingRecord>("rename_meeting", { id, title }),
+  // One channel per call, never the pair: a caller that sends both sends its
+  // idea of the other one too, and that idea is stale the moment anything else
+  // writes. `null` clears rather than storing an empty name, which is what puts
+  // the channel back to the app's own words. The backend cleans what it is
+  // given — the name reaches a model prompt and an exported document — so the
+  // record that comes back is the truth, not what was typed.
+  setSpeakerName: (id: string, speaker: Speaker, name: string | null) =>
+    invoke<MeetingRecord>("set_speaker_name", { id, speaker, name }),
   // The title, sanitised for the filesystem by the side that owns the rule
   // table. Every caller must have a fallback name — it lands with the backend
   // change and rejects until then.

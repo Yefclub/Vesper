@@ -1,30 +1,93 @@
 # Vesper
 
-Privacy-first desktop AI meeting note-taker. Capture **microphone + system audio** as separate channels, live-transcribe with **Me / Others** labels, summarize and chat over meetings — all **local by default**. Optional OpenRouter for cloud STT/LLM.
+Desktop meeting notes that stay on your machine. Vesper records **microphone and system audio as two separate channels**, transcribes them live, and writes a summary — with no account, no telemetry, and nothing sent anywhere unless you ask for it.
+
+No bot joins your call. Nothing is uploaded to be processed. The transcript, the summary and the audio are files on your disk.
+
+![The meeting list, and a recording one keystroke away](docs/media/01-home.png)
+
+<table>
+<tr>
+<td width="50%"><img src="docs/media/02-transcript.png" alt="A live transcript, with microphone and system audio as separate speakers"></td>
+<td width="50%"><img src="docs/media/03-summary.png" alt="The summary, key points and action items for a finished meeting"></td>
+</tr>
+<tr>
+<td colspan="2" align="center"><em>Left: the transcript, cut at pauses rather than on a clock. Right: the summary the local model wrote from it.</em></td>
+</tr>
+</table>
+
+![Asking a question about a meeting that has already ended](docs/media/04-chat.png)
 
 ## Features
 
-- One-click record / pause / resume / stop
-- Dual-channel capture (mic = Me, system = Others) — no bot joins your call
-- Live streaming transcript + file import / retranscription
-- Local ultra-light STT & LLM (download on first use) + optional OpenRouter
-- Summary templates, action items, key points, meeting chat
-- SQLite + local files only — no account, no telemetry
-- Search across meetings; export Markdown / PDF / DOCX
-- System tray, global hotkey (`Ctrl/Cmd+Shift+R`), automatic update checks
-- Installers for **Windows**, **macOS**, and **Linux**
+- Record, pause, resume, stop — with a floating card that stays on top while you work in another window
+- Dual-channel capture: microphone is **Me**, system audio is **Others**
+- Live transcript, cut at pauses rather than on a clock, so a bubble is a sentence
+- Import an audio file, or retranscribe one you already have
+- Summary templates, action items, key points, and a chat over the meeting
+- Notes you type during the meeting, folded into a corner until you need them
+- Search across every meeting; export to Markdown, PDF or DOCX
+- System tray, a global hotkey you can change, and update checks
+- Quiet-room guard: three minutes without speech asks whether you are still there, five more without an answer stops the recording
+
+## What leaves the machine
+
+This is the complete list. Four situations, and one of them happens without you asking:
+
+| Destination | When | What it carries |
+|---|---|---|
+| `github.com` | **At every launch, on its own** — unless you turn it off. Vesper asks whether a newer version exists, and if one does it downloads the installer in the background so the Update button is instant. Nothing installs until you click. | The request itself, and the installer coming back. No meeting data. Two ways to stop it: turn off *Check for updates at launch* in Settings, which stops this and nothing else, or turn on offline mode, which stops everything. Either way no launch reaches `github.com`, and Settings says so rather than reporting that you are up to date. |
+| `huggingface.co` | You download a model in Settings | The request for that file. Origins come from a fixed internal catalogue, never from anything the interface can compose, and every download is checked against a known hash before it is loaded. |
+| A server **you** run | Only if you configure an OpenAI-compatible endpoint | Transcript text, and your notes, for summaries and chat. The address is checked: loopback and the private network ranges are accepted and anything routable on the public internet is refused, so a model on a public VPS will not work. That refusal is deliberate. A machine on your LAN is still not this machine — if that distinction matters to you, keep the endpoint on `127.0.0.1`. |
+| `openrouter.ai` | Only if you select OpenRouter as the provider | Your meeting **audio** for transcription, or transcript text for summaries. This is a third party, and it is the one place where the recording itself leaves your machine. |
+
+No analytics, no crash reporting, no "anonymous usage statistics". No fifth destination.
+
+**Local by default.** Out of the box, transcription runs on whisper.cpp and summaries on llama.cpp, both on your machine. OpenRouter is a choice you make in Settings, never a fallback the app takes by itself.
+
+**Offline mode** is the enforcement, because "cloud optional" is only a promise if something checks. With the switch on, cloud transcription, cloud summaries, model downloads and the update check are all refused before a socket opens, and each refusal names the thing that did not happen rather than reporting a connection error you would go looking for.
+
+It deliberately does **not** block an OpenAI-compatible endpoint you configured yourself. The reasoning is that a model on your own machine is not egress — but if you pointed that endpoint at another machine on your network, offline mode will not stop it, and you should know that rather than discover it.
+
+**API keys** go to the operating system's keychain — Credential Manager on Windows, Keychain on macOS, the Secret Service on Linux. If the keychain refuses a key you just typed, saving fails and tells you, rather than quietly writing the key somewhere less safe. A key from an older version that has not migrated yet stays in the local database until a keychain write succeeds.
+
+## Platforms, and what is actually tested
+
+Installers are produced for **Windows**, **macOS** and **Linux**. They are not equally exercised, and pretending otherwise would be dishonest:
+
+| Platform | Built | Tests run in CI | Used and tested by hand |
+|---|---|---|---|
+| Windows | Yes, with Vulkan | Yes | **Yes — this is the development machine** |
+| Linux | Yes, with Vulkan | Yes | No |
+| macOS | Yes, CPU only | **No CI job at all** | No |
+
+Day-to-day use, and every manual check of the interface, happens on Windows 11. CI compiles the project and runs the Rust test suite on Linux and Windows, so a Linux build that fails to compile or breaks a test is caught — but nobody has watched the app record a meeting there. macOS is built by the release workflow and is otherwise unverified: it has no CI job, and the Apple bundle has never been launched by the maintainer.
+
+Bug reports from macOS and Linux are genuinely useful, and are the fastest way for that to change.
+
+## GPU acceleration
+
+Optional, off by default, and a **build-time** choice — `--features gpu-vulkan`. The Vulkan SDK is needed to compile it and never to run it: `vulkan-1` ships with every GPU driver, so an installed build asks the user for nothing. Without it, everything runs on the CPU, slower and identically.
 
 ## Stack
 
 - **Desktop**: Tauri 2 + Rust
 - **UI**: React 19, Vite, TypeScript, Tailwind CSS 4, Framer Motion
-- **Data**: SQLite (rusqlite), local audio files
+- **Speech**: whisper.cpp via `whisper-rs`
+- **Language models**: llama.cpp via `llama-cpp-2`
+- **Data**: SQLite (`rusqlite`), and audio files next to it
 
 ## Develop
 
-Prerequisites: [Node.js](https://nodejs.org/) 20+, [Rust](https://rustup.rs/), platform WebView deps ([Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)).
+Prerequisites: [Node.js](https://nodejs.org/) 20+ (CI builds on 22), [Rust](https://rustup.rs/), and the platform WebView dependencies ([Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)).
 
-**Native ML build** (local Whisper + llama.cpp): install [LLVM](https://github.com/llvm/llvm-project/releases) so `libclang` is available. On Windows:
+On Debian or Ubuntu, audio capture and the native build need five packages that are **not** on Tauri's prerequisites page — CI installs exactly these:
+
+```bash
+sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libclang-dev cmake pkg-config
+```
+
+**Native ML build** (whisper.cpp + llama.cpp) needs [LLVM](https://github.com/llvm/llvm-project/releases) for `libclang`. On Windows the build script also wants LLVM's `nm` and `objcopy`, which means the whole directory on `PATH` rather than one variable per tool — it asks for the next tool only after finding the previous one:
 
 ```powershell
 winget install -e --id LLVM.LLVM
@@ -37,20 +100,21 @@ npm install
 npm run tauri dev
 ```
 
-Download Whisper / GGUF weights from **Settings** (Hugging Face direct links). Until models are installed, OpenRouter remains available; local engines require real weights (no fake transcription theater).
+Whisper and GGUF weights are downloaded from **Settings**, from a fixed internal catalogue — the front end cannot ask for an arbitrary URL — and every file is checked against a known hash before it is loaded. Until a model is installed the local engines have nothing to run: there is no fake transcription to fill the gap.
 
 ### Useful commands
 
 ```bash
-# Frontend typecheck / production UI build
-npm run typecheck
-npm run build
+npm run typecheck              # tsc --noEmit
+npm run build                  # typecheck + production UI build
+cd src-tauri && cargo test     # Rust unit tests
+npm run tauri build            # desktop package
+```
 
-# Rust unit tests (domain, STT pipeline, DB, export)
-cd src-tauri && cargo test
+Building with Vulkan on Windows needs the Ninja generator and a short target directory — the nested `vulkan-shaders-gen` project trips MSBuild's parallel scheduling, and its path outgrows the 260-character limit that `tracker.exe` still enforces:
 
-# Desktop debug / release package
-npm run tauri build
+```bash
+CMAKE_GENERATOR=Ninja CARGO_TARGET_DIR=/c/vt cargo build --features gpu-vulkan
 ```
 
 ## Branches
@@ -58,21 +122,11 @@ npm run tauri build
 | Branch | Role |
 |--------|------|
 | `dev`  | Integration — feature PRs land here |
-| `main` | Release — tagged installs & auto-update artifacts |
-
-## Settings
-
-- **STT / LLM provider**: Local (default) or OpenRouter
-- **Reasoning toggle**: CoT-style flag for OpenRouter models
-- **API keys**: stored only on device in the local SQLite settings store
+| `main` | Release — tagged installers and auto-update artifacts |
 
 ## Auto-update
 
-Release builds check:
-
-`https://github.com/Yefclub/Vesper/releases/latest/download/latest.json`
-
-Signing public key is configured in `src-tauri/tauri.conf.json` (`plugins.updater`). Replace the placeholder pubkey before publishing signed releases.
+Release builds check `https://github.com/Yefclub/Vesper/releases/latest/download/latest.json`. The signing public key lives in `src-tauri/tauri.conf.json` under `plugins.updater`. The check runs at launch and is governed by *Check for updates at launch* in Settings, on by default; turning it off also stops the installer being fetched ahead of the click.
 
 ## License
 

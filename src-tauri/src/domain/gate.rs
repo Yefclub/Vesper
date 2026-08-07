@@ -1,5 +1,6 @@
 //! Recording start gate — pure, unit-tested without hardware.
 
+use crate::domain::channels::ChannelSelection;
 use crate::domain::settings::{AppSettings, SttProvider};
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +35,17 @@ pub fn can_start_recording_with(
             allowed: false,
             reason: Some("Finish onboarding before recording.".into()),
             reason_key: Some("gate.onboarding".into()),
+        };
+    }
+    // Ahead of the transcriber checks below, because it is a different kind of
+    // refusal: with both switches down there is nothing to transcribe whichever
+    // engine is configured, and answering with "download a model" would send
+    // the user to fix something that is not the problem.
+    if !ChannelSelection::from_settings(settings).records_anything() {
+        return StartGate {
+            allowed: false,
+            reason: Some("Both capture channels are off. Turn one on to record.".into()),
+            reason_key: Some("gate.no_channels".into()),
         };
     }
     match settings.stt_provider {
@@ -122,6 +134,34 @@ mod tests {
         let s = base();
         assert!(!can_start_recording(&s, false, true).allowed);
         assert!(can_start_recording(&s, true, true).allowed);
+    }
+
+    /// Nothing to capture is not a recording, and it is refused with a reason
+    /// that names what is wrong rather than falling through to the model check.
+    #[test]
+    fn both_channels_off_is_not_a_recording() {
+        let s = AppSettings {
+            capture_me: false,
+            capture_others: false,
+            ..base()
+        };
+        let g = can_start_recording(&s, true, true);
+        assert!(!g.allowed);
+        assert_eq!(g.reason_key.as_deref(), Some("gate.no_channels"));
+    }
+
+    /// And one channel is enough — a mic-only or system-only meeting starts
+    /// exactly like a two-channel one.
+    #[test]
+    fn one_channel_is_enough_to_start() {
+        for (me, others) in [(true, false), (false, true)] {
+            let s = AppSettings {
+                capture_me: me,
+                capture_others: others,
+                ..base()
+            };
+            assert!(can_start_recording(&s, true, true).allowed);
+        }
     }
 
     #[test]

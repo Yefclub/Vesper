@@ -19,6 +19,7 @@ import {
   DownloadProgress,
   ModelInfo,
   OrModel,
+  ShortcutStatus,
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { backdropFade, slideInRight } from "../lib/motion";
@@ -50,6 +51,11 @@ interface Props {
   /// meeting and the search box, and a drawer that reached into all three would
   /// be a second place deciding what is on screen.
   onWiped: () => void;
+  /// The current accelerator and whether the OS took it. Owned by the shell —
+  /// the empty state shows it too, and two places deciding what the shortcut is
+  /// would disagree the moment one of them changed it.
+  shortcut: ShortcutStatus | null;
+  onShortcutChange: (next: ShortcutStatus) => void;
 }
 
 export function SettingsPanel({
@@ -60,6 +66,8 @@ export function SettingsPanel({
   onThemeChange,
   onRefreshModels,
   onWiped,
+  shortcut,
+  onShortcutChange,
 }: Props) {
   const { t, setLocale } = useI18n();
   const [draft, setDraft] = useState<AppSettings>({ ...settings });
@@ -299,9 +307,15 @@ export function SettingsPanel({
   const [dataBusy, setDataBusy] = useState(false);
   const [dataMessage, setDataMessage] = useState<string | null>(null);
   const [confirmWipe, setConfirmWipe] = useState(false);
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
 
   const exportEverything = async () => {
-    const dir = await open({ directory: true, multiple: false });
+    // Same reason as the import and export pickers: the floating card must not
+    // appear over a chooser Vesper itself opened.
+    await api.setModalOpen(true);
+    const dir = await open({ directory: true, multiple: false }).finally(() =>
+      api.setModalOpen(false),
+    );
     if (typeof dir !== "string") return;
     setDataBusy(true);
     setDataMessage(null);
@@ -587,6 +601,38 @@ export function SettingsPanel({
                     { value: "pt", label: "Português" },
                   ]}
                 />
+                {/* Also outside the provider branch, and for the opposite
+                    reason to the language above: the switch is stored for
+                    everybody, but only the local engine acts on it. Shown
+                    either way so the setting does not vanish when somebody
+                    tries the cloud for an afternoon, with the line underneath
+                    saying which of the two they are looking at. */}
+                <CheckBox
+                  label={t("settings.final_stt_pass")}
+                  checked={draft.final_stt_pass ?? true}
+                  onChange={(v) =>
+                    setDraft((d) => ({ ...d, final_stt_pass: v }))
+                  }
+                />
+                {(draft.final_stt_pass ?? true) && (
+                  <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                    {draft.stt_provider === "local"
+                      ? t("settings.final_stt_pass_on")
+                      : t("settings.final_stt_pass_cloud")}
+                  </p>
+                )}
+                {/* Both providers take it — whisper as its initial prompt, the
+                    cloud transcriber as its `prompt` field — so this is not
+                    inside the provider branch either. */}
+                <FieldArea
+                  label={t("settings.hot_words")}
+                  value={(draft.hot_words ?? []).join("\n")}
+                  onChange={(v) =>
+                    setDraft((d) => ({ ...d, hot_words: v.split("\n") }))
+                  }
+                  placeholder={t("settings.hot_words_placeholder")}
+                  hint={t("settings.hot_words_hint")}
+                />
               </section>
 
               <section className="space-y-3">
@@ -755,6 +801,28 @@ export function SettingsPanel({
                     {t("settings.offline_mode_on")}
                   </p>
                 )}
+                {/* Directly under the switch above, because the sentence that
+                    switch prints already names update checks among the things it
+                    refuses — somebody who reads that and wants only this part
+                    stopped should find the narrower control without going
+                    looking. Not hidden while offline mode is on, for the same
+                    reason: it is the setting that still applies once the broad
+                    switch goes back down. */}
+                <CheckBox
+                  label={t("settings.auto_update_check")}
+                  checked={draft.auto_update_check}
+                  onChange={(v) =>
+                    setDraft((d) => ({ ...d, auto_update_check: v }))
+                  }
+                />
+                {/* Only while it is off, and it says Vesper did not look rather
+                    than that there was nothing to find. Those are different
+                    facts and only one of them is true here. */}
+                {!draft.auto_update_check && (
+                  <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                    {t("settings.auto_update_check_off")}
+                  </p>
+                )}
                 {/* Only while it is off. A promise about what the app does not
                     do is worth reading in the state where it applies, and is
                     noise in the state where it does not. */}
@@ -870,6 +938,15 @@ export function SettingsPanel({
 
           {tab === "devices" && (
             <div className="space-y-4" data-testid="settings-devices">
+              {/* The same switch the dock's channel button carries, reachable
+                  from here because the dock is only on screen while no meeting
+                  is open. The device select below stays live either way: it is
+                  what the channel comes back to. */}
+              <CheckBox
+                label={t("settings.capture_me")}
+                checked={draft.capture_me ?? true}
+                onChange={(v) => setDraft((d) => ({ ...d, capture_me: v }))}
+              />
               <label className="block text-sm">
                 <span className="mb-1 block text-xs text-fg-subtle">
                   {t("onboarding.mic")}
@@ -896,6 +973,24 @@ export function SettingsPanel({
                   ))}
                 </select>
               </label>
+              {/* What a NEW meeting starts out calling this channel. The
+                  placeholder is the word the transcript uses when the field is
+                  left alone, so leaving it blank is a visible choice rather than
+                  a gap. A meeting keeps the names it was created with — changing
+                  these does not reach back into last month's. */}
+              <Field
+                label={t("settings.speaker_me_name")}
+                placeholder={t("speaker.me")}
+                value={draft.default_speaker_me ?? ""}
+                onChange={(v) =>
+                  setDraft((d) => ({ ...d, default_speaker_me: v || null }))
+                }
+              />
+              <CheckBox
+                label={t("settings.capture_others")}
+                checked={draft.capture_others ?? true}
+                onChange={(v) => setDraft((d) => ({ ...d, capture_others: v }))}
+              />
               <label className="block text-sm">
                 <span className="mb-1 block text-xs text-fg-subtle">
                   {t("onboarding.system")}
@@ -919,6 +1014,14 @@ export function SettingsPanel({
                   ))}
                 </select>
               </label>
+              <Field
+                label={t("settings.speaker_others_name")}
+                placeholder={t("speaker.others")}
+                value={draft.default_speaker_others ?? ""}
+                onChange={(v) =>
+                  setDraft((d) => ({ ...d, default_speaker_others: v || null }))
+                }
+              />
             </div>
           )}
 
@@ -962,6 +1065,83 @@ export function SettingsPanel({
                 onChange={(v) => setDraft((d) => ({ ...d, ui_locale: v }))}
                 options={LOCALES}
               />
+              {/* Applied on click, not on Save, and for the same reason the
+                  theme is: whether a combination works is the OS's answer, not
+                  a preference, and the user has to hear it while they are still
+                  choosing. `set_record_shortcut` writes the row itself. */}
+              <FieldSelect
+                label={t("settings.shortcut")}
+                value={shortcut?.accelerator ?? draft.record_shortcut}
+                onChange={(v) => {
+                  setShortcutError(null);
+                  void api
+                    .setRecordShortcut(v)
+                    .then((next) => {
+                      onShortcutChange(next);
+                      if (next.registered) {
+                        // Only what the OS accepted reaches the draft. A refused
+                        // combination written here would make Save dirty, and a
+                        // later Save of some unrelated field would persist a
+                        // shortcut that does not work — taking the working one
+                        // with it.
+                        setDraft((d) => ({
+                          ...d,
+                          record_shortcut: next.accelerator,
+                        }));
+                      } else {
+                        setShortcutError(
+                          t(next.reason_key ?? "shortcut.taken"),
+                        );
+                      }
+                    })
+                    .catch((e) => {
+                      // The reason key, translated. The command rejects with one
+                      // rather than a status now, because the status it keeps is
+                      // the combination that is ACTIVE — which after a refusal is
+                      // the previous one, not the one that was asked for.
+                      setShortcutError(t(String(e)));
+                      void api.shortcutStatus().then(onShortcutChange).catch(() => {});
+                    });
+                }}
+                options={(shortcut?.choices ?? [draft.record_shortcut]).map((c) => ({
+                  value: c,
+                  label: c,
+                }))}
+              />
+              {shortcutError && (
+                <p className="text-xs leading-relaxed text-danger">{shortcutError}</p>
+              )}
+              {shortcut && !shortcut.registered && !shortcutError && (
+                <p className="text-xs leading-relaxed text-warn">
+                  {t("shortcut.in_use_note")}
+                </p>
+              )}
+              {/* A select and not a segmented control: four options with
+                  sentences for labels do not fit in a row of pills, and this is
+                  a preference somebody sets once. */}
+              <FieldSelect
+                label={t("settings.overlay_position")}
+                value={draft.overlay_position}
+                onChange={(v) =>
+                  setDraft((d) => ({ ...d, overlay_position: v }))
+                }
+                options={[
+                  { value: "right_top", label: t("overlay.right_top") },
+                  { value: "right_center", label: t("overlay.right_center") },
+                  { value: "right_bottom", label: t("overlay.right_bottom") },
+                  { value: "top", label: t("overlay.top") },
+                ]}
+              />
+              <CheckBox
+                label={t("settings.close_to_tray")}
+                checked={draft.close_to_tray}
+                onChange={(v) => setDraft((d) => ({ ...d, close_to_tray: v }))}
+              />
+              {draft.close_to_tray && (
+                <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                  {t("settings.close_to_tray_on")}
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -1047,6 +1227,42 @@ function Field({
         onChange={(e) => onChange(e.target.value)}
         className={`w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
       />
+    </label>
+  );
+}
+
+/** A `Field` for something with more than one line in it. The hint sits under
+ *  the box rather than over it: it explains what the list does to a model, which
+ *  is worth reading once and in the way, above, forever after. */
+function FieldArea({
+  label,
+  value,
+  onChange,
+  placeholder,
+  hint,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  hint?: string;
+}) {
+  return (
+    <label className="block text-sm">
+      <span className="mb-1 block text-xs text-fg-subtle">{label}</span>
+      <textarea
+        value={value}
+        placeholder={placeholder}
+        rows={4}
+        spellCheck={false}
+        onChange={(e) => onChange(e.target.value)}
+        className={`w-full resize-y rounded-md border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-border-strong ${FOCUS}`}
+      />
+      {hint && (
+        <span className="mt-1 block text-xs leading-relaxed text-fg-muted">
+          {hint}
+        </span>
+      )}
     </label>
   );
 }
@@ -1382,7 +1598,19 @@ const ModelRow = memo(function ModelRow({
     <div className="rounded-md border border-border bg-surface-2 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-sm">{model.label}</div>
+          <div className="flex items-baseline gap-2">
+            <div className="text-sm">{model.label}</div>
+            {/* Beside the name rather than behind a link. Vesper chooses
+                a model for the user on first run and fetches it for them,
+                which makes this the moment they are told what they have
+                taken on — and the catalogue is small enough now that the
+                answer is always one word. */}
+            {model.license && (
+              <span className="shrink-0 rounded-xs bg-surface-3 px-1.5 py-0.5 text-2xs text-fg-muted">
+                {model.license}
+              </span>
+            )}
+          </div>
           <div
             className={`flex items-center gap-2 text-2xs tabular-nums ${failed ? "text-danger" : "text-fg-muted"}`}
           >

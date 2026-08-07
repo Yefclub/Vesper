@@ -96,29 +96,27 @@ pub fn run() {
         .setup(|app| {
             #[cfg(desktop)]
             {
-                use tauri_plugin_global_shortcut::{
-                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-                };
                 // Registration fails when another application already owns the
                 // combination. That is a missing convenience, not a reason to
                 // refuse to start — propagating it here left the app unable to
                 // open at all because something else had grabbed Ctrl+Shift+R.
                 // Swallowing it was the other extreme: the window went on
                 // advertising a key the OS had refused. Keep it, and report it.
-                let shortcut =
-                    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyR);
-                let handle = app.handle().clone();
-                let registered =
-                    app.global_shortcut()
-                        .on_shortcut(shortcut, move |_app, _sc, event| {
-                            if event.state == ShortcutState::Pressed {
-                                let _ = handle.emit("hotkey://toggle-record", ());
-                            }
-                        });
+                // Whatever the user chose, or the default when the stored value
+                // is one this build no longer offers.
+                let accelerator = {
+                    let state = app.state::<Arc<AppState>>();
+                    let stored = state.settings.lock().record_shortcut.clone();
+                    domain::shortcut::chosen_or_default(&stored)
+                };
+                let registered = commands::register_record_shortcut(app.handle(), accelerator);
                 if let Err(e) = &registered {
                     tracing::warn!("global shortcut unavailable: {e}");
                 }
-                app.manage(domain::shortcut::status_from(registered));
+                app.manage(std::sync::Mutex::new(domain::shortcut::status_from(
+                    registered,
+                    accelerator,
+                )));
             }
 
             let show_i = MenuItem::with_id(app, "show", "Show Vesper", true, None::<&str>)?;
@@ -199,6 +197,30 @@ pub fn run() {
                         let state = handle.state::<Arc<AppState>>();
                         commands::sync_overlay_for(&handle, &state);
                     }
+                    // Close means hide, when the user asked for that. The window
+                    // goes away and the tray icon is what brings it back — the
+                    // recording, if there is one, carries on, which is the whole
+                    // point of the setting.
+                    //
+                    // A recording is NOT a reason to override this. Somebody who
+                    // turned the switch on has said what they want a close to
+                    // mean, and a close that quits anyway during the one state
+                    // where staying matters would be the setting failing at its
+                    // own job.
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        let state = handle.state::<Arc<AppState>>();
+                        let to_tray = state.settings.lock().close_to_tray;
+                        if to_tray {
+                            api.prevent_close();
+                            if let Some(w) = handle.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                            // Hidden is not focused, so the card has to be
+                            // reconsidered — this is exactly the case it exists
+                            // for.
+                            commands::sync_overlay_for(&handle, &state);
+                        }
+                    }
                     // A hidden window is still a window and Tauri only exits once
                     // every one is destroyed, so closing the main window has to
                     // take the card with it or Vesper keeps running invisibly.
@@ -222,6 +244,7 @@ pub fn run() {
             commands::list_meetings,
             commands::get_meeting,
             commands::get_transcript,
+            commands::meeting_audio_path,
             commands::list_action_items,
             commands::add_action_item,
             commands::update_action_item,
@@ -248,6 +271,10 @@ pub fn run() {
             commands::refine_summary_section,
             commands::restore_summary_version,
             commands::set_overlay_expanded,
+            commands::retired_models,
+            commands::keep_recording,
+            commands::set_record_shortcut,
+            commands::set_modal_open,
             commands::chat_meeting,
             commands::list_chat,
             commands::add_context_note,
@@ -255,7 +282,11 @@ pub fn run() {
             commands::delete_context_note,
             commands::import_audio,
             commands::retranscribe,
+            commands::interrupted_meetings,
+            commands::recover_meeting,
+            commands::discard_interrupted_meeting,
             commands::rename_meeting,
+            commands::set_speaker_name,
             commands::export_meeting_cmd,
             commands::export_all_cmd,
             commands::wipe_all_cmd,

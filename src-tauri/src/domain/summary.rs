@@ -474,6 +474,19 @@ impl MeetingInsights {
 /// copy: an English system prompt asking the model to "responda em Inglês" is
 /// worse than one asking it to "answer in English", and a translated entry in
 /// the i18n dictionaries would be a key no screen ever renders.
+/// The same instruction, written in the language it asks for.
+///
+/// A prompt is entirely English apart from the transcript, and a small model
+/// answers in the language it was addressed in far more reliably than in the
+/// one it was told about. One sentence in the target language, placed last,
+/// costs nothing and is the difference between a request and a hint.
+pub fn write_in_language(locale: Locale) -> &'static str {
+    match locale {
+        Locale::En => "Write everything in English.",
+        Locale::PtBr => "Escreva tudo em português do Brasil.",
+    }
+}
+
 pub fn language_name(locale: Locale) -> &'static str {
     match locale {
         Locale::En => "English",
@@ -520,13 +533,18 @@ pub fn build_summary_prompt_with(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "{}\n\nRespond in markdown with sections:\n{}\n\nWrite all prose in {}.\nKeep the headings exactly as written, in English: {}.\n\nTranscript:\n{}{}",
+        "{}\n\nRespond in markdown with sections:\n{}\n\nWrite all prose in {}.\nKeep the headings exactly as written, in English: {}.\n\nTranscript:\n{}{}\n\n{}",
         template.system_prompt(),
         headings,
         language_name(locale),
         names,
         transcript.trim(),
-        crate::domain::context::notes_block(notes)
+        crate::domain::context::notes_block(notes),
+        // Last, and in the language it asks for. Everything above is English
+        // and so is the instruction above, which leaves a small model reading a
+        // wall of English and answering in kind — the headings are supposed to
+        // be the only English in the answer.
+        write_in_language(locale)
     )
 }
 

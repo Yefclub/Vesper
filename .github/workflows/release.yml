@@ -141,3 +141,40 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+          # Never from a build. Three jobs writing one `latest.json` is the
+          # race this change exists to end, and skipping the `manifest` job
+          # on a partial failure would otherwise leave whichever child did
+          # finish holding the release's manifest, describing a build that
+          # is not complete. With nobody writing it here, a failed matrix
+          # leaves the previous manifest untouched — which is the honest
+          # outcome, because no new build finished.
+          includeUpdaterJson: false
+
+  # After all three, never from inside one of them. Three jobs writing one
+  # `latest.json` is a race, and the dev channel lost it: the manifest that
+  # survived named a Windows installer from two builds earlier, so every install
+  # on that platform updated to the version it already had, forever.
+  #
+  # The release is a draft until a human publishes it, so this runs while nothing
+  # is visible to an installed application yet.
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write latest.json from the release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          # When this run began, from the API rather than from a context
+          # variable — there is none — because the macOS bundle carries no
+          # version in its name and this is what proves the one in the release
+          # belongs to this build.
+          started=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .run_started_at)
+          python scripts/updater-manifest.py \
+            --tag "$TAG" \
+            --version "${TAG#v}" \
+            --notes "Vesper $TAG" \
+            --pub-date "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+            --built-after "$started"

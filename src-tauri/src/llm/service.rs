@@ -125,17 +125,24 @@ impl LlmService {
 
     /// Name a meeting from its summary and its own words.
     ///
-    /// Deliberately not routed through `chat`: with no GGUF on disk the local
-    /// path answers from `offline_answer`, and a keyword-matched transcript
-    /// line is worse than the date label it would replace. A missing model is
-    /// an `Err` here, which the caller treats as "keep the label".
+    /// Deliberately not routed through `chat`, which used to answer from
+    /// `offline_answer` with no GGUF on disk — a keyword-matched transcript
+    /// line, worse than the date label it would have replaced. `chat` now
+    /// errors too, so this is no longer the only path that does; the separate
+    /// entry point stays because the prompt and the token budget differ. A
+    /// missing model is an `Err` here, which the caller treats as "keep the
+    /// label".
     pub async fn title(
         &self,
         settings: &AppSettings,
         summary: &str,
         transcript: &str,
     ) -> Result<(String, Option<i64>), String> {
-        let prompt = build_title_prompt(summary, transcript);
+        // The user's language, not the one the model guesses the meeting was in.
+        // Guessing is what named a Portuguese meeting in English: the speech was
+        // full of product names that are English nouns, and the model went with
+        // those over the words around them.
+        let prompt = build_title_prompt(summary, transcript, settings.locale());
         match settings.llm_provider {
             // Loading a GGUF and generating from it takes seconds of pure CPU. On
             // a runtime worker that stalls every other task on the executor —

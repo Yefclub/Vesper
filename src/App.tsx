@@ -14,7 +14,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { clsx } from "clsx";
-import { Moon, PanelLeftClose, PanelLeftOpen, Settings, Sparkles, Sun, TriangleAlert } from "lucide-react";
+import { House, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sparkles, Sun, TriangleAlert } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -27,6 +27,7 @@ import {
   RecorderStatus,
   SearchHit,
   ShortcutStatus,
+  Speaker,
   StartGate,
 } from "./lib/api";
 import { AudioLinesIcon, MicIcon } from "@animateicons/react/lucide";
@@ -38,6 +39,7 @@ import { Button, FOCUS, PANEL } from "./components/Button";
 import { Markdown } from "./components/Markdown";
 import { Tabs } from "./components/Tabs";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { RecoveryDialog } from "./components/RecoveryDialog";
 import { CopyButton } from "./components/CopyButton";
 import { SummaryHistory } from "./components/SummaryHistory";
 import { ChatPanel } from "./components/ChatPanel";
@@ -45,6 +47,7 @@ import { SummarizeButton } from "./components/SummarizeButton";
 import { ActionItems } from "./components/ActionItems";
 import { NotesPanel } from "./components/NotesPanel";
 import { EditableLine } from "./components/EditableLine";
+import { AudioPlayer } from "./components/AudioPlayer";
 import { ProcessingStatus } from "./components/ProcessingStatus";
 import { RecordDock } from "./components/RecordDock";
 import { ContextBar } from "./components/ContextBar";
@@ -81,6 +84,39 @@ async function dragWindow(stillPressed: () => boolean) {
 /// The sidebar's width, in pixels. Named because two places have to agree on
 /// it: the backdrop that draws it and the card that slides exactly that far.
 const SIDEBAR_WIDTH = 288;
+
+/// Whether a key event is the accelerator the backend registered.
+///
+/// Parsed from the same string the backend holds rather than hardcoded, so the
+/// focused-window shortcut and the global one cannot be different keys. `e.code`
+/// and not `e.key`: layout-independent, and the same `KeyR` the backend
+/// registers.
+///
+/// An accelerator this cannot parse matches nothing. The global shortcut still
+/// works — that one is registered by the OS, not by this — so the cost is the
+/// focused case, which is the milder half.
+function matchesAccelerator(e: KeyboardEvent, accelerator?: string): boolean {
+  if (!accelerator) return false;
+  const parts = accelerator.split("+").map((p) => p.trim().toLowerCase());
+  const key = parts[parts.length - 1];
+  const want = {
+    ctrl: parts.includes("ctrl") || parts.includes("control"),
+    shift: parts.includes("shift"),
+    alt: parts.includes("alt"),
+  };
+  if (e.ctrlKey !== want.ctrl || e.shiftKey !== want.shift || e.altKey !== want.alt) {
+    return false;
+  }
+  // `Ctrl+Shift+R` -> KeyR, `Ctrl+Shift+F9` -> F9, `Ctrl+Alt+Space` -> Space.
+  const code =
+    key.length === 1 && key >= "a" && key <= "z"
+      ? `Key${key.toUpperCase()}`
+      : key === "space"
+        ? "Space"
+        : key.toUpperCase();
+  return e.code === code;
+}
+
 
 export default function App() {
   const [bootLocale, setBootLocale] = useState("en");
@@ -139,6 +175,18 @@ function AppShell({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<LiveTranscript>({ segments: [] });
   const [transcriptOwner, setTranscriptOwner] = useState<string | null>(null);
+  /// Where the selected meeting's recording is, once the backend has proven the
+  /// row points inside its own directory.
+  ///
+  /// `undefined` while the answer is still in flight, which is a different thing
+  /// from `null`, "there is nothing to play". Without the distinction the note
+  /// about a missing recording flashes over every meeting on the way in.
+  const [audioPath, setAudioPath] = useState<string | null | undefined>(
+    undefined,
+  );
+  /// The player's element, held here because the transcript seeks through it and
+  /// the transcript is rendered by this component rather than by the player.
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const [status, setStatus] = useState<RecorderStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [query, setQuery] = useState("");
@@ -168,11 +216,26 @@ function AppShell({
   /// it — in which case the app names the key it listens for and claims nothing
   /// about the OS.
   const [shortcut, setShortcut] = useState<ShortcutStatus | null>(null);
+  /// The room has been quiet long enough that Vesper has asked whether anybody
+  /// is still there. Cleared by an answer, by somebody speaking, or by the stop
+  /// that follows an unanswered question.
+  const [silent, setSilent] = useState(false);
+  // Picks the catalogue no longer offers, moved to the nearest tier at
+  // startup. Read once — the command drains what it returns.
+  const [retired, setRetired] = useState<[string, string][]>([]);
   /// The last phase the backend reported for a meeting being finished. `null`
   /// until the first event, and permanently `null` on a build whose backend
   /// does not emit them — in which case none of the UI below renders and Stop
   /// behaves as it did.
   const [progress, setProgress] = useState<MeetingProgress | null>(null);
+  /// The meeting whose re-read failed, kept past the phase that reported it.
+  /// `meeting://progress` is one channel and the walk carries on: the summary
+  /// phases land after this one and would take the outcome off the screen
+  /// before anybody had read it. An id, so it cannot be shown over a different
+  /// meeting the user has opened since.
+  const [finalPassFailedId, setFinalPassFailedId] = useState<string | null>(
+    null,
+  );
   // The meeting being summarised, not a flag. Not `busy` either: that one is
   // also raised by starting, stopping and importing, and it would put the
   // summary pane to work over a recording that has not been transcribed yet.
@@ -184,9 +247,20 @@ function AppShell({
   const [confirmingRecord, setConfirmingRecord] = useState(false);
   const [skipRecordReminder, setSkipRecordReminder] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<MeetingRecord | null>(null);
+  /// Meetings the app was recording when it last stopped running, still waiting
+  /// to be answered for. A queue rather than one: a machine that lost power
+  /// twice has two, and each one is its own decision. The head is on screen and
+  /// answering it uncovers the next.
+  const [interrupted, setInterrupted] = useState<MeetingRecord[]>([]);
   /// Whether the meeting header's title is being edited. A generated title is a
   /// guess, and a guess the user cannot correct is worse than a date.
   const [renaming, setRenaming] = useState(false);
+  /// The segment whose turn header is being renamed, or null. The segment and
+  /// not the channel: a channel names every turn it opens, and keying on it
+  /// would turn all of them into an input at once.
+  const [renamingSpeakerAt, setRenamingSpeakerAt] = useState<string | null>(
+    null,
+  );
   /// Which section is being improved, or null. One at a time: the two calls
   /// would each read the meeting row and write a version from it, and the second
   /// to land would carry a copy of the first section from before the first
@@ -223,12 +297,64 @@ function AppShell({
     [meetings, selectedId],
   );
 
+  /// Ask where this meeting's recording is, whenever which meeting or what it is
+  /// doing changes. The status is a dependency and not decoration: the backend
+  /// refuses to name the file of a recording in progress, so a meeting asked
+  /// about while it was still being captured has to be asked again once it is
+  /// not.
+  ///
+  /// The late answer to an abandoned request is dropped. Selecting two meetings
+  /// quickly would otherwise leave the first one's recording under the second
+  /// one's transcript, which is the one mistake a player like this must not make.
+  const selectedStatus = selected?.status;
+  useEffect(() => {
+    if (!selectedId) {
+      setAudioPath(null);
+      return;
+    }
+    let live = true;
+    setAudioPath(undefined);
+    api
+      .meetingAudioPath(selectedId)
+      .then((p) => {
+        if (live) setAudioPath(p);
+      })
+      .catch(() => {
+        if (live) setAudioPath(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [selectedId, selectedStatus]);
+
+  /// Put the playhead where a line was said, and start playing only when the
+  /// thing that was clicked says it will.
+  ///
+  /// Every segment moves the playhead — that is what makes the transcript an
+  /// index into the recording — but only the offset above a turn, which reads
+  /// "play from here", also starts the audio. The bubbles cannot: their click
+  /// already opens the correction, and a line that begins playing under the
+  /// typing would be a second thing that click did.
+  ///
+  /// Best effort, deliberately: a click landing before the file's metadata has
+  /// arrived has nowhere to seek to, and the honest response is to do nothing
+  /// rather than to queue a jump the user has stopped expecting.
+  const seekTo = useCallback((ms: number, play: boolean) => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.currentTime = ms / 1000;
+    if (play) void el.play().catch(() => {});
+  }, []);
+
   /// The phase the header narrates, or `null` when there is nothing to say.
-  /// `ready` is the end of the walk and clears the state; `summary_failed` is
-  /// an outcome, and it belongs beside the button that retries it rather than
+  /// `ready` is the end of the walk and clears the state; the two failures are
+  /// outcomes, and each belongs beside the thing it happened to rather than
   /// under a spinner that has stopped spinning.
   const working =
-    progress && progress.phase !== "ready" && progress.phase !== "summary_failed"
+    progress &&
+    progress.phase !== "ready" &&
+    progress.phase !== "summary_failed" &&
+    progress.phase !== "final_pass_failed"
       ? progress.phase
       : null;
 
@@ -237,6 +363,8 @@ function AppShell({
   /// screen by the time the user reads this.
   const summaryFailed =
     progress?.phase === "summary_failed" && progress.meeting_id === selectedId;
+
+  const finalPassFailed = finalPassFailedId === selectedId;
 
   const refreshGate = useCallback(async () => {
     try {
@@ -259,13 +387,23 @@ function AppShell({
     }
   }, []);
 
+  /// Which load is the current one. Two of these can be in flight — a click on
+  /// the sidebar and the reload that follows a recording finishing — and the
+  /// slower request resolving last would paint its transcript under the other
+  /// one's title.
+  const loadRequest = useRef(0);
+
   const loadMeeting = useCallback(async (id: string) => {
+    const mine = ++loadRequest.current;
     setSelectedId(id);
     try {
       const [tr, m] = await Promise.all([
         api.getTranscript(id),
         api.getMeeting(id),
       ]);
+      // Somebody asked for a different meeting while this was in flight, and
+      // they asked more recently. This answer is about the previous one.
+      if (loadRequest.current !== mine) return;
       setTranscript(tr);
       // Which meeting the transcript on screen belongs to. `setSelectedId` above
       // ran before this request resolved, so the scroll effect keyed on the id
@@ -387,10 +525,21 @@ function AppShell({
   useEffect(() => {
     (async () => {
       void refreshDevices();
+      // Drains on read, so a failure here loses the notice rather than
+      // repeating it. Not worth an error banner of its own: the pick has
+      // already been moved, and the picker shows what it moved to.
+      void api.retiredModels().then(setRetired).catch(() => {});
       // Whether the OS granted the accelerator is not a startup failure: the
       // in-app listener works regardless, so a rejection here leaves the note
       // off rather than putting an error banner on the first screen.
       setShortcut(await api.shortcutStatus().catch(() => null));
+      // Asked once, at launch, and only here: `recording` and `paused` are
+      // states nothing but an interrupted run leaves behind, so asking again
+      // later would be asking about a recording that is under way.
+      //
+      // A failure loses the offer for this launch rather than raising a banner.
+      // The rows are untouched, so the next start of the app asks again.
+      void api.interruptedMeetings().then(setInterrupted).catch(() => {});
       try {
         await refreshMeetings();
         setModels(await api.listModels());
@@ -406,6 +555,12 @@ function AppShell({
         // about versions would be the kind of small lie that makes the rest of
         // the promise unbelievable.
         if (settings.offline_mode) return;
+        // Nor when the user has turned the check itself off, which is the
+        // narrower version of the same wish: no launch-time request, and no
+        // installer pulled behind it. It governs what happens on its own and
+        // nothing else — an update already found and offered can still be
+        // installed by clicking, because that is the user asking.
+        if (!settings.auto_update_check) return;
         // Offered, never applied on its own: installing relaunches the app, and
         // relaunching can throw away a recording in progress. Deciding that for
         // someone is not ours to do.
@@ -462,12 +617,31 @@ function AppShell({
         }),
       );
       track(
+        await listen<boolean>("recording://silent", (e) => setSilent(e.payload)),
+      );
+      track(
+        // The window stops it, through the same command a click goes through.
+        // Stopping from the ticker would be a second stop path with none of the
+        // guards that one has, and the two would drift.
+        await listen("recording://stop-silent", () => {
+          setSilent(false);
+          void handleStop();
+        }),
+      );
+      track(
         await listen<MeetingRecord>("meeting://ready", (e) => {
           setMeetings((prev) => {
             const rest = prev.filter((m) => m.id !== e.payload.id);
             return [e.payload, ...rest];
           });
-          setSelectedId(e.payload.id);
+          // The transcript comes with the selection. This handler already
+          // moved the selection to the finished meeting, and a stop pressed
+          // on the floating card goes straight to the backend — so nothing
+          // else was reloading the pane, and it went on showing whichever
+          // transcript happened to be up. What the backend last wrote is now
+          // the re-read of the whole recording, which makes the difference
+          // the length of the meeting rather than the last utterance of it.
+          void loadMeeting(e.payload.id);
         }),
       );
       track(
@@ -476,6 +650,13 @@ function AppShell({
           // `ready` is the end of the walk, not a step in it: the meeting is
           // on screen by then and a spinner beside it would be a lie.
           setProgress(p.phase === "ready" ? null : p);
+          // `saving` is the first phase of a walk, so it is where a previous
+          // meeting's note is cleared — the note outlives its own phase and
+          // would otherwise still be there for the next recording.
+          if (p.phase === "saving") setFinalPassFailedId(null);
+          if (p.phase === "final_pass_failed") {
+            setFinalPassFailedId(p.meeting_id);
+          }
           // The sidebar already paints a dot for any status other than
           // `ready`, so re-reading the list here lights it for free.
           if (p.phase === "transcribing") void refreshMeetings();
@@ -501,7 +682,7 @@ function AppShell({
       live = false;
       unsubs.forEach((u) => u());
     };
-  }, [handleStop, requestStart, refreshMeetings]);
+  }, [handleStop, requestStart, refreshMeetings, loadMeeting]);
 
   /// The in-app half of the record shortcut, and the half that actually works.
   ///
@@ -513,9 +694,11 @@ function AppShell({
   /// are in the call, not in Vesper.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      // `e.code`, not `e.key`: layout-independent, and the same `KeyR` the
-      // backend registers.
-      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.code !== "KeyR") return;
+      // The combination the backend actually registered, not a literal. It is a
+      // setting now, and a hardcoded Ctrl+Shift+R here would keep working
+      // alongside whatever the user picked — two keys that both start a
+      // recording, one of which they thought they had replaced.
+      if (!matchesAccelerator(e, shortcut?.accelerator)) return;
       // Bubble phase and a tag guard, so a field the user is typing in wins.
       // The capture phase would be right for a shortcut that must fire
       // unconditionally; this is not one.
@@ -543,6 +726,7 @@ function AppShell({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [
+    shortcut?.accelerator,
     status?.recording,
     busy,
     confirmingRecord,
@@ -700,6 +884,10 @@ function AppShell({
   }
 
   async function handleImport() {
+    // The card must not float over the chooser this is about to open. Both this
+    // and the export below are Vesper's own modals, and from the backend a
+    // modal and another application look identical.
+    await api.setModalOpen(true);
     try {
       const file = await open({
         multiple: false,
@@ -713,12 +901,14 @@ function AppShell({
     } catch (e) {
       setError(String(e));
     } finally {
+      await api.setModalOpen(false);
       setBusy(false);
     }
   }
 
   async function handleExport(format: "md" | "pdf" | "docx") {
     if (!selectedId) return;
+    await api.setModalOpen(true);
     try {
       const path = await save({
         // The meeting's own name, sanitised by the backend, so a folder of
@@ -734,6 +924,8 @@ function AppShell({
       await api.exportMeeting(selectedId, path, format);
     } catch (e) {
       setError(String(e));
+    } finally {
+      await api.setModalOpen(false);
     }
   }
 
@@ -777,6 +969,57 @@ function AppShell({
     }
   }
 
+  /// The name this meeting stored for a channel, or "" when it stored none.
+  ///
+  /// What the rename field is filled with. Never the fallback: a field
+  /// pre-filled with "Me" that somebody opens and walks away from would store
+  /// the English word, and freeze the meeting in a language they may not read.
+  function ownSpeakerName(speaker: Speaker) {
+    return (
+      (speaker === "me" ? selected?.speaker_me : selected?.speaker_others) ?? ""
+    );
+  }
+
+  /// What this meeting calls a channel: its own name if it has one, otherwise
+  /// the app's own word in the user's language. The fallback is computed here
+  /// and never sent back — a meeting nobody renamed has to follow the language
+  /// they pick next.
+  function speakerName(speaker: Speaker) {
+    return (
+      ownSpeakerName(speaker) ||
+      t(speaker === "me" ? "speaker.me" : "speaker.others")
+    );
+  }
+
+  /// Nothing is written optimistically, for the reason the title rename is not:
+  /// the backend cleans what it is given — the name reaches a model prompt and
+  /// an exported file — so what comes back is what is true, and a refusal leaves
+  /// the header showing what the database holds.
+  ///
+  /// One channel, never the pair. Sending both would send this snapshot's idea
+  /// of the other one too, and renaming the second while the first is still in
+  /// flight would carry that stale value back over a rename that had already
+  /// succeeded.
+  async function commitSpeakerRename(
+    meeting: MeetingRecord,
+    speaker: Speaker,
+    next: string,
+  ) {
+    setRenamingSpeakerAt(null);
+    // Blank clears. `null` is the absence of a name, which is what puts the
+    // channel back to the app's own word — and it is what typing nothing means.
+    const name = next.trim() || null;
+    const was =
+      (speaker === "me" ? meeting.speaker_me : meeting.speaker_others) ?? null;
+    if (name === was) return;
+    try {
+      const m = await api.setSpeakerName(meeting.id, speaker, name);
+      setMeetings((prev) => prev.map((x) => (x.id === m.id ? m : x)));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function handleDelete(id: string) {
     // Dismiss first. Leaving the dialog up after the meeting is gone offers a
     // Delete button for something that no longer exists.
@@ -790,17 +1033,63 @@ function AppShell({
     }
   }
 
+  /// Take the answered offer off the queue, whichever way it was answered.
+  function dismissRecovery() {
+    setInterrupted((queue) => queue.slice(1));
+  }
+
+  /// Finish a meeting whose recording was cut short.
+  ///
+  /// The offer comes down first: this reads the whole recording, which on a long
+  /// meeting is minutes, and a dialog left over it would sit there through all
+  /// of them. The `meeting://progress` events are what narrate the wait, the
+  /// same ones a stop raises.
+  async function handleRecover(id: string) {
+    dismissRecovery();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.recoverMeeting(id);
+      await refreshMeetings();
+      await loadMeeting(id);
+    } catch (e) {
+      // The meeting is untouched by a recovery that failed, so it is offered
+      // again the next time the app starts. Nothing here has to put it back.
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDiscardInterrupted(id: string) {
+    dismissRecovery();
+    try {
+      await api.discardInterruptedMeeting(id);
+      await refreshMeetings();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   /// Picking a capture device in the dock writes straight through — there is no
   /// Save button within 400px of it, and the choice is one click away from the
   /// recording it governs. Same path as every other save, so it fails the same
   /// way, and the gate is re-read because "no microphone" is one of the reasons
-  /// it blocks.
-  async function handlePickDevice(kind: "mic" | "system", id: string | null) {
+  /// it blocks — and now "both channels off" is another.
+  ///
+  /// The device id travels with the switch rather than instead of it: turning a
+  /// channel off keeps the device it was pointing at, so it comes back to that
+  /// one and not to the system default.
+  async function handlePickDevice(
+    kind: "mic" | "system",
+    id: string | null,
+    enabled: boolean,
+  ) {
     try {
       const next = await api.saveSettings(
         kind === "mic"
-          ? { ...settings, mic_device_id: id }
-          : { ...settings, system_device_id: id },
+          ? { ...settings, mic_device_id: id, capture_me: enabled }
+          : { ...settings, system_device_id: id, capture_others: enabled },
       );
       setSettings(next);
       onSettingsChange(next);
@@ -920,6 +1209,25 @@ function AppShell({
           >
             {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
           </Button>
+          {/* Only with the sidebar closed and a meeting open. The way back to
+              the empty screen lived in the sidebar and nowhere else, so closing
+              the sidebar took it away — and closing the sidebar is exactly when
+              somebody is reading a meeting and wants out of it.
+
+              Hidden with the sidebar open on purpose: the same action is right
+              there in the list header, and two buttons for one thing on screen
+              at once is how a user learns to distrust both. */}
+          {!sidebarOpen && selected && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={startNewMeeting}
+              title={t("nav.new")}
+              aria-label={t("nav.new")}
+            >
+              <House size={16} />
+            </Button>
+          )}
           {/* No radius: the asset is the mark alone now, not a rounded tile, so
               a corner clip would shave the artwork instead of a background. */}
           <img src={logo} alt="" className="h-8 w-8" />
@@ -1096,6 +1404,57 @@ function AppShell({
                 </span>
               </div>
             )}
+            {/* A question, not a warning: the answer is a click OR simply
+                speaking again, and the copy says both. It sits with the other
+                banners rather than as a modal — a dialog over a running meeting
+                is a thing to dismiss before you can see the transcript, and the
+                whole point is that the user may not be at the machine. */}
+            {/* Which model writes a user's summaries is not something to
+                change under them in a log file. Dismissible, and it does not
+                come back: the command that fed it drained the list. */}
+            {retired.length > 0 && (
+              <div
+                role="status"
+                className="flex flex-wrap items-center gap-3 border-b border-warn/30 bg-warn/10 px-6 py-2 text-sm text-warn"
+              >
+                <span className="text-fg-muted">
+                  {retired
+                    .map(([from, to]) =>
+                      t("model.retired").replace("{from}", from).replace("{to}", to),
+                    )
+                    .join(" ")}
+                </span>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  className="ml-auto"
+                  onClick={() => setRetired([])}
+                >
+                  {t("action.dismiss")}
+                </Button>
+              </div>
+            )}
+            {silent && status?.recording && (
+              <div
+                role="status"
+                data-testid="silence-notice"
+                className="flex flex-wrap items-center gap-3 border-b border-warn/30 bg-warn/10 px-6 py-2 text-sm text-warn"
+              >
+                <span className="font-medium">{t("silence.title")}</span>
+                <span className="text-fg-muted">{t("silence.body")}</span>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  className="ml-auto"
+                  onClick={() => {
+                    setSilent(false);
+                    void api.keepRecording();
+                  }}
+                >
+                  {t("silence.keep")}
+                </Button>
+              </div>
+            )}
             {pendingUpdate && !settings.offline_mode && (
               <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent/10 px-6 py-2 text-sm text-accent">
                 <span>{t("update.available").replace("{version}", pendingUpdate.version)}</span>
@@ -1259,6 +1618,36 @@ function AppShell({
                       </div>
                     </div>
                   </div>
+                  {/* Under the title rather than in its own strip: this is the
+                      meeting's recording, not a second region, and a rule of its
+                      own directly beneath the header's would read as one.
+                      Nothing is drawn while the answer is in flight — see
+                      `audioPath` — and nothing is drawn for the meeting being
+                      recorded either, whose file the backend refuses to name
+                      while it is still growing. Saying "not on this computer"
+                      about audio that is arriving is worse than saying nothing. */}
+                  {audioPath !== undefined &&
+                    selected.status !== "recording" &&
+                    selected.status !== "paused" && (
+                      <div className="mx-auto w-full max-w-pane px-6 pb-3">
+                        {audioPath ? (
+                          <AudioPlayer
+                            // Remounted per recording, so the transport does not
+                            // open the next meeting showing the previous one's
+                            // position.
+                            key={audioPath}
+                            audioRef={audioRef}
+                            path={audioPath}
+                            durationMs={selected.duration_ms}
+                            onUnavailable={() => setAudioPath(null)}
+                          />
+                        ) : (
+                          <p className="text-xs text-fg-muted">
+                            {t("player.unavailable")}
+                          </p>
+                        )}
+                      </div>
+                    )}
                 </div>
 
                 {/* The copy control rides the tab rule rather than the pane:
@@ -1286,11 +1675,9 @@ function AppShell({
                         text={transcript.segments
                           .map(
                             (s) =>
-                              `[${formatDuration(s.start_ms)}] ${
-                                s.speaker === "me"
-                                  ? t("speaker.me")
-                                  : t("speaker.others")
-                              }: ${s.text}`,
+                              `[${formatDuration(s.start_ms)}] ${speakerName(
+                                s.speaker,
+                              )}: ${s.text}`,
                           )
                           .join("\n")}
                       />
@@ -1336,6 +1723,20 @@ function AppShell({
                         className="mx-auto max-w-pane"
                         data-testid="transcript-panel"
                       >
+                        {/* Above the lines, because it says what the lines are:
+                            these came from the live pass and the re-read that
+                            was meant to replace them did not finish. Small and
+                            in the pane rather than a banner across the top —
+                            the recording, the transcript and the summary are
+                            all there, and only the improvement is missing. */}
+                        {finalPassFailed && (
+                          <p
+                            data-testid="final-pass-failed"
+                            className="mb-4 text-xs text-fg-muted"
+                          >
+                            {t("processing.final_pass_failed")}
+                          </p>
+                        )}
                         {transcript.segments?.length ? (
                           // `initial={false}` so opening a past meeting does not
                           // blur-and-fade three hundred rows at once: only the
@@ -1383,12 +1784,86 @@ function AppShell({
                                         me && "flex-row-reverse",
                                       )}
                                     >
-                                      <span className="font-medium">
-                                        {me ? t("speaker.me") : t("speaker.others")}
-                                      </span>
-                                      <span className="tabular-nums">
-                                        {formatDuration(s.start_ms)}
-                                      </span>
+
+                                      {/* Click the name to change it, in place
+                                          and at the same size, like the title
+                                          in the header above. The name belongs
+                                          to the meeting, so editing it here
+                                          renames every turn — and the export,
+                                          the copy and the model's copy with
+                                          them. */}
+                                      {renamingSpeakerAt === s.id ? (
+                                        <input
+                                          autoFocus
+                                          aria-label={t("speaker.rename")}
+                                          // The word the transcript falls back
+                                          // to, shown but not stored: clearing
+                                          // the field is how a channel goes
+                                          // back to it.
+                                          placeholder={speakerName(s.speaker)}
+                                          defaultValue={ownSpeakerName(s.speaker)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === "Enter") {
+                                              e.preventDefault();
+                                              void commitSpeakerRename(
+                                                selected,
+                                                s.speaker,
+                                                e.currentTarget.value,
+                                              );
+                                            } else if (e.key === "Escape") {
+                                              e.preventDefault();
+                                              // Put the name back before
+                                              // closing, so the blur that
+                                              // follows commits nothing.
+                                              e.currentTarget.value =
+                                                ownSpeakerName(s.speaker);
+                                              setRenamingSpeakerAt(null);
+                                            }
+                                          }}
+                                          onBlur={(e) =>
+                                            void commitSpeakerRename(
+                                              selected,
+                                              s.speaker,
+                                              e.currentTarget.value,
+                                            )
+                                          }
+                                          className={`w-32 rounded-sm bg-transparent text-2xs font-medium ${FOCUS}`}
+                                        />
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setRenamingSpeakerAt(s.id)
+                                          }
+                                          aria-label={t("speaker.rename")}
+                                          className={`cursor-text rounded-sm font-medium ${FOCUS}`}
+                                        >
+                                          {speakerName(s.speaker)}
+                                        </button>
+                                      )}
+                                      {/* The offset was already the seek target
+                                          in everything but function, so it is
+                                          the one control that starts playing.
+                                          The bubbles below only move the
+                                          playhead — see `seekTo`. Plain text
+                                          again when there is nothing to play,
+                                          so the app never offers an action it
+                                          cannot perform. */}
+                                      {audioPath ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => seekTo(s.start_ms, true)}
+                                          aria-label={t("transcript.seek")}
+                                          className={`rounded-xs tabular-nums hover:text-accent ${FOCUS}`}
+                                        >
+                                          {formatDuration(s.start_ms)}
+                                        </button>
+                                      ) : (
+                                        <span className="tabular-nums">
+                                          {formatDuration(s.start_ms)}
+                                        </span>
+                                      )}
+
                                     </div>
                                   )}
                                   {/* The corner nearest the speaker's own edge
@@ -1411,6 +1886,17 @@ function AppShell({
                                       status.meeting_id !== selected.id
                                     }
                                     label={t("transcript.edit")}
+                                    // Every segment, not only the one that
+                                    // opens a turn: the turn's offset is the
+                                    // only one drawn, and without this the
+                                    // lines under it would be the part of the
+                                    // transcript the recording cannot be
+                                    // reached from.
+                                    onSeek={
+                                      audioPath
+                                        ? () => seekTo(s.start_ms, false)
+                                        : undefined
+                                    }
                                     onSave={async (next) => {
                                       const updated =
                                         await api.editTranscriptSegment(
@@ -1689,6 +2175,8 @@ function AppShell({
                   devices={devices}
                   micDeviceId={settings.mic_device_id}
                   systemDeviceId={settings.system_device_id}
+                  micEnabled={settings.capture_me ?? true}
+                  systemEnabled={settings.capture_others ?? true}
                   onStart={requestStart}
                   onOpenSettings={() => setShowSettings(true)}
                   onPickDevice={handlePickDevice}
@@ -1771,6 +2259,19 @@ function AppShell({
         )}
       </AnimatePresence>
 
+      {/* One at a time, oldest first. Two crashes are two decisions, and a
+          stack of dialogs is a way to answer the wrong one. */}
+      <AnimatePresence>
+        {interrupted[0] && (
+          <RecoveryDialog
+            title={interrupted[0].title}
+            onRecover={() => handleRecover(interrupted[0].id)}
+            onDiscard={() => handleDiscardInterrupted(interrupted[0].id)}
+            onLater={dismissRecovery}
+          />
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {pendingDelete && (
           <ConfirmDialog
@@ -1791,6 +2292,20 @@ function AppShell({
           <SettingsPanel
             settings={settings}
             models={models}
+            shortcut={shortcut}
+            onShortcutChange={(next) => {
+              setShortcut(next);
+              // The snapshot too, not just the status. `set_record_shortcut`
+              // writes the row itself, so leaving this stale meant a later Save
+              // of any unrelated field sent the OLD combination back and undid
+              // the change on the next launch.
+              if (next.registered) {
+                setSettings((s) => ({
+                  ...s,
+                  record_shortcut: next.accelerator,
+                }));
+              }
+            }}
             onClose={() => setShowSettings(false)}
             onWiped={() => {
               // Everything the shell is holding is about to be about meetings

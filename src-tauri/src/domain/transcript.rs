@@ -1,4 +1,4 @@
-use crate::domain::speaker::Speaker;
+use crate::domain::speaker::{Speaker, SpeakerNames};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -87,10 +87,59 @@ impl LiveTranscript {
         }
     }
 
-    pub fn plain_text(&self) -> String {
+    /// Take a later transcription of the same audio in place of this one, one
+    /// speaker at a time.
+    ///
+    /// Replacement, not a merge. The two passes heard the same words, so a merge
+    /// would have to tell "the same sentence decoded better" from "two different
+    /// things said", and nothing in a transcript carries that — the failure mode
+    /// is every sentence of the meeting appearing twice. The later pass read the
+    /// whole recording in one go, which is the one that keeps its own decoder
+    /// context across the meeting, so it is the better of the two everywhere and
+    /// there is nothing in the earlier one worth keeping beside it.
+    ///
+    /// The clock goes with it. The live pass timestamps an utterance by where
+    /// the segmenter cut it; a whole-recording pass timestamps each line by where
+    /// the engine itself heard it, which is finer and does not inherit our pause
+    /// heuristic. Both count from the start of the recording, so nothing shifts.
+    ///
+    /// Per speaker, because the two channels are transcribed independently and
+    /// either can come back empty. A whole-recording pass that heard the
+    /// microphone and nothing on the system channel is not a statement that
+    /// nobody else spoke — it is one channel's answer, and taking it as the
+    /// whole meeting would delete the other half of a conversation that was
+    /// already on screen. A speaker the later pass has no line for keeps the
+    /// lines it had.
+    ///
+    /// Returns whether anything was replaced.
+    pub fn replace_with(&mut self, better: LiveTranscript) -> bool {
+        if better.segments.is_empty() {
+            return false;
+        }
+        let heard = |speaker| better.segments.iter().any(|s| s.speaker == speaker);
+        let mut merged = LiveTranscript::new();
+        for s in self.segments.drain(..) {
+            if !heard(s.speaker) {
+                merged.append(s);
+            }
+        }
+        for s in better.segments {
+            merged.append(s);
+        }
+        *self = merged;
+        true
+    }
+
+    /// The lines as the meeting names its two channels.
+    ///
+    /// The names are the caller's to supply rather than the segment's own: they
+    /// belong to the meeting, and the one thing that must not happen is a
+    /// transcript on screen reading "Ana" while the copy the summary model was
+    /// handed still reads "Me".
+    pub fn plain_text(&self, names: &SpeakerNames) -> String {
         self.segments
             .iter()
-            .map(|s| format!("{}: {}", s.speaker.label(), s.text))
+            .map(|s| format!("{}: {}", names.label(s.speaker), s.text))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -101,7 +150,7 @@ impl LiveTranscript {
     /// they are noise when the task is "what happened". A refinement is being
     /// asked to find what the first pass missed, and when something was said is
     /// most of how a model tells a decision from an aside.
-    pub fn timestamped_text(&self) -> String {
+    pub fn timestamped_text(&self, names: &SpeakerNames) -> String {
         self.segments
             .iter()
             .map(|s| {
@@ -110,7 +159,7 @@ impl LiveTranscript {
                     "[{:02}:{:02}] {}: {}",
                     secs / 60,
                     secs % 60,
-                    s.speaker.label(),
+                    names.label(s.speaker),
                     s.text
                 )
             })
@@ -138,6 +187,11 @@ pub fn format_ts(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::i18n::Locale;
+
+    fn english() -> SpeakerNames {
+        SpeakerNames::resolve(None, None, Locale::En)
+    }
 
     fn two_lines() -> LiveTranscript {
         let mut t = LiveTranscript::new();
@@ -182,8 +236,69 @@ mod tests {
     fn the_corrected_words_are_what_the_summary_will_read() {
         let mut t = two_lines();
         t.edit_segment("a", "Claude Code");
-        assert!(t.plain_text().contains("Claude Code"));
-        assert!(!t.plain_text().contains("clode Cote"));
+        assert!(t.plain_text(&english()).contains("Claude Code"));
+        assert!(!t.plain_text(&english()).contains("clode Cote"));
+    }
+
+    /// The final pass is the source of truth once it has words, and it brings
+    /// its own clock — the summary, the export and the search index all read
+    /// what this leaves behind.
+    #[test]
+    fn a_later_pass_with_words_replaces_the_live_one_whole() {
+        let mut t = two_lines();
+        let mut better = LiveTranscript::new();
+        better.append(TranscriptSegment::new(Speaker::Me, "Claude Code", 120, 980));
+        better.append(TranscriptSegment::new(
+            Speaker::Others,
+            "sim, claro",
+            1_100,
+            1_900,
+        ));
+        assert!(t.replace_with(better));
+        assert_eq!(
+            t.segments().len(),
+            2,
+            "the live lines were kept beside the new ones"
+        );
+        assert_eq!(t.segments()[0].text, "Claude Code");
+        assert_eq!(t.segments()[1].text, "sim, claro");
+        assert_eq!(
+            t.segments()[0].start_ms,
+            120,
+            "the later pass brings its clock"
+        );
+    }
+
+    /// A pass that heard nothing is not an improvement, and a meeting whose
+    /// transcript went blank at Stop would be the worst possible outcome of a
+    /// feature sold as better quality.
+    #[test]
+    fn a_later_pass_with_nothing_in_it_never_replaces_words() {
+        let mut t = two_lines();
+        assert!(!t.replace_with(LiveTranscript::new()));
+        assert_eq!(t.segments().len(), 2);
+    }
+
+    /// The same rule, one channel at a time. The two channels are transcribed
+    /// independently and either can come back empty, so a pass that heard the
+    /// microphone and nothing on the system channel must not take the other
+    /// side of the conversation down with it.
+    #[test]
+    fn a_speaker_the_later_pass_did_not_hear_keeps_its_lines() {
+        let mut t = two_lines();
+        let mut better = LiveTranscript::new();
+        better.append(TranscriptSegment::new(Speaker::Me, "Claude Code", 120, 980));
+        assert!(t.replace_with(better));
+        let lines: Vec<_> = t
+            .segments()
+            .iter()
+            .map(|s| (s.speaker, s.text.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![(Speaker::Me, "Claude Code"), (Speaker::Others, "sim")],
+            "the channel nobody re-read lost its words"
+        );
     }
 
     #[test]
@@ -213,9 +328,25 @@ mod tests {
         let mut t = LiveTranscript::new();
         t.append(TranscriptSegment::new(Speaker::Me, "hello", 0, 500));
         t.append(TranscriptSegment::new(Speaker::Others, "hi", 500, 900));
-        let plain = t.plain_text();
+        let plain = t.plain_text(&english());
         assert!(plain.contains("Me: hello"));
         assert!(plain.contains("Others: hi"));
+    }
+
+    /// The text every prompt is built from. A name that reached the screen and
+    /// not this would leave the model writing about "Others" in a summary the
+    /// reader sees headed "Cliente".
+    #[test]
+    fn the_meetings_own_names_are_what_the_model_reads() {
+        let mut t = LiveTranscript::new();
+        t.append(TranscriptSegment::new(Speaker::Me, "hello", 0, 500));
+        t.append(TranscriptSegment::new(Speaker::Others, "hi", 500, 900));
+        let names = SpeakerNames::resolve(Some("Ana"), Some("Cliente"), Locale::En);
+        assert_eq!(t.plain_text(&names), "Ana: hello\nCliente: hi");
+        assert_eq!(
+            t.timestamped_text(&names),
+            "[00:00] Ana: hello\n[00:00] Cliente: hi"
+        );
     }
 
     #[test]

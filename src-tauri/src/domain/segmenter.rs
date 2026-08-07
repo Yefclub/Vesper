@@ -16,6 +16,19 @@
 //! constantly, so a per-sample threshold finds "silence" inside every vowel and
 //! would cut more often than the clock it replaces.
 
+/// Whether a buffer holds a frame loud enough to be speech, by the same measure
+/// the segmenter cuts on.
+///
+/// For audio that has not reached a segmenter yet. Loud is not the same as
+/// spoken — a fan clears this — so the answer is only ever worth "do not call
+/// this silence", never "somebody talked".
+pub fn has_speech(samples: &[i16], sample_rate: u32) -> bool {
+    let frame = ((sample_rate.max(1) as u64 * FRAME_MS) / 1000).max(1) as usize;
+    samples
+        .chunks_exact(frame)
+        .any(|f| f.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0) >= QUIET_PEAK as u16)
+}
+
 /// One stretch of speech, bounded by pauses, ready to transcribe.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Utterance {
@@ -202,6 +215,16 @@ impl Segmenter {
         self.pending = head;
     }
 
+    /// Whether an utterance is under way — audio held back, waiting for the
+    /// pause that ends it.
+    ///
+    /// True means somebody is speaking right now, or spoke and the words have
+    /// not come back from a model yet. `take_one` drops leading silence, so
+    /// what is held always begins at speech and a quiet room holds nothing.
+    pub fn holding(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// One frame per `FRAME_MS`, true where the frame is silent. The trailing
     /// partial frame is not judged — it is not a whole window yet, and calling
     /// it silent would end an utterance on the poll interval again.
@@ -372,6 +395,24 @@ mod tests {
         }
         // And it did not pile up waiting for a boundary either.
         assert!(s.pending.is_empty());
+    }
+
+    /// The silence guard asks this before it ends a recording, so a quiet room
+    /// has to answer "nothing held" and a sentence still being spoken has to
+    /// answer "wait".
+    #[test]
+    fn holding_says_whether_a_sentence_is_under_way() {
+        let mut s = Segmenter::new(SR);
+        assert!(!s.holding(), "a fresh segmenter holds nothing");
+        s.push(&quiet(3_000));
+        assert!(!s.holding(), "a quiet room held audio");
+        s.push(&speech(2_000));
+        assert!(s.holding(), "speech without its pause was not held");
+        s.push(&quiet(1_000));
+        assert!(
+            !s.holding(),
+            "audio stayed behind after the utterance was taken"
+        );
     }
 
     #[test]

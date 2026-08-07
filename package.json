@@ -1,7 +1,7 @@
 {
   "name": "vesper",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "preflight": "python scripts/check-workflows.py"
+    "preflight": "python scripts/check-workflows.py",
+    "notices": "python scripts/notices.py"
   },
   "dependencies": {
     "@animateicons/react": "^0.4.1",
