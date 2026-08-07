@@ -141,3 +141,26 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  # After all three, never from inside one of them. Three jobs writing one
+  # `latest.json` is a race, and the dev channel lost it: the manifest that
+  # survived named a Windows installer from two builds earlier, so every install
+  # on that platform updated to the version it already had, forever.
+  #
+  # The release is a draft until a human publishes it, so this runs while nothing
+  # is visible to an installed application yet.
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write latest.json from the release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          python scripts/updater-manifest.py \
+            --tag "$TAG" \
+            --version "${TAG#v}" \
+            --notes "Vesper $TAG" \
+            --pub-date "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
