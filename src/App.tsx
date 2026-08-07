@@ -1075,13 +1075,21 @@ function AppShell({
   /// Save button within 400px of it, and the choice is one click away from the
   /// recording it governs. Same path as every other save, so it fails the same
   /// way, and the gate is re-read because "no microphone" is one of the reasons
-  /// it blocks.
-  async function handlePickDevice(kind: "mic" | "system", id: string | null) {
+  /// it blocks — and now "both channels off" is another.
+  ///
+  /// The device id travels with the switch rather than instead of it: turning a
+  /// channel off keeps the device it was pointing at, so it comes back to that
+  /// one and not to the system default.
+  async function handlePickDevice(
+    kind: "mic" | "system",
+    id: string | null,
+    enabled: boolean,
+  ) {
     try {
       const next = await api.saveSettings(
         kind === "mic"
-          ? { ...settings, mic_device_id: id }
-          : { ...settings, system_device_id: id },
+          ? { ...settings, mic_device_id: id, capture_me: enabled }
+          : { ...settings, system_device_id: id, capture_others: enabled },
       );
       setSettings(next);
       onSettingsChange(next);
@@ -2167,6 +2175,8 @@ function AppShell({
                   devices={devices}
                   micDeviceId={settings.mic_device_id}
                   systemDeviceId={settings.system_device_id}
+                  micEnabled={settings.capture_me ?? true}
+                  systemEnabled={settings.capture_others ?? true}
                   onStart={requestStart}
                   onOpenSettings={() => setShowSettings(true)}
                   onPickDevice={handlePickDevice}

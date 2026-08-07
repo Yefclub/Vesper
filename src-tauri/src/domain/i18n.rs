@@ -312,6 +312,10 @@ fn en_dict() -> HashMap<&'static str, &'static str> {
         ("speaker.rename", "Rename this speaker"),
         ("settings.speaker_me_name", "Microphone name in the transcript"),
         ("settings.speaker_others_name", "System audio name in the transcript"),
+        ("gate.no_channels", "Both capture channels are off. Turn one on to record."),
+        ("channel.off", "Off"),
+        ("settings.capture_me", "Record the microphone"),
+        ("settings.capture_others", "Record the system audio"),
     ])
 }
 
@@ -584,6 +588,10 @@ fn pt_dict() -> HashMap<&'static str, &'static str> {
         ("speaker.rename", "Renomear este participante"),
         ("settings.speaker_me_name", "Nome do microfone na transcrição"),
         ("settings.speaker_others_name", "Nome do áudio do sistema na transcrição"),
+        ("gate.no_channels", "Os dois canais de captura estão desligados. Ligue um para gravar."),
+        ("channel.off", "Desligado"),
+        ("settings.capture_me", "Gravar o microfone"),
+        ("settings.capture_others", "Gravar o áudio do sistema"),
     ])
 }
 

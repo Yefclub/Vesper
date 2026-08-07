@@ -3,6 +3,7 @@
 //! PipeWire (Linux) for system audio — never fakes Others from the mic.
 
 use crate::audio::levels::ChannelLevels;
+use crate::domain::channels::ChannelSelection;
 use crate::domain::recovery::{wav_header_fix, RIFF_SIZE_OFFSET};
 use crate::domain::segmenter::has_speech;
 use crate::domain::speaker::merge_dual_channel;
@@ -13,6 +14,7 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -43,9 +45,21 @@ struct RecorderInner {
     elapsed_before_pause_ms: u64,
     /// True when a real system-loopback stream is active.
     system_loopback_active: bool,
+    /// The channels this recording was started with.
+    ///
+    /// Kept here rather than read back from settings, because the two stop
+    /// agreeing the moment a recording is running: `start` copies the selection
+    /// into the streams, so a switch flipped afterwards belongs to the next
+    /// recording. A meter reading zero has two meanings — nobody is talking,
+    /// or nothing is listening — and this is what tells them apart.
+    channels: ChannelSelection,
     /// Whether each capture thread has finished. A channel that has ended will
     /// never produce another sample, which is what lets the other one carry on
     /// being written — see `flush_frontier`.
+    ///
+    /// A channel that is switched off starts out already ended: it has no
+    /// thread to finish and will never produce a sample either, which is the
+    /// same thing as far as the file is concerned.
     mic_ended: bool,
     sys_ended: bool,
 }
@@ -93,6 +107,7 @@ impl DualChannelRecorder {
                 start: None,
                 elapsed_before_pause_ms: 0,
                 system_loopback_active: false,
+                channels: ChannelSelection::default(),
                 mic_ended: false,
                 sys_ended: false,
             })),
@@ -123,6 +138,13 @@ impl DualChannelRecorder {
         self.inner.lock().system_loopback_active
     }
 
+    /// The channels the running capture is listening to. After a stop it is
+    /// whatever the last `start` was given, the same way `elapsed_ms` keeps the
+    /// last recording's clock.
+    pub fn channels(&self) -> ChannelSelection {
+        self.inner.lock().channels
+    }
+
     pub fn elapsed_ms(&self) -> u64 {
         let g = self.inner.lock();
         elapsed(
@@ -136,6 +158,7 @@ impl DualChannelRecorder {
     pub fn start(
         &self,
         out_path: PathBuf,
+        channels: ChannelSelection,
         mic_device_id: Option<String>,
         system_device_id: Option<String>,
     ) -> Result<(), CaptureError> {
@@ -169,233 +192,310 @@ impl DualChannelRecorder {
             g.elapsed_before_pause_ms = 0;
             g.levels = ChannelLevels::default();
             g.system_loopback_active = false;
-            g.mic_ended = false;
-            g.sys_ended = false;
+            g.channels = channels;
+            // A channel that is off is ended before it began — no thread to
+            // finish, and never a sample to come. `flush_frontier` holds the
+            // file back to whatever both channels have reached, so left false
+            // this would sit at zero for the whole meeting: a mic-only
+            // recording would reach the disk only at Stop, which is exactly the
+            // crash the streaming write exists to survive.
+            g.mic_ended = !channels.me;
+            g.sys_ended = !channels.others;
         }
 
         self.stop_flag.store(false, Ordering::SeqCst);
         self.paused.store(false, Ordering::SeqCst);
 
-        let stop = self.stop_flag.clone();
-        let paused = self.paused.clone();
-        let inner_mic = self.inner.clone();
-        let inner_sys = self.inner.clone();
-        let stop_sys = self.stop_flag.clone();
-        let paused_sys = self.paused.clone();
-        let mic_id = mic_device_id.clone();
-        let sys_id = system_device_id.clone();
+        // One handle per channel that is on, so a recording with a channel
+        // switched off has one worker and one open stream. Nothing is opened
+        // and thrown away: an open stream is a microphone light on the user's
+        // machine and a device another application then cannot take exclusively
+        // — a recorder told not to listen must not be holding the hardware.
+        let mut workers: Vec<JoinHandle<()>> = Vec::new();
+        // Each worker says once whether its stream opened, and `start` waits to
+        // hear from every one it spawned before calling this a recording.
+        //
+        // Opening happens on the worker rather than here, so without this the
+        // failure had nowhere to go: the thread printed and returned while this
+        // marked the recorder running. With two channels that cost half a
+        // meeting; with one selected it cost all of it, and the user found out
+        // when they pressed Stop on a silent file.
+        let (ready_tx, ready_rx) = mpsc::channel::<bool>();
 
         // —— Microphone (Me) ——
-        let mic_handle = thread::Builder::new()
-            .name("vesper-mic".into())
-            .spawn(move || {
-                let cfg = StreamConfig {
-                    kind: SourceKind::Mic,
-                    device_id: mic_id,
-                    output: OutputFormat {
-                        sample_rate,
-                        channels: 1,
-                    },
-                    exclude_self: false,
-                    ..Default::default()
-                };
-                let mut stream = match open(cfg) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("mic open failed: {e}");
-                        // Said out loud on every way out, because the streaming
-                        // write holds the file back to whatever both channels
-                        // have reached. A microphone that never opened would
-                        // otherwise hold it at nothing for the whole meeting,
-                        // and the system audio would never reach disk either.
+        if channels.me {
+            let stop = self.stop_flag.clone();
+            let paused = self.paused.clone();
+            let inner_mic = self.inner.clone();
+            let ready = ready_tx.clone();
+            let mic_handle = thread::Builder::new()
+                .name("vesper-mic".into())
+                .spawn(move || {
+                    let cfg = StreamConfig {
+                        kind: SourceKind::Mic,
+                        device_id: mic_device_id,
+                        output: OutputFormat {
+                            sample_rate,
+                            channels: 1,
+                        },
+                        exclude_self: false,
+                        ..Default::default()
+                    };
+                    let mut stream = match open(cfg) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("mic open failed: {e}");
+                            // Said out loud on every way out, because the streaming
+                            // write holds the file back to whatever both channels
+                            // have reached. A microphone that never opened would
+                            // otherwise hold it at nothing for the whole meeting,
+                            // and the system audio would never reach disk either.
+                            inner_mic.lock().mic_ended = true;
+                            let _ = ready.send(false);
+                            return;
+                        }
+                    };
+                    if let Err(e) = stream.start() {
+                        eprintln!("mic start failed: {e}");
                         inner_mic.lock().mic_ended = true;
+                        let _ = ready.send(false);
                         return;
                     }
-                };
-                if let Err(e) = stream.start() {
-                    eprintln!("mic start failed: {e}");
-                    inner_mic.lock().mic_ended = true;
-                    return;
-                }
-                let mut stream_paused = false;
-                while !stop.load(Ordering::SeqCst) {
-                    let want_pause = paused.load(Ordering::SeqCst);
-                    match capture_step(want_pause, stream_paused) {
-                        StreamAction::EnterPause => {
-                            stream.pause();
-                            stream_paused = true;
-                            // Chunks already in the ring are pre-pause audio and
-                            // belong in the recording, so take them now.
-                            while let Some(chunk) = stream.poll_chunk() {
-                                let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                                inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                    let _ = ready.send(true);
+                    // Dropped here rather than at the end of the thread, and
+                    // load-bearing: a worker that dies without reporting has to
+                    // show up as the channel closing. Held for the length of the
+                    // capture, the surviving worker's copy would keep it open and
+                    // `start` would wait for a message nobody is left to send.
+                    drop(ready);
+                    let mut stream_paused = false;
+                    while !stop.load(Ordering::SeqCst) {
+                        let want_pause = paused.load(Ordering::SeqCst);
+                        match capture_step(want_pause, stream_paused) {
+                            StreamAction::EnterPause => {
+                                stream.pause();
+                                stream_paused = true;
+                                // Chunks already in the ring are pre-pause audio and
+                                // belong in the recording, so take them now.
+                                while let Some(chunk) = stream.poll_chunk() {
+                                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                                }
                             }
+                            StreamAction::LeavePause => {
+                                stream.resume();
+                                stream_paused = false;
+                            }
+                            StreamAction::StayPaused | StreamAction::Poll => {}
                         }
-                        StreamAction::LeavePause => {
-                            stream.resume();
-                            stream_paused = false;
+                        if want_pause {
+                            // Nothing is arriving; a meter frozen at the last
+                            // pre-pause value says the opposite.
+                            {
+                                let mut g = inner_mic.lock();
+                                g.levels.me_peak = 0.0;
+                                g.levels.me_rms = 0.0;
+                            }
+                            thread::sleep(Duration::from_millis(20));
+                            continue;
                         }
-                        StreamAction::StayPaused | StreamAction::Poll => {}
-                    }
-                    if want_pause {
-                        // Nothing is arriving; a meter frozen at the last
-                        // pre-pause value says the opposite.
-                        {
+                        while let Some(chunk) = stream.poll_chunk() {
+                            let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                             let mut g = inner_mic.lock();
-                            g.levels.me_peak = 0.0;
-                            g.levels.me_rms = 0.0;
+                            g.levels.me_peak = chunk.peak;
+                            g.levels.me_rms = chunk.rms;
+                            g.mic_samples.extend_from_slice(&pcm);
                         }
-                        thread::sleep(Duration::from_millis(20));
-                        continue;
+                        thread::sleep(Duration::from_millis(5));
                     }
+                    // Pause, then drain, then stop. Stop can arrive between a pause
+                    // and the loop noticing it, leaving pre-pause chunks in the ring
+                    // with nothing left to take them — real audio the user already
+                    // recorded, and on a very short take all of it.
+                    //
+                    // `pause()` rather than draining straight away: it halts the
+                    // producer while leaving the ring readable, which is the property
+                    // `EnterPause` above is already built on. Draining first leaves a
+                    // window for one more chunk to land behind the sweep, and
+                    // `stop()` first would take the queue down with the producer.
+                    stream.pause();
                     while let Some(chunk) = stream.poll_chunk() {
                         let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                        let mut g = inner_mic.lock();
-                        g.levels.me_peak = chunk.peak;
-                        g.levels.me_rms = chunk.rms;
-                        g.mic_samples.extend_from_slice(&pcm);
+                        inner_mic.lock().mic_samples.extend_from_slice(&pcm);
                     }
-                    thread::sleep(Duration::from_millis(5));
-                }
-                // Pause, then drain, then stop. Stop can arrive between a pause
-                // and the loop noticing it, leaving pre-pause chunks in the ring
-                // with nothing left to take them — real audio the user already
-                // recorded, and on a very short take all of it.
-                //
-                // `pause()` rather than draining straight away: it halts the
-                // producer while leaving the ring readable, which is the property
-                // `EnterPause` above is already built on. Draining first leaves a
-                // window for one more chunk to land behind the sweep, and
-                // `stop()` first would take the queue down with the producer.
-                stream.pause();
-                while let Some(chunk) = stream.poll_chunk() {
-                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
-                }
-                stream.stop();
-                // And once more after the join. The intake worker can have read
-                // `paused == false` and enqueued one last chunk between the sweep
-                // above and the pause taking effect; `stop()` joins it without
-                // discarding the queue, so that chunk is still there to take.
-                // Costs nothing when there is nothing: `poll_chunk` answers None.
-                while let Some(chunk) = stream.poll_chunk() {
-                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
-                }
-                inner_mic.lock().mic_ended = true;
-            })
-            .map_err(|e| CaptureError::Device(e.to_string()))?;
+                    stream.stop();
+                    // And once more after the join. The intake worker can have read
+                    // `paused == false` and enqueued one last chunk between the sweep
+                    // above and the pause taking effect; `stop()` joins it without
+                    // discarding the queue, so that chunk is still there to take.
+                    // Costs nothing when there is nothing: `poll_chunk` answers None.
+                    while let Some(chunk) = stream.poll_chunk() {
+                        let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                        inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                    }
+                    inner_mic.lock().mic_ended = true;
+                })
+                .map_err(|e| CaptureError::Device(e.to_string()))?;
+            workers.push(mic_handle);
+        }
 
         // —— System loopback (Others) — real WASAPI/CoreAudio/PipeWire via flexaudio ——
-        let sys_handle = thread::Builder::new()
-            .name("vesper-system".into())
-            .spawn(move || {
-                let cfg = StreamConfig {
-                    kind: SourceKind::SystemLoopback,
-                    device_id: sys_id,
-                    output: OutputFormat {
-                        sample_rate,
-                        channels: 1,
-                    },
-                    // Avoid feedback of Vesper's own UI sounds into the mix.
-                    exclude_self: true,
-                    ..Default::default()
-                };
-                let mut stream = match open(cfg) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("system loopback open failed: {e}");
-                        // See the mic thread: a machine with no loopback at all
-                        // is the ordinary case here, and without this the
-                        // microphone's audio would never be written either.
+        if channels.others {
+            let stop_sys = self.stop_flag.clone();
+            let paused_sys = self.paused.clone();
+            let inner_sys = self.inner.clone();
+            let ready = ready_tx.clone();
+            let sys_handle = thread::Builder::new()
+                .name("vesper-system".into())
+                .spawn(move || {
+                    let cfg = StreamConfig {
+                        kind: SourceKind::SystemLoopback,
+                        device_id: system_device_id,
+                        output: OutputFormat {
+                            sample_rate,
+                            channels: 1,
+                        },
+                        // Avoid feedback of Vesper's own UI sounds into the mix.
+                        exclude_self: true,
+                        ..Default::default()
+                    };
+                    let mut stream = match open(cfg) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("system loopback open failed: {e}");
+                            // See the mic thread: a machine with no loopback at all
+                            // is the ordinary case here, and without this the
+                            // microphone's audio would never be written either.
+                            inner_sys.lock().sys_ended = true;
+                            let _ = ready.send(false);
+                            return;
+                        }
+                    };
+                    if let Err(e) = stream.start() {
+                        eprintln!("system loopback start failed: {e}");
                         inner_sys.lock().sys_ended = true;
+                        let _ = ready.send(false);
                         return;
                     }
-                };
-                if let Err(e) = stream.start() {
-                    eprintln!("system loopback start failed: {e}");
-                    inner_sys.lock().sys_ended = true;
-                    return;
-                }
-                {
-                    inner_sys.lock().system_loopback_active = true;
-                }
-                let mut stream_paused = false;
-                while !stop_sys.load(Ordering::SeqCst) {
-                    let want_pause = paused_sys.load(Ordering::SeqCst);
-                    match capture_step(want_pause, stream_paused) {
-                        StreamAction::EnterPause => {
-                            stream.pause();
-                            stream_paused = true;
-                            // Chunks already in the ring are pre-pause audio and
-                            // belong in the recording, so take them now.
-                            while let Some(chunk) = stream.poll_chunk() {
-                                let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                                inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                    // See the microphone worker above for why the sender goes as
+                    // soon as it has spoken.
+                    let _ = ready.send(true);
+                    drop(ready);
+                    {
+                        inner_sys.lock().system_loopback_active = true;
+                    }
+                    let mut stream_paused = false;
+                    while !stop_sys.load(Ordering::SeqCst) {
+                        let want_pause = paused_sys.load(Ordering::SeqCst);
+                        match capture_step(want_pause, stream_paused) {
+                            StreamAction::EnterPause => {
+                                stream.pause();
+                                stream_paused = true;
+                                // Chunks already in the ring are pre-pause audio and
+                                // belong in the recording, so take them now.
+                                while let Some(chunk) = stream.poll_chunk() {
+                                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                                }
                             }
+                            StreamAction::LeavePause => {
+                                stream.resume();
+                                stream_paused = false;
+                            }
+                            StreamAction::StayPaused | StreamAction::Poll => {}
                         }
-                        StreamAction::LeavePause => {
-                            stream.resume();
-                            stream_paused = false;
+                        if want_pause {
+                            // Nothing is arriving; a meter frozen at the last
+                            // pre-pause value says the opposite.
+                            {
+                                let mut g = inner_sys.lock();
+                                g.levels.others_peak = 0.0;
+                                g.levels.others_rms = 0.0;
+                            }
+                            thread::sleep(Duration::from_millis(20));
+                            continue;
                         }
-                        StreamAction::StayPaused | StreamAction::Poll => {}
-                    }
-                    if want_pause {
-                        // Nothing is arriving; a meter frozen at the last
-                        // pre-pause value says the opposite.
-                        {
+                        while let Some(chunk) = stream.poll_chunk() {
+                            let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                             let mut g = inner_sys.lock();
-                            g.levels.others_peak = 0.0;
-                            g.levels.others_rms = 0.0;
+                            g.levels.others_peak = chunk.peak;
+                            g.levels.others_rms = chunk.rms;
+                            g.sys_samples.extend_from_slice(&pcm);
                         }
-                        thread::sleep(Duration::from_millis(20));
-                        continue;
+                        thread::sleep(Duration::from_millis(5));
                     }
+                    // Pause, then drain, then stop. Stop can arrive between a pause
+                    // and the loop noticing it, leaving pre-pause chunks in the ring
+                    // with nothing left to take them — real audio the user already
+                    // recorded, and on a very short take all of it.
+                    //
+                    // `pause()` rather than draining straight away: it halts the
+                    // producer while leaving the ring readable, which is the property
+                    // `EnterPause` above is already built on. Draining first leaves a
+                    // window for one more chunk to land behind the sweep, and
+                    // `stop()` first would take the queue down with the producer.
+                    stream.pause();
                     while let Some(chunk) = stream.poll_chunk() {
                         let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                        let mut g = inner_sys.lock();
-                        g.levels.others_peak = chunk.peak;
-                        g.levels.others_rms = chunk.rms;
-                        g.sys_samples.extend_from_slice(&pcm);
+                        inner_sys.lock().sys_samples.extend_from_slice(&pcm);
                     }
-                    thread::sleep(Duration::from_millis(5));
-                }
-                // Pause, then drain, then stop. Stop can arrive between a pause
-                // and the loop noticing it, leaving pre-pause chunks in the ring
-                // with nothing left to take them — real audio the user already
-                // recorded, and on a very short take all of it.
-                //
-                // `pause()` rather than draining straight away: it halts the
-                // producer while leaving the ring readable, which is the property
-                // `EnterPause` above is already built on. Draining first leaves a
-                // window for one more chunk to land behind the sweep, and
-                // `stop()` first would take the queue down with the producer.
-                stream.pause();
-                while let Some(chunk) = stream.poll_chunk() {
-                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
-                }
-                stream.stop();
-                // And once more after the join — see the mic thread above.
-                while let Some(chunk) = stream.poll_chunk() {
-                    let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
-                }
-                let mut g = inner_sys.lock();
-                g.system_loopback_active = false;
-                g.sys_ended = true;
-            })
-            .map_err(|e| CaptureError::Device(e.to_string()))?;
-
-        {
-            let mut w = self.workers.lock();
-            w.clear();
-            w.push(mic_handle);
-            w.push(sys_handle);
+                    stream.stop();
+                    // And once more after the join — see the mic thread above.
+                    while let Some(chunk) = stream.poll_chunk() {
+                        let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
+                        inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                    }
+                    let mut g = inner_sys.lock();
+                    g.system_loopback_active = false;
+                    g.sys_ended = true;
+                })
+                .map_err(|e| CaptureError::Device(e.to_string()))?;
+            workers.push(sys_handle);
         }
+
+        // This side's own sender goes before the wait, or a worker that died
+        // without reporting would leave the channel open on a copy nobody is
+        // holding and the loop below with nothing to end it.
+        drop(ready_tx);
+        if !streams_are_running(&ready_rx, workers.len(), STREAM_READY_TIMEOUT) {
+            // Refused only when nothing opened, never when something did: a
+            // two-channel meeting whose microphone failed still has the room,
+            // and half a recording beats none. With one channel selected the
+            // two are the same question — and answering it wrongly is a meeting
+            // recorded to silence with nothing on screen having said so.
+            //
+            // Nothing to tear down: every worker that could not open its stream
+            // has already returned, which is what it just reported. The file is
+            // another matter — it was created before any of this, so it is
+            // closed and taken away rather than left as a headerful of nothing
+            // under a meeting that never started.
+            self.discard_file();
+            return Err(CaptureError::Device(
+                "no capture device could be opened".into(),
+            ));
+        }
+
+        *self.workers.lock() = workers;
 
         self.running.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Drop the file a refused start had already created.
+    ///
+    /// `open_dual_wav` runs before the streams are known to work, so a start
+    /// that gives up leaves a valid, empty WAV behind at the new meeting's
+    /// path. No row points at it — the meeting is written only once `start`
+    /// succeeds — so nothing would ever offer it, play it or clean it up.
+    fn discard_file(&self) {
+        let mut sink = self.sink.lock();
+        sink.writer = None;
+        sink.written = 0;
+        // Taken from the recorder rather than passed in, so this cannot be
+        // pointed at a file that is not the one just opened.
+        if let Some(path) = self.inner.lock().out_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     pub fn pause(&self) {
@@ -616,14 +716,22 @@ impl DualChannelRecorder {
     }
 
     /// Test/helper: open the streaming file as `start` does, without a device.
+    ///
+    /// The selection comes in because `start` seeds `mic_ended`/`sys_ended`
+    /// from it, and that seeding is the whole of what makes a channel that is
+    /// off reach the disk. A helper that left the flags alone would test a
+    /// frontier no recording ever has.
     #[cfg(test)]
-    fn begin_file_for_test(&self, path: &Path, sample_rate: u32) {
+    fn begin_file_for_test(&self, path: &Path, sample_rate: u32, channels: ChannelSelection) {
         let mut sink = self.sink.lock();
         sink.writer = Some(open_dual_wav(path, sample_rate).unwrap());
         sink.written = 0;
         let mut g = self.inner.lock();
         g.sample_rate = sample_rate;
         g.out_path = Some(path.to_path_buf());
+        g.channels = channels;
+        g.mic_ended = !channels.me;
+        g.sys_ended = !channels.others;
     }
 }
 
@@ -689,6 +797,56 @@ fn flush_frontier(mic_len: usize, sys_len: usize, mic_ended: bool, sys_ended: bo
         (true, false) => sys_len,
         (true, true) => mic_len.max(sys_len),
     }
+}
+
+/// How long `start` waits to hear that its streams are open.
+///
+/// Slack rather than a budget: opening a capture stream is tens of
+/// milliseconds, and a device that is going to refuse refuses about as quickly.
+/// It is bounded at all because a wedged driver can block inside the backend
+/// without ever returning or erroring, and this wait runs on the thread that
+/// answers the Record button.
+const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Whether `start` may call the capture running: did any of the `expected`
+/// workers report a stream it had opened.
+///
+/// Lifted out of `start` for the reason `elapsed` above it is — the decision is
+/// worth testing and the thing that produces the reports needs an audio device.
+///
+/// Three ways out, and only one of them is the full count:
+///
+/// A closed channel is a thread that died without reporting. Every worker sends
+/// once and drops its sender straight after, so the channel running dry early
+/// means nothing more is coming — and what was never reported was never opened.
+///
+/// A timeout is a backend still inside its own `open`, and it is the one thing
+/// this cannot get an answer about. Waiting longer is a Record button that
+/// never comes back — this runs on the thread that answers it. So the recording
+/// runs, which is what the recorder did before the handshake existed.
+///
+/// Not refused, though the failing case above is, and the difference is what
+/// happens to the thread afterwards. A worker blocked inside a foreign
+/// blocking call cannot be cancelled: `stop_flag` is only read once it returns.
+/// Letting the recording start leaves that thread owned — its handle is stored,
+/// and `stop` joins it, so whenever the driver comes back it winds down into
+/// the meeting it belongs to. Refusing would drop the handle with the thread
+/// still inside the backend, and it would surface later, appending to whatever
+/// recording happened to be running by then. A stalled device is rare; a
+/// recording carrying a few seconds of a previous one is not something the user
+/// could ever untangle.
+fn streams_are_running(ready: &mpsc::Receiver<bool>, expected: usize, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut opened = 0usize;
+    for _ in 0..expected {
+        match ready.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(true) => opened += 1,
+            Ok(false) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => return true,
+        }
+    }
+    opened > 0
 }
 
 /// How much of the capture a write is allowed to reach.
@@ -797,6 +955,26 @@ pub fn repair_wav_header(path: &Path) -> Result<bool, CaptureError> {
     Ok(true)
 }
 
+/// Always two channels, including when only one of them was ever captured.
+///
+/// A recording with a channel switched off writes silence into that channel
+/// rather than coming out as a mono file. Everything downstream is built on
+/// L=Me, R=Others — `read_dual_wav`, the player, the waveform, the final pass,
+/// the recovery — and a mono file walks into `read_dual_wav`'s single-channel
+/// branch, which hands the samples back as Me with Others silent. On a
+/// system-only recording that is not merely a smaller file: it is the other
+/// side of the meeting attributed to the user, in the transcript and in every
+/// export made from it.
+///
+/// The streamed writer keeps the same shape without needing to know about it:
+/// `merge_dual_channel` pads the absent channel frame by frame exactly as this
+/// does, so a file written a flush at a time and one written in a single pass
+/// are the same file.
+///
+/// Silence costs two bytes a frame and nothing else. It is not transcribed
+/// either — `transcribe_channel` and `whole_channel` both floor a channel with
+/// no peak in it before a decoder is opened, so an hour of zeros is skipped
+/// rather than listened to.
 pub fn write_dual_wav(
     path: &Path,
     sample_rate: u32,
@@ -974,7 +1152,7 @@ mod tests {
 
         let streamed = dir.path().join("streamed.wav");
         let rec = DualChannelRecorder::new();
-        rec.begin_file_for_test(&streamed, 16_000);
+        rec.begin_file_for_test(&streamed, 16_000, ChannelSelection::default());
         // Three arrivals, with the two channels never quite in step.
         for (m, s) in [(300usize, 250usize), (700, 700), (1_000, 940)] {
             let (have_m, have_s) = rec.recording_len();
@@ -996,12 +1174,65 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("short.wav");
         let rec = DualChannelRecorder::new();
-        rec.begin_file_for_test(&path, 16_000);
+        rec.begin_file_for_test(&path, 16_000, ChannelSelection::default());
         rec.push_samples_for_test(&[7i16; 400], &[9i16; 400]);
         rec.close_file().unwrap();
         let (mic, sys, _) = read_dual_wav(&path).unwrap();
         assert_eq!(mic.len(), 400);
         assert_eq!(sys[0], 9);
+    }
+
+    /// A channel switched off never delivers, so the frontier can never be
+    /// "what both have reached" — `start` marks it ended and the live one
+    /// carries the file on its own. Without that the meeting would stream
+    /// nothing at all and a crash would cost the whole of it, which is the one
+    /// thing the streamed write exists to prevent.
+    ///
+    /// And what lands is still the stereo file: the absent channel is silence
+    /// of the same length, written frame by frame, not a mono file with the
+    /// system audio sitting where the user's own voice belongs.
+    #[test]
+    fn a_channel_that_is_off_does_not_hold_the_streamed_file_at_nothing() {
+        let dir = tempdir().unwrap();
+        let sys: Vec<i16> = (1..=900).map(|i| i as i16).collect();
+
+        let streamed = dir.path().join("system-only.wav");
+        let rec = DualChannelRecorder::new();
+        rec.begin_file_for_test(
+            &streamed,
+            16_000,
+            ChannelSelection {
+                me: false,
+                others: true,
+            },
+        );
+        rec.push_samples_for_test(&[], &sys[..600]);
+        rec.flush_to_disk();
+
+        // Mid-meeting, and the point of the test: the file already holds every
+        // frame the live channel has delivered.
+        let (mic_so_far, sys_so_far, _) = read_dual_wav(&streamed).unwrap();
+        assert_eq!(
+            sys_so_far.len(),
+            600,
+            "a live channel must reach the disk while the other is off"
+        );
+        assert_eq!(mic_so_far, vec![0i16; 600]);
+
+        rec.push_samples_for_test(&[], &sys[600..]);
+        rec.close_file().unwrap();
+        let (mic, written, _) = read_dual_wav(&streamed).unwrap();
+        assert_eq!(written, sys);
+        assert_eq!(mic, vec![0i16; 900]);
+
+        // Byte for byte what the single write would have produced, which is the
+        // property `write_dual_wav` and the streaming writer have to share.
+        let once = dir.path().join("once.wav");
+        write_dual_wav(&once, 16_000, &[], &sys).unwrap();
+        assert_eq!(
+            std::fs::read(&once).unwrap(),
+            std::fs::read(&streamed).unwrap()
+        );
     }
 
     /// Both channels live: the file may only reach as far as the one that has
@@ -1015,6 +1246,99 @@ mod tests {
         assert_eq!(flush_frontier(0, 1_000, true, false), 1_000);
         // Both joined — everything, with the short side padded.
         assert_eq!(flush_frontier(1_000, 600, true, true), 1_000);
+    }
+
+    /// One stream that opened is a recording; none is not. The mixed case is
+    /// what keeps a two-channel meeting whose microphone failed working exactly
+    /// as it does today — half a recording rather than a refusal.
+    #[test]
+    fn a_recording_needs_one_stream_that_opened() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(false).unwrap();
+        tx.send(true).unwrap();
+        assert!(streams_are_running(&rx, 2, STREAM_READY_TIMEOUT));
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(false).unwrap();
+        drop(tx);
+        assert!(!streams_are_running(&rx, 1, STREAM_READY_TIMEOUT));
+    }
+
+    /// A worker that died before reporting must not leave the start waiting on
+    /// a message nobody is left to send.
+    #[test]
+    fn a_worker_that_never_reported_does_not_hang_the_start() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(true).unwrap();
+        // One reported and let go of its sender; the other went down without
+        // saying anything, which is the channel closing a report short.
+        drop(tx);
+        assert!(streams_are_running(&rx, 2, STREAM_READY_TIMEOUT));
+    }
+
+    /// A backend wedged inside its own `open` never reports and never lets go
+    /// of its sender, so the wait has to end on its own — this runs on the
+    /// thread that answers the Record button. It ends the way the recorder
+    /// behaved before the handshake existed: the recording runs.
+    #[test]
+    fn a_backend_that_never_answers_lets_the_recording_run() {
+        // Held, exactly as a stalled worker holds it: the channel neither
+        // delivers nor disconnects.
+        let (_tx, rx) = mpsc::channel::<bool>();
+        assert!(streams_are_running(&rx, 1, Duration::from_millis(10)));
+    }
+
+    /// Neither channel selected opens no device at all, and the recorder says
+    /// so rather than running with no worker behind it. `domain::gate` refuses
+    /// this before the user can reach it; this is the floor under that.
+    ///
+    /// The file goes with the refusal. `start` creates it before it knows
+    /// whether anything can be captured, and a meeting that never started has
+    /// no row pointing at the leftover — nothing would ever clean it up.
+    #[test]
+    fn starting_with_both_channels_off_is_refused_and_leaves_no_file() {
+        let rec = DualChannelRecorder::new();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nothing.wav");
+        let started = rec.start(
+            path.clone(),
+            ChannelSelection {
+                me: false,
+                others: false,
+            },
+            None,
+            None,
+        );
+        assert!(started.is_err());
+        assert!(!rec.is_recording());
+        assert!(!path.exists(), "a refused start must not leave a file");
+    }
+
+    /// A channel that was switched off never produced a sample, and the file
+    /// still has to be the stereo one every reader expects — with that channel
+    /// silent, and as long as the one that did record.
+    #[test]
+    fn a_recording_with_one_channel_off_is_still_a_stereo_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mic-only.wav");
+        let mic = vec![1000i16; 800];
+        write_dual_wav(&path, 16_000, &mic, &[]).unwrap();
+        let (m, s, _) = read_dual_wav(&path).unwrap();
+        assert_eq!(m, mic);
+        assert_eq!(
+            s,
+            vec![0i16; 800],
+            "the absent channel must be silence of the same length, not missing"
+        );
+
+        // And the other way round, which is the case a mono file would get
+        // wrong: these samples belong to Others and must not come back as Me.
+        let path = dir.path().join("system-only.wav");
+        let sys = vec![-1000i16; 800];
+        write_dual_wav(&path, 16_000, &[], &sys).unwrap();
+        let (m, s, _) = read_dual_wav(&path).unwrap();
+        assert_eq!(m, vec![0i16; 800]);
+        assert_eq!(s, sys);
     }
 
     /// The file a force-kill leaves: a header from the last flush, with real

@@ -4,6 +4,7 @@ use crate::audio::devices::{list_audio_devices, AudioDevice};
 use crate::db::{Database, KeyHome};
 use crate::domain::actions::ActionItem;
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
+use crate::domain::channels::ChannelSelection;
 use crate::domain::chat::ChatMessage;
 use crate::domain::export::{build_markdown, export_meeting, safe_file_stem, ExportFormat};
 use crate::domain::gate::{can_start_recording_with, StartGate};
@@ -217,6 +218,13 @@ pub struct RecorderStatus {
     pub meeting_id: Option<String>,
     pub elapsed_ms: u64,
     pub levels: crate::audio::levels::ChannelLevels,
+    /// The channels the running capture is listening to.
+    ///
+    /// Beside the levels because it is what makes them readable: a bar at zero
+    /// is somebody not talking on a channel that is on, and nothing at all on a
+    /// channel that is off. Taken from the recorder rather than from settings —
+    /// a switch flipped mid-meeting belongs to the next recording, not this one.
+    pub channels: ChannelSelection,
 }
 
 #[tauri::command]
@@ -940,6 +948,9 @@ pub fn start_recording(
     }
     if let Err(e) = state.recorder.start(
         audio_path.clone(),
+        // Copied into the capture like the device ids beside it, so the
+        // selection this meeting was started with is the one it keeps.
+        ChannelSelection::from_settings(&settings),
         settings.mic_device_id.clone(),
         settings.system_device_id.clone(),
     ) {
@@ -1064,6 +1075,7 @@ fn status_of(state: &AppState) -> RecorderStatus {
         meeting_id: state.active_meeting.lock().clone(),
         elapsed_ms: state.recorder.elapsed_ms(),
         levels: state.recorder.levels(),
+        channels: state.recorder.channels(),
     }
 }
 

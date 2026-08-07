@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod backend;
 pub mod capabilities;
+pub mod channels;
 pub mod chat;
 pub mod context;
 pub mod cost;

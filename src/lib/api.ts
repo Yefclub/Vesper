@@ -86,6 +86,12 @@ export interface AppSettings {
   onboarding_complete: boolean;
   mic_device_id?: string | null;
   system_device_id?: string | null;
+  /** Whether each channel is captured at all. Separate from the device ids
+   *  above, where `null` already means "the system default device". Optional
+   *  because the fields land with the backend change; absent reads as on, which
+   *  is what every recording did before they existed. */
+  capture_me?: boolean;
+  capture_others?: boolean;
   compute_backend: string;
   confirm_before_recording: boolean;
   /// The global record accelerator, one of the combinations the backend offers.
@@ -119,12 +125,22 @@ export interface ChannelLevels {
   others_rms: number;
 }
 
+/** Which of the two capture channels a recording listens to. */
+export interface ChannelSelection {
+  me: boolean;
+  others: boolean;
+}
+
 export interface RecorderStatus {
   recording: boolean;
   paused: boolean;
   meeting_id?: string | null;
   elapsed_ms: number;
   levels: ChannelLevels;
+  /** The channels the running capture is listening to — not the settings,
+   *  which can be changed mid-meeting without reaching it. Optional for the
+   *  reason the settings pair above is. */
+  channels?: ChannelSelection;
 }
 
 export interface SearchHit {

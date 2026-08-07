@@ -7,7 +7,17 @@ import {
   type ReactNode,
 } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
-import { Check, Mic, MonitorSpeaker, Pause, Play, Settings, Square } from "lucide-react";
+import {
+  Check,
+  Mic,
+  MicOff,
+  MonitorSpeaker,
+  MonitorX,
+  Pause,
+  Play,
+  Settings,
+  Square,
+} from "lucide-react";
 import { clsx } from "clsx";
 import { AudioDevice, StartGate } from "../lib/api";
 import { useI18n } from "../lib/i18n";
@@ -17,10 +27,13 @@ import { Button } from "./Button";
 type DeviceKind = AudioDevice["kind"];
 
 /** A row in a channel's popover. `null` is the system default, the same value
- *  the drawer's empty `<option>` writes. */
+ *  the drawer's empty `<option>` writes. `off` is the row that switches the
+ *  channel off — it carries no device of its own, because picking it must leave
+ *  the one already chosen where it is for when the channel comes back. */
 interface DeviceOption {
   id: string | null;
   name: string;
+  off?: boolean;
 }
 
 interface Props {
@@ -29,6 +42,9 @@ interface Props {
   devices: AudioDevice[];
   micDeviceId?: string | null;
   systemDeviceId?: string | null;
+  /// Whether each channel is captured at all. Absent reads as on.
+  micEnabled?: boolean;
+  systemEnabled?: boolean;
   onStart: () => void;
   /// Present while a recording is running. The dock keeps its place and its
   /// centre control changes hands — the button the user pressed to start is
@@ -37,7 +53,7 @@ interface Props {
   onStop?: () => void;
   onPauseResume?: () => void;
   onOpenSettings: () => void;
-  onPickDevice: (kind: DeviceKind, id: string | null) => void;
+  onPickDevice: (kind: DeviceKind, id: string | null, enabled: boolean) => void;
   /// Sits directly above the transport, inside the same centred column.
   ///
   /// The context bar used to be a sibling in the card's normal flow while this
@@ -102,6 +118,8 @@ export function RecordDock({
   devices,
   micDeviceId,
   systemDeviceId,
+  micEnabled = true,
+  systemEnabled = true,
   onStart,
   onOpenSettings,
   onPickDevice,
@@ -134,6 +152,11 @@ export function RecordDock({
     t("dock.system_default");
 
   const optionsFor = (kind: DeviceKind): DeviceOption[] => [
+    // Off is a row in the same list rather than a switch beside it: the choice
+    // being made is "what does this channel listen to", and "nothing" is one of
+    // the answers to it. Picking a device is what turns the channel back on, so
+    // there is no state where the dock shows a device and captures nothing.
+    { id: null, name: t("channel.off"), off: true },
     // The explicit first row, matching the drawer's empty <option>: without it
     // a null setting reads as the first device in the list, so the screen would
     // claim a choice the backend has not been given.
@@ -269,6 +292,7 @@ export function RecordDock({
             name={deviceName(micDeviceId, "mic")}
             options={optionsFor("mic")}
             current={micDeviceId ?? null}
+            enabled={micEnabled}
             open={menu === "mic"}
             onOpenChange={setMenuOpen}
             onPick={onPickDevice}
@@ -278,6 +302,7 @@ export function RecordDock({
             name={deviceName(systemDeviceId, "system")}
             options={optionsFor("system")}
             current={systemDeviceId ?? null}
+            enabled={systemEnabled}
             open={menu === "system"}
             onOpenChange={setMenuOpen}
             onPick={onPickDevice}
@@ -374,6 +399,7 @@ function DeviceButton({
   name,
   options,
   current,
+  enabled,
   open,
   onOpenChange,
   onPick,
@@ -382,9 +408,10 @@ function DeviceButton({
   name: string;
   options: DeviceOption[];
   current: string | null;
+  enabled: boolean;
   open: boolean;
   onOpenChange: (kind: DeviceKind, open: boolean) => void;
-  onPick: (kind: DeviceKind, id: string | null) => void;
+  onPick: (kind: DeviceKind, id: string | null, enabled: boolean) => void;
 }) {
   const { t } = useI18n();
   const [active, setActive] = useState(0);
@@ -392,12 +419,16 @@ function DeviceButton({
   const listRef = useRef<HTMLDivElement>(null);
   const listId = `dock-devices-${kind}`;
   const label = t(kind === "mic" ? "onboarding.mic" : "onboarding.system");
+  // A switched-off channel has its own row selected, whatever device it is
+  // still pointing at — that device is what it will come back to, not what it
+  // is doing now.
+  const isCurrent = (o: DeviceOption) => (o.off ? !enabled : enabled && o.id === current);
 
   useEffect(() => {
     if (!open) return;
     // Land on the current device rather than on row one: Enter straight after
     // opening would otherwise switch the capture device silently.
-    setActive(Math.max(0, options.findIndex((o) => o.id === current)));
+    setActive(Math.max(0, options.findIndex(isCurrent)));
     // Deliberately keyed on `open` alone — re-running as the device list
     // refreshes would fight the arrow keys.
   }, [open]);
@@ -421,10 +452,14 @@ function DeviceButton({
       ?.scrollIntoView({ block: "nearest" });
   }, [active, open]);
 
-  function commit(id: string | null) {
+  function commit(o: DeviceOption) {
     // Writes immediately: there is no Save button within 400px of the dock, and
     // a choice that needs confirming somewhere else is not a choice made here.
-    onPick(kind, id);
+    //
+    // Off keeps the device id it was given rather than clearing it, so a
+    // channel switched off and on again lands back on the device the user
+    // picked instead of on the system default.
+    onPick(kind, o.off ? current : o.id, !o.off);
     onOpenChange(kind, false);
   }
 
@@ -442,7 +477,7 @@ function DeviceButton({
       // which would reopen the list the commit just closed.
       e.preventDefault();
       const picked = options[active];
-      if (picked) commit(picked.id);
+      if (picked) commit(picked);
       return;
     }
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
@@ -479,12 +514,25 @@ function DeviceButton({
         aria-activedescendant={open ? `${listId}-opt-${active}` : undefined}
         // The name is the readout. The device name is deliberately outside the
         // dock's box model, so this is where it is legible at rest.
-        title={`${label} — ${name}`}
-        aria-label={`${label} — ${name}`}
+        title={`${label} — ${enabled ? name : t("channel.off")}`}
+        aria-label={`${label} — ${enabled ? name : t("channel.off")}`}
         onKeyDown={onKeyDown}
         onClick={() => onOpenChange(kind, !open)}
       >
-        {kind === "mic" ? <Mic size={16} /> : <MonitorSpeaker size={16} />}
+        {/* A struck icon rather than a dimmed one. Muted is what every other
+            resting control in the dock already is, so it would read as "not
+            hovered" instead of "not recording this". */}
+        {kind === "mic" ? (
+          enabled ? (
+            <Mic size={16} />
+          ) : (
+            <MicOff size={16} />
+          )
+        ) : enabled ? (
+          <MonitorSpeaker size={16} />
+        ) : (
+          <MonitorX size={16} />
+        )}
       </Button>
 
       {/* Opens upward, because the dock is 24px from the bottom of the card.
@@ -501,11 +549,11 @@ function DeviceButton({
         >
           {options.map((o, i) => (
             <button
-              key={o.id ?? "default"}
+              key={o.off ? "off" : (o.id ?? "default")}
               id={`${listId}-opt-${i}`}
               type="button"
               role="option"
-              aria-selected={o.id === current}
+              aria-selected={isCurrent(o)}
               data-active={i === active}
               // The list is driven by aria-activedescendant, so the rows must
               // not be tab stops of their own.
@@ -516,7 +564,7 @@ function DeviceButton({
               // the mouse does not drop focus onto the body when the list
               // unmounts. The click still fires.
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => commit(o.id)}
+              onClick={() => commit(o)}
               className={clsx(
                 "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm",
                 i === active && "bg-row-selected",
@@ -525,7 +573,7 @@ function DeviceButton({
               <Check
                 size={14}
                 aria-hidden
-                className={clsx("shrink-0", o.id !== current && "opacity-0")}
+                className={clsx("shrink-0", !isCurrent(o) && "opacity-0")}
               />
               {/* The popover absorbs the long name — and even here it truncates,
                   with the whole string in `title`. */}
