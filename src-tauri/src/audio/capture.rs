@@ -166,6 +166,17 @@ impl DualChannelRecorder {
             return Err(CaptureError::AlreadyRecording);
         }
 
+        // Only when the user has not named one. An unspecified device resolves,
+        // inside the backend, to `GetDefaultAudioEndpoint(eRender, eConsole)` —
+        // and Windows says `eConsole` is for "games, system notification sounds,
+        // and voice commands" while `eCommunications` is for "voice
+        // communications (talking to another person)". The second is the
+        // meeting. When a machine has both roles on one device this changes
+        // nothing; when it does not, it is the difference between recording the
+        // call and recording the speakers the call is not playing through.
+        let system_device_id =
+            system_device_id.or_else(crate::audio::roles::communications_render_id);
+
         let sample_rate = 16_000u32;
         // The file is opened here, before a single sample exists, and written
         // as the meeting goes on. It used to be created in `stop`, which meant
@@ -244,7 +255,7 @@ impl DualChannelRecorder {
                     let mut stream = match open(cfg) {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("mic open failed: {e}");
+                            tracing::error!("mic open failed: {e}");
                             // Said out loud on every way out, because the streaming
                             // write holds the file back to whatever both channels
                             // have reached. A microphone that never opened would
@@ -256,7 +267,7 @@ impl DualChannelRecorder {
                         }
                     };
                     if let Err(e) = stream.start() {
-                        eprintln!("mic start failed: {e}");
+                        tracing::error!("mic start failed: {e}");
                         inner_mic.lock().mic_ended = true;
                         let _ = ready.send(false);
                         return;
@@ -362,7 +373,12 @@ impl DualChannelRecorder {
                     let mut stream = match open(cfg) {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("system loopback open failed: {e}");
+                            // Through `tracing`, not `eprintln`. A windowed
+                            // Windows build has no stderr, so this failure was
+                            // written to nowhere: the recording came back silent
+                            // and the log file the application otherwise keeps
+                            // had not one line about it.
+                            tracing::error!("system loopback open failed: {e}");
                             // See the mic thread: a machine with no loopback at all
                             // is the ordinary case here, and without this the
                             // microphone's audio would never be written either.
@@ -372,7 +388,7 @@ impl DualChannelRecorder {
                         }
                     };
                     if let Err(e) = stream.start() {
-                        eprintln!("system loopback start failed: {e}");
+                        tracing::error!("system loopback start failed: {e}");
                         inner_sys.lock().sys_ended = true;
                         let _ = ready.send(false);
                         return;
