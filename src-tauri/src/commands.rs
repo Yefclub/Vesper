@@ -117,12 +117,6 @@ pub struct AppState {
     /// to leave in a log file. Drained by the command that reads it, so the
     /// notice appears once rather than at every launch.
     pub retired_models: Mutex<Vec<(String, String)>>,
-    /// When each channel last had a peak above the floor, on the recorder's
-    /// own clock. `0` means never — which is the state that matters, because a
-    /// channel receiving nothing at all looks exactly like a quiet room until
-    /// you notice it has been quiet for every single sample.
-    pub heard_me_ms: AtomicU64,
-    pub heard_others_ms: AtomicU64,
     /// Said once per recording. A banner that reappears every 1200 ms is not a
     /// warning, it is a fault of its own.
     pub warned_deaf: Mutex<crate::domain::deaf::Deaf>,
@@ -179,8 +173,6 @@ impl AppState {
             segmenters: Mutex::new(HashMap::new()),
             modal_open: AtomicBool::new(false),
             retired_models: Mutex::new(retired),
-            heard_me_ms: AtomicU64::new(0),
-            heard_others_ms: AtomicU64::new(0),
             warned_deaf: Mutex::new(crate::domain::deaf::Deaf::default()),
             vigil: Mutex::new(crate::domain::silence::Vigil::default()),
             last_speech_ms: AtomicU64::new(0),
@@ -1017,11 +1009,8 @@ pub fn start_recording(
     state.last_speech_ms.store(0, Ordering::SeqCst);
     *vigil = crate::domain::silence::Vigil::default();
     drop(vigil);
-    // A fresh pair of ears for a fresh recording. Carried over, a channel that
-    // worked last time would start this one already believing it had heard
-    // something, and a dead device would go unreported for the whole meeting.
-    state.heard_me_ms.store(0, Ordering::SeqCst);
-    state.heard_others_ms.store(0, Ordering::SeqCst);
+    // A fresh pair of ears for a fresh recording. The latch itself is cleared by
+    // the recorder in `start`; this is the half the window is holding.
     *state.warned_deaf.lock() = crate::domain::deaf::Deaf::default();
     let _ = app.emit("recording://deaf", crate::domain::deaf::Deaf::default());
     // Said out loud rather than left to the window's own state. The question is
@@ -1123,6 +1112,12 @@ pub async fn stop_recording(
     // go with it, or it is waiting on screen when the next one starts.
     *state.vigil.lock() = crate::domain::silence::answered();
     let _ = app.emit("recording://silent", false);
+    // Here for the same reason the line above is here: the overlay, the
+    // shortcut and the tray all stop a recording without going through the
+    // window, and a banner about audio that is no longer being captured would
+    // stay on screen with nothing left to take it down.
+    *state.warned_deaf.lock() = crate::domain::deaf::Deaf::default();
+    let _ = app.emit("recording://deaf", crate::domain::deaf::Deaf::default());
     let duration = state.recorder.elapsed_ms();
     // Take the tail here, synchronously, while this is still the only thing that
     // has touched the recorder since it stopped. Draining it later — after the
@@ -1860,28 +1855,19 @@ fn has_unread_audio(state: &Arc<AppState>) -> bool {
 /// poor witness for "somebody spoke" — a fan moves it — but an excellent one
 /// for "this input is dead", which is the only question asked here.
 fn watch_for_deaf_channels(app: &AppHandle, state: &Arc<AppState>) {
-    use crate::domain::deaf::{deaf_channels, heard};
+    use crate::domain::deaf::deaf_channels;
 
     if state.recorder.is_paused() {
         return;
     }
     let now = state.recorder.elapsed_ms();
-    let levels = state.recorder.levels();
-    if heard(levels.me_peak) {
-        state.heard_me_ms.store(now, Ordering::SeqCst);
-    }
-    if heard(levels.others_peak) {
-        state.heard_others_ms.store(now, Ordering::SeqCst);
-    }
-    let stamp = |v: u64| if v == 0 { None } else { Some(v) };
+    // From the recorder's own latch, not from the level meter. The meter holds
+    // the most recent chunk and is replaced every 20ms; this tick runs every
+    // 1200ms, so reading it would sample one chunk in sixty and decide a
+    // channel was dead over the fifty-nine it never saw.
+    let (heard_me, heard_others) = state.recorder.heard();
     let channels = state.recorder.channels();
-    let deaf = deaf_channels(
-        now,
-        channels.me,
-        channels.others,
-        stamp(state.heard_me_ms.load(Ordering::SeqCst)),
-        stamp(state.heard_others_ms.load(Ordering::SeqCst)),
-    );
+    let deaf = deaf_channels(now, channels.me, channels.others, heard_me, heard_others);
     // Only on a change, and only ever towards worse. A channel that starts
     // working mid-meeting takes its own warning down; one that has already been
     // reported does not report itself again on the next tick.

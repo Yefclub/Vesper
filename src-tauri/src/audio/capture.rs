@@ -45,6 +45,11 @@ struct RecorderInner {
     elapsed_before_pause_ms: u64,
     /// True when a real system-loopback stream is active.
     system_loopback_active: bool,
+    /// Whether each channel has ever delivered a chunk above the floor since
+    /// this recording started. Latched, never cleared mid-recording: the
+    /// question is "has this input ever produced sound", and one yes settles it.
+    heard_me: bool,
+    heard_others: bool,
     /// The channels this recording was started with.
     ///
     /// Kept here rather than read back from settings, because the two stop
@@ -107,6 +112,8 @@ impl DualChannelRecorder {
                 start: None,
                 elapsed_before_pause_ms: 0,
                 system_loopback_active: false,
+                heard_me: false,
+                heard_others: false,
                 channels: ChannelSelection::default(),
                 mic_ended: false,
                 sys_ended: false,
@@ -128,6 +135,12 @@ impl DualChannelRecorder {
 
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::SeqCst)
+    }
+
+    /// Whether each channel has ever delivered sound in this recording.
+    pub fn heard(&self) -> (bool, bool) {
+        let g = self.inner.lock();
+        (g.heard_me, g.heard_others)
     }
 
     pub fn levels(&self) -> ChannelLevels {
@@ -192,6 +205,8 @@ impl DualChannelRecorder {
             g.elapsed_before_pause_ms = 0;
             g.levels = ChannelLevels::default();
             g.system_loopback_active = false;
+            g.heard_me = false;
+            g.heard_others = false;
             g.channels = channels;
             // A channel that is off is ended before it began — no thread to
             // finish, and never a sample to come. `flush_frontier` holds the
@@ -302,6 +317,13 @@ impl DualChannelRecorder {
                         while let Some(chunk) = stream.poll_chunk() {
                             let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                             let mut g = inner_mic.lock();
+                            // Latched here rather than sampled off the meter,
+                            // and that is the difference between working and not:
+                            // the meter holds one chunk and is overwritten every
+                            // 20ms, so a reader on the 1200ms tick sees one chunk
+                            // in sixty and would call a channel dead over the
+                            // fifty-nine it never looked at.
+                            g.heard_me |= crate::domain::deaf::heard(chunk.peak);
                             g.levels.me_peak = chunk.peak;
                             g.levels.me_rms = chunk.rms;
                             g.mic_samples.extend_from_slice(&pcm);
@@ -423,6 +445,7 @@ impl DualChannelRecorder {
                         while let Some(chunk) = stream.poll_chunk() {
                             let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                             let mut g = inner_sys.lock();
+                            g.heard_others |= crate::domain::deaf::heard(chunk.peak);
                             g.levels.others_peak = chunk.peak;
                             g.levels.others_rms = chunk.rms;
                             g.sys_samples.extend_from_slice(&pcm);
