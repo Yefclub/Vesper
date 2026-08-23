@@ -301,7 +301,16 @@ impl DualChannelRecorder {
                                 // belong in the recording, so take them now.
                                 while let Some(chunk) = stream.poll_chunk() {
                                     let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                                    inner_mic.lock().mic_samples.extend_from_slice(&pcm);
+                                    // Latched here too. These are chunks that
+                                    // arrived before the pause and belong to the
+                                    // recording; a user who pauses in the first
+                                    // second would otherwise leave a channel that
+                                    // did hear something marked as having heard
+                                    // nothing, and be accused of a dead input on
+                                    // resuming into a quiet moment.
+                                    let mut g = inner_mic.lock();
+                                    g.heard_me |= crate::domain::deaf::heard(chunk.peak);
+                                    g.mic_samples.extend_from_slice(&pcm);
                                 }
                             }
                             StreamAction::LeavePause => {
@@ -429,7 +438,16 @@ impl DualChannelRecorder {
                                 // belong in the recording, so take them now.
                                 while let Some(chunk) = stream.poll_chunk() {
                                     let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
-                                    inner_sys.lock().sys_samples.extend_from_slice(&pcm);
+                                    // Latched here too. These are chunks that
+                                    // arrived before the pause and belong to the
+                                    // recording; a user who pauses in the first
+                                    // second would otherwise leave a channel that
+                                    // did hear something marked as having heard
+                                    // nothing, and be accused of a dead input on
+                                    // resuming into a quiet moment.
+                                    let mut g = inner_sys.lock();
+                                    g.heard_others |= crate::domain::deaf::heard(chunk.peak);
+                                    g.sys_samples.extend_from_slice(&pcm);
                                 }
                             }
                             StreamAction::LeavePause => {

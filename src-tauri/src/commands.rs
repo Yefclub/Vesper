@@ -1944,7 +1944,11 @@ fn watch_for_deaf_channels(
         && state.live_stt_generation.load(Ordering::SeqCst) == generation
     {
         *said = deaf;
-        drop(said);
+        // The lock is held across the emit rather than dropped before it. Let
+        // go here and a stop plus a new recording can clear the banner and
+        // advance the generation while this thread is still on its way to
+        // `emit`, delivering last and painting the old meeting's warning over
+        // the new one.
         if deaf.any() {
             tracing::error!(
                 "capture is silent — me: {}, others: {}",
