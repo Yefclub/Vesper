@@ -61,24 +61,39 @@ impl Deaf {
 ///
 /// A channel that is not being recorded is never deaf either — nobody asked it
 /// to hear anything, and its silence is not evidence about the other one.
+/// `evidence_at_ms` is when the first selected channel produced its first
+/// sound, on the recorder's own clock — `None` while neither has.
 pub fn deaf_channels(
     now_ms: u64,
     capture_me: bool,
     capture_others: bool,
     heard_me: bool,
     heard_others: bool,
+    evidence_at_ms: Option<u64>,
 ) -> Deaf {
     let silent = |on: bool, heard: bool| on && !heard;
     let working = |on: bool, heard: bool| on && heard;
-    // One silent channel beside a working one is proof on its own and gets the
-    // short wait. Two silent channels have nothing to be measured against, so
-    // only time decides — see `SILENT_PAIR_MS`.
-    let after = if working(capture_me, heard_me) || working(capture_others, heard_others) {
-        DEAF_AFTER_MS
+    let have_evidence =
+        working(capture_me, heard_me) || working(capture_others, heard_others);
+    // One silent channel beside a working one is proof, and the clock starts at
+    // the proof rather than at the recording. A call where nobody speaks for
+    // twenty seconds and then somebody does would otherwise be accused the
+    // instant the first word arrives, having been given no time at all to show
+    // that the other channel works too.
+    //
+    // Two silent channels have nothing to be measured against, so only elapsed
+    // time decides — see `SILENT_PAIR_MS`, counted from the start because there
+    // is no other event to count from.
+    let long_enough = if have_evidence {
+        match evidence_at_ms {
+            // Saturating: the recorder's clock stands still while paused, so a
+            // stamp taken before a pause can sit ahead of `now`.
+            Some(at) => now_ms.saturating_sub(at) >= DEAF_AFTER_MS,
+            None => false,
+        }
     } else {
-        SILENT_PAIR_MS
+        now_ms >= SILENT_PAIR_MS
     };
-    let long_enough = now_ms >= after;
     Deaf {
         me: silent(capture_me, heard_me) && long_enough,
         others: silent(capture_others, heard_others) && long_enough,
@@ -100,14 +115,31 @@ mod tests {
     /// one's silence evidence rather than a guess.
     #[test]
     fn a_dead_channel_beside_a_working_one_is_reported() {
-        let d = deaf_channels(DEAF_AFTER_MS, true, true, true, false);
+        let d = deaf_channels(DEAF_AFTER_MS, true, true, true, false, Some(0));
         assert!(!d.me && d.others && d.any());
     }
 
     #[test]
     fn under_the_threshold_nobody_is_warned() {
-        let d = deaf_channels(DEAF_AFTER_MS - 1, true, true, true, false);
+        let d = deaf_channels(DEAF_AFTER_MS - 1, true, true, true, false, Some(0));
         assert!(!d.any(), "warned before the threshold");
+    }
+
+    /// The clock starts at the proof, not at the recording. A call where nobody
+    /// speaks for a while and then somebody does must not be accused the instant
+    /// the first word lands — the other channel has had no chance to show it
+    /// works.
+    #[test]
+    fn the_wait_runs_from_the_first_sound_not_from_the_start() {
+        let spoke_at = 300_000;
+        assert!(
+            !deaf_channels(spoke_at + 1, true, true, true, false, Some(spoke_at)).any(),
+            "accused a channel a millisecond after the first word of the meeting"
+        );
+        assert!(
+            deaf_channels(spoke_at + DEAF_AFTER_MS, true, true, true, false, Some(spoke_at))
+                .others
+        );
     }
 
     /// The false alarm that matters, and the reason two silent channels wait so
@@ -118,7 +150,7 @@ mod tests {
     fn a_meeting_nobody_has_spoken_in_yet_is_not_reported() {
         for t in [DEAF_AFTER_MS, 45_000, SILENT_PAIR_MS - 1] {
             assert!(
-                !deaf_channels(t, true, true, false, false).any(),
+                !deaf_channels(t, true, true, false, false, None).any(),
                 "warned at {t}ms about a call nobody had spoken in"
             );
         }
@@ -128,7 +160,7 @@ mod tests {
     /// either input is a broken setup rather than a polite room.
     #[test]
     fn two_silent_channels_are_reported_in_the_end() {
-        let d = deaf_channels(SILENT_PAIR_MS, true, true, false, false);
+        let d = deaf_channels(SILENT_PAIR_MS, true, true, false, false, None);
         assert!(d.me && d.others);
     }
 
@@ -136,13 +168,13 @@ mod tests {
     /// stops hearing belongs to the silence guard.
     #[test]
     fn a_channel_that_went_quiet_after_working_is_never_deaf() {
-        let d = deaf_channels(600_000, true, true, true, true);
+        let d = deaf_channels(600_000, true, true, true, true, Some(1_000));
         assert!(!d.any());
     }
 
     #[test]
     fn a_channel_that_is_off_is_never_deaf() {
-        let d = deaf_channels(600_000, false, false, false, false);
+        let d = deaf_channels(600_000, false, false, false, false, None);
         assert!(!d.any(), "warned about a channel nobody asked to record");
     }
 
@@ -152,10 +184,10 @@ mod tests {
     #[test]
     fn an_off_channel_is_not_evidence_about_the_other() {
         assert!(
-            !deaf_channels(DEAF_AFTER_MS + 1_000, true, false, false, false).any(),
+            !deaf_channels(DEAF_AFTER_MS + 1_000, true, false, false, false, None).any(),
             "the short wait was used with no working channel to justify it"
         );
-        assert!(deaf_channels(SILENT_PAIR_MS, true, false, false, false).me);
+        assert!(deaf_channels(SILENT_PAIR_MS, true, false, false, false, None).me);
     }
 
     #[test]

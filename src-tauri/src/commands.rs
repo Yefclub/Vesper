@@ -1894,9 +1894,16 @@ fn watch_for_deaf_channels(app: &AppHandle, state: &Arc<AppState>) {
     // the most recent chunk and is replaced every 20ms; this tick runs every
     // 1200ms, so reading it would sample one chunk in sixty and decide a
     // channel was dead over the fifty-nine it never saw.
-    let (heard_me, heard_others) = state.recorder.heard();
+    let (heard_me, heard_others, evidence_at) = state.recorder.heard();
     let channels = state.recorder.channels();
-    let deaf = deaf_channels(now, channels.me, channels.others, heard_me, heard_others);
+    let deaf = deaf_channels(
+        now,
+        channels.me,
+        channels.others,
+        heard_me,
+        heard_others,
+        evidence_at,
+    );
     // Only on a change, and only ever towards worse. A channel that starts
     // working mid-meeting takes its own warning down; one that has already been
     // reported does not report itself again on the next tick.
