@@ -1757,8 +1757,38 @@ fn spawn_recording_flush(state: Arc<AppState>) {
 /// between them and running concurrent transcriptions over halves of the same
 /// speech. The check runs before the work, never mid-flight, so a pass already
 /// running still lands.
+/// Watch for a dead input on a loop of its own.
+///
+/// Not on the live-STT ticker, and the reason is the promise this makes. That
+/// loop awaits a model before it comes round again — seconds for a local one,
+/// up to three minutes for a cloud provider — so a warning riding on it would
+/// arrive whenever transcription happened to finish, or never, if the user
+/// stopped first. A twenty-second promise cannot be kept behind an unbounded
+/// wait, and the failure this warns about is the one where the microphone is
+/// working, which is exactly when that wait is longest.
+///
+/// Retired by the same generation counter as the ticker: a stop followed
+/// quickly by a start would otherwise leave two of these alive, both reading one
+/// recorder.
+const DEAF_POLL_MS: u64 = 1_000;
+
+fn spawn_deaf_watch(app: AppHandle, state: Arc<AppState>, generation: u64) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(DEAF_POLL_MS)).await;
+            if state.live_stt_generation.load(Ordering::SeqCst) != generation
+                || !state.recorder.is_recording()
+            {
+                break;
+            }
+            watch_for_deaf_channels(&app, &state);
+        }
+    });
+}
+
 fn spawn_live_stt_ticker(app: AppHandle, state: Arc<AppState>) {
     let generation = state.live_stt_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    spawn_deaf_watch(app.clone(), Arc::clone(&state), generation);
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(LIVE_STT_INTERVAL_MS)).await;
@@ -1775,7 +1805,6 @@ fn spawn_live_stt_ticker(app: AppHandle, state: Arc<AppState>) {
                 // and must not reach the log this may also be written to.
                 let _ = app.emit("transcript://error", &e);
             }
-            watch_for_deaf_channels(&app, &state);
             watch_for_silence(&app, &state);
         }
     });
@@ -1872,7 +1901,10 @@ fn watch_for_deaf_channels(app: &AppHandle, state: &Arc<AppState>) {
     // working mid-meeting takes its own warning down; one that has already been
     // reported does not report itself again on the next tick.
     let mut said = state.warned_deaf.lock();
-    if deaf != *said {
+    // Under the lock, and last: `stop_recording` clears this and emits the
+    // all-clear, and a tick already past its own recording check would otherwise
+    // put the banner straight back over a recording that has ended.
+    if deaf != *said && state.recorder.is_recording() {
         *said = deaf;
         drop(said);
         if deaf.any() {
