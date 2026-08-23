@@ -118,6 +118,13 @@ export interface AppSettings {
 
 }
 
+/** Which selected channels have produced no sound at all since the recording
+ *  began — a dead input rather than a quiet room. */
+export interface Deaf {
+  me: boolean;
+  others: boolean;
+}
+
 export interface ChannelLevels {
   me_peak: number;
   me_rms: number;

@@ -117,6 +117,9 @@ pub struct AppState {
     /// to leave in a log file. Drained by the command that reads it, so the
     /// notice appears once rather than at every launch.
     pub retired_models: Mutex<Vec<(String, String)>>,
+    /// Said once per recording. A banner that reappears every 1200 ms is not a
+    /// warning, it is a fault of its own.
+    pub warned_deaf: Mutex<crate::domain::deaf::Deaf>,
     pub vigil: Mutex<crate::domain::silence::Vigil>,
     pub last_speech_ms: AtomicU64,
     pub stt: SttService,
@@ -170,6 +173,7 @@ impl AppState {
             segmenters: Mutex::new(HashMap::new()),
             modal_open: AtomicBool::new(false),
             retired_models: Mutex::new(retired),
+            warned_deaf: Mutex::new(crate::domain::deaf::Deaf::default()),
             vigil: Mutex::new(crate::domain::silence::Vigil::default()),
             last_speech_ms: AtomicU64::new(0),
             stt: SttService::new(),
@@ -1005,6 +1009,11 @@ pub fn start_recording(
     state.last_speech_ms.store(0, Ordering::SeqCst);
     *vigil = crate::domain::silence::Vigil::default();
     drop(vigil);
+    // A fresh pair of ears for a fresh recording. The latch is cleared by the
+    // recorder in `start` and the watcher's own clock is local to it; this is
+    // the half the window is holding.
+    *state.warned_deaf.lock() = crate::domain::deaf::Deaf::default();
+    let _ = app.emit("recording://deaf", crate::domain::deaf::Deaf::default());
     // Said out loud rather than left to the window's own state. The question is
     // raised and taken down by events, and an event lost to a race — a stop, a
     // window reload — would otherwise leave it on screen over a meeting it was
@@ -1104,6 +1113,12 @@ pub async fn stop_recording(
     // go with it, or it is waiting on screen when the next one starts.
     *state.vigil.lock() = crate::domain::silence::answered();
     let _ = app.emit("recording://silent", false);
+    // Here for the same reason the line above is here: the overlay, the
+    // shortcut and the tray all stop a recording without going through the
+    // window, and a banner about audio that is no longer being captured would
+    // stay on screen with nothing left to take it down.
+    *state.warned_deaf.lock() = crate::domain::deaf::Deaf::default();
+    let _ = app.emit("recording://deaf", crate::domain::deaf::Deaf::default());
     let duration = state.recorder.elapsed_ms();
     // Take the tail here, synchronously, while this is still the only thing that
     // has touched the recorder since it stopped. Draining it later — after the
@@ -1743,8 +1758,56 @@ fn spawn_recording_flush(state: Arc<AppState>) {
 /// between them and running concurrent transcriptions over halves of the same
 /// speech. The check runs before the work, never mid-flight, so a pass already
 /// running still lands.
+/// Watch for a dead input on a loop of its own.
+///
+/// Not on the live-STT ticker, and the reason is the promise this makes. That
+/// loop awaits a model before it comes round again — seconds for a local one,
+/// up to three minutes for a cloud provider — so a warning riding on it would
+/// arrive whenever transcription happened to finish, or never, if the user
+/// stopped first. A twenty-second promise cannot be kept behind an unbounded
+/// wait, and the failure this warns about is the one where the microphone is
+/// working, which is exactly when that wait is longest.
+///
+/// Retired by the same generation counter as the ticker: a stop followed
+/// quickly by a start would otherwise leave two of these alive, both reading one
+/// recorder.
+const DEAF_POLL_MS: u64 = 1_000;
+
+fn spawn_deaf_watch(app: AppHandle, state: Arc<AppState>, generation: u64) {
+    tauri::async_runtime::spawn(async move {
+        // This loop's own clock, and it is deliberately not the recorder's.
+        // `elapsed_ms` races `pause`, which sets its flag before it takes the
+        // recorder lock and adds the interval — a reader landing in that gap
+        // gets a stale elapsed and would start a countdown from a moment that
+        // had already gone by. Counting ticks that actually ran, and skipping
+        // the paused ones, needs no such reading and cannot be stale.
+        let mut watched_ms = 0u64;
+        // `watched_ms` when a channel was first seen to have heard something.
+        // Local to this recording's watcher, so a stop and a quick start cannot
+        // carry it over.
+        let mut evidence_ms: Option<u64> = None;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(DEAF_POLL_MS)).await;
+            if state.live_stt_generation.load(Ordering::SeqCst) != generation
+                || !state.recorder.is_recording()
+            {
+                break;
+            }
+            // Paused time is not recording time, and a meeting somebody paused
+            // for ten minutes has not been failing to hear anything for ten
+            // minutes.
+            if state.recorder.is_paused() {
+                continue;
+            }
+            watched_ms += DEAF_POLL_MS;
+            watch_for_deaf_channels(&app, &state, generation, watched_ms, &mut evidence_ms);
+        }
+    });
+}
+
 fn spawn_live_stt_ticker(app: AppHandle, state: Arc<AppState>) {
     let generation = state.live_stt_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    spawn_deaf_watch(app.clone(), Arc::clone(&state), generation);
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(LIVE_STT_INTERVAL_MS)).await;
@@ -1827,6 +1890,76 @@ fn has_unread_audio(state: &Arc<AppState>) -> bool {
 /// A paused recording is not a quiet one. The clock does not advance while
 /// paused, so asking whether anybody is there would be asking about a decision
 /// the user has already made.
+/// Notice a channel that was asked to record and is hearing nothing at all.
+///
+/// Separate from the silence guard next to it, and the difference is the whole
+/// point: that one watches for a room where nobody is speaking, this one
+/// watches for a channel that is not connected to a room. The first is about
+/// people, and its answer is to stop; the second is about hardware, and its
+/// answer is to say so immediately, because the recording is being lost right
+/// now and the user is the only one who can fix it.
+///
+/// The evidence is the level meter rather than transcribed words. A meter is a
+/// poor witness for "somebody spoke" — a fan moves it — but an excellent one
+/// for "this input is dead", which is the only question asked here.
+fn watch_for_deaf_channels(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    generation: u64,
+    watched_ms: u64,
+    evidence_ms: &mut Option<u64>,
+) {
+    use crate::domain::deaf::deaf_channels;
+
+    // From the recorder's own latch, not from the level meter. The meter holds
+    // the most recent chunk and is replaced every 20ms, so reading it here would
+    // sample one chunk in fifty and decide a channel was dead over the ones it
+    // never saw.
+    let (heard_me, heard_others) = state.recorder.heard();
+    let channels = state.recorder.channels();
+    // The first tick that sees either latch set is when this recording got its
+    // evidence. Written once — a later tick must not push the deadline back.
+    if evidence_ms.is_none() && (heard_me || heard_others) {
+        *evidence_ms = Some(watched_ms);
+    }
+    let deaf = deaf_channels(
+        watched_ms,
+        channels.me,
+        channels.others,
+        heard_me,
+        heard_others,
+        *evidence_ms,
+    );
+    // Only on a change, and only ever towards worse. A channel that starts
+    // working mid-meeting takes its own warning down; one that has already been
+    // reported does not report itself again on the next tick.
+    let mut said = state.warned_deaf.lock();
+    // Under the lock, and last. `stop_recording` clears this and emits the
+    // all-clear, and a tick already past its own checks would otherwise put the
+    // banner straight back over a recording that has ended. The generation is
+    // rechecked with it, because a stop followed quickly by a start leaves this
+    // watcher holding a verdict about a meeting that is over.
+    if deaf != *said
+        && state.recorder.is_recording()
+        && state.live_stt_generation.load(Ordering::SeqCst) == generation
+    {
+        *said = deaf;
+        // The lock is held across the emit rather than dropped before it. Let
+        // go here and a stop plus a new recording can clear the banner and
+        // advance the generation while this thread is still on its way to
+        // `emit`, delivering last and painting the old meeting's warning over
+        // the new one.
+        if deaf.any() {
+            tracing::error!(
+                "capture is silent — me: {}, others: {}",
+                deaf.me,
+                deaf.others
+            );
+        }
+        let _ = app.emit("recording://deaf", deaf);
+    }
+}
+
 fn watch_for_silence(app: &AppHandle, state: &Arc<AppState>) {
     use crate::domain::silence::{advance, Act};
 
