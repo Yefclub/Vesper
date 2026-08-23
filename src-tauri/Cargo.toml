@@ -150,16 +150,5 @@ keyring = { version = "4.1.6", features = ["apple-native-keyring-store"] }
 tauri-plugin-single-instance = "2.4.3"
 tracing-appender = "0.2.5"
 
-# Only to ask Windows which output it routes voice calls to. `eConsole` — what
-# the audio backend resolves an unspecified device to — is the wrong role for a
-# meeting recorder; see `audio::roles`. Pinned to the version `flexaudio` already
-# pulls in, so this costs the bundle nothing.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.54", features = [
-    "Win32_Media_Audio",
-    "Win32_System_Com",
-    "Win32_Foundation",
-] }
-
 [dev-dependencies]
 tempfile = "3"

@@ -19,6 +19,7 @@ import {
   api,
   AppSettings,
   AudioDevice,
+  Deaf,
   formatDuration,
   LiveTranscript,
   MeetingProgress,
@@ -220,6 +221,10 @@ function AppShell({
   /// is still there. Cleared by an answer, by somebody speaking, or by the stop
   /// that follows an unanswered question.
   const [silent, setSilent] = useState(false);
+  // A channel that was asked to record and has heard nothing at all. Distinct
+  // from `silent`, which is a room where nobody is speaking: this one is a dead
+  // input, and the recording is being lost while the banner is on screen.
+  const [deaf, setDeaf] = useState<Deaf>({ me: false, others: false });
   // Picks the catalogue no longer offers, moved to the nearest tier at
   // startup. Read once — the command drains what it returns.
   const [retired, setRetired] = useState<[string, string][]>([]);
@@ -618,6 +623,9 @@ function AppShell({
       );
       track(
         await listen<boolean>("recording://silent", (e) => setSilent(e.payload)),
+      );
+      track(
+        await listen<Deaf>("recording://deaf", (e) => setDeaf(e.payload)),
       );
       track(
         // The window stops it, through the same command a click goes through.
@@ -1431,6 +1439,35 @@ function AppShell({
                   onClick={() => setRetired([])}
                 >
                   {t("action.dismiss")}
+                </Button>
+              </div>
+            )}
+            {/* Danger rather than warning, and above the quiet-room notice:
+                that one is a question about the people, this is the recording
+                not happening. It stays until the input starts working or the
+                recording ends — there is nothing to dismiss, because dismissing
+                it would not make the audio arrive. */}
+            {(deaf.me || deaf.others) && status?.recording && (
+              <div
+                role="alert"
+                data-testid="deaf-notice"
+                className="flex flex-wrap items-center gap-3 border-b border-danger/30 bg-danger/10 px-6 py-2 text-sm text-danger"
+              >
+                <span className="font-medium">{t("deaf.title")}</span>
+                <span className="text-fg-muted">
+                  {deaf.me && deaf.others
+                    ? t("deaf.both")
+                    : deaf.me
+                      ? t("deaf.me")
+                      : t("deaf.others")}
+                </span>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  className="ml-auto"
+                  onClick={() => setShowSettings(true)}
+                >
+                  {t("deaf.devices")}
                 </Button>
               </div>
             )}

@@ -137,6 +137,20 @@ fn en_dict() -> HashMap<&'static str, &'static str> {
             "model.retired",
             "{from} is no longer offered, so Vesper switched to {to}. The old file is still on disk.",
         ),
+        ("deaf.title", "Nothing is being recorded"),
+        (
+            "deaf.me",
+            "The microphone has been silent since this started. Check that it is not muted and that Vesper is using the right one.",
+        ),
+        (
+            "deaf.others",
+            "No system audio has arrived since this started. If the call plays through a headset, pick it under System audio.",
+        ),
+        (
+            "deaf.both",
+            "Neither the microphone nor the system audio has produced a sound since this started.",
+        ),
+        ("deaf.devices", "Open devices"),
         ("silence.title", "Still there?"),
         ("silence.body", "Nobody has said anything for three minutes. Vesper stops recording in five unless you answer — or just start talking."),
         ("silence.keep", "Keep recording"),
@@ -425,6 +439,20 @@ fn pt_dict() -> HashMap<&'static str, &'static str> {
             "model.retired",
             "O {from} não é mais oferecido, então a Vesper passou para o {to}. O arquivo antigo continua no disco.",
         ),
+        ("deaf.title", "Nada está sendo gravado"),
+        (
+            "deaf.me",
+            "O microfone está mudo desde o início. Confira se ele não está no mudo e se a Vesper está usando o certo.",
+        ),
+        (
+            "deaf.others",
+            "Nenhum áudio do sistema chegou desde o início. Se a chamada sai por um fone, escolha ele em Áudio do sistema.",
+        ),
+        (
+            "deaf.both",
+            "Nem o microfone nem o áudio do sistema produziram som desde o início.",
+        ),
+        ("deaf.devices", "Abrir dispositivos"),
         ("silence.title", "Ainda aí?"),
         ("silence.body", "Ninguém falou nada há três minutos. A Vesper para de gravar em cinco, a menos que você responda — ou simplesmente volte a falar."),
         ("silence.keep", "Continuar gravando"),

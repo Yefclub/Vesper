@@ -166,17 +166,6 @@ impl DualChannelRecorder {
             return Err(CaptureError::AlreadyRecording);
         }
 
-        // Only when the user has not named one. An unspecified device resolves,
-        // inside the backend, to `GetDefaultAudioEndpoint(eRender, eConsole)` —
-        // and Windows says `eConsole` is for "games, system notification sounds,
-        // and voice commands" while `eCommunications` is for "voice
-        // communications (talking to another person)". The second is the
-        // meeting. When a machine has both roles on one device this changes
-        // nothing; when it does not, it is the difference between recording the
-        // call and recording the speakers the call is not playing through.
-        let system_device_id =
-            system_device_id.or_else(crate::audio::roles::communications_render_id);
-
         let sample_rate = 16_000u32;
         // The file is opened here, before a single sample exists, and written
         // as the meeting goes on. It used to be created in `stop`, which meant

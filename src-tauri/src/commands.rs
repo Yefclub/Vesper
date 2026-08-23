@@ -117,6 +117,15 @@ pub struct AppState {
     /// to leave in a log file. Drained by the command that reads it, so the
     /// notice appears once rather than at every launch.
     pub retired_models: Mutex<Vec<(String, String)>>,
+    /// When each channel last had a peak above the floor, on the recorder's
+    /// own clock. `0` means never — which is the state that matters, because a
+    /// channel receiving nothing at all looks exactly like a quiet room until
+    /// you notice it has been quiet for every single sample.
+    pub heard_me_ms: AtomicU64,
+    pub heard_others_ms: AtomicU64,
+    /// Said once per recording. A banner that reappears every 1200 ms is not a
+    /// warning, it is a fault of its own.
+    pub warned_deaf: Mutex<crate::domain::deaf::Deaf>,
     pub vigil: Mutex<crate::domain::silence::Vigil>,
     pub last_speech_ms: AtomicU64,
     pub stt: SttService,
@@ -170,6 +179,9 @@ impl AppState {
             segmenters: Mutex::new(HashMap::new()),
             modal_open: AtomicBool::new(false),
             retired_models: Mutex::new(retired),
+            heard_me_ms: AtomicU64::new(0),
+            heard_others_ms: AtomicU64::new(0),
+            warned_deaf: Mutex::new(crate::domain::deaf::Deaf::default()),
             vigil: Mutex::new(crate::domain::silence::Vigil::default()),
             last_speech_ms: AtomicU64::new(0),
             stt: SttService::new(),
@@ -1005,6 +1017,13 @@ pub fn start_recording(
     state.last_speech_ms.store(0, Ordering::SeqCst);
     *vigil = crate::domain::silence::Vigil::default();
     drop(vigil);
+    // A fresh pair of ears for a fresh recording. Carried over, a channel that
+    // worked last time would start this one already believing it had heard
+    // something, and a dead device would go unreported for the whole meeting.
+    state.heard_me_ms.store(0, Ordering::SeqCst);
+    state.heard_others_ms.store(0, Ordering::SeqCst);
+    *state.warned_deaf.lock() = crate::domain::deaf::Deaf::default();
+    let _ = app.emit("recording://deaf", crate::domain::deaf::Deaf::default());
     // Said out loud rather than left to the window's own state. The question is
     // raised and taken down by events, and an event lost to a race — a stop, a
     // window reload — would otherwise leave it on screen over a meeting it was
@@ -1761,6 +1780,7 @@ fn spawn_live_stt_ticker(app: AppHandle, state: Arc<AppState>) {
                 // and must not reach the log this may also be written to.
                 let _ = app.emit("transcript://error", &e);
             }
+            watch_for_deaf_channels(&app, &state);
             watch_for_silence(&app, &state);
         }
     });
@@ -1827,6 +1847,59 @@ fn has_unread_audio(state: &Arc<AppState>) -> bool {
 /// A paused recording is not a quiet one. The clock does not advance while
 /// paused, so asking whether anybody is there would be asking about a decision
 /// the user has already made.
+/// Notice a channel that was asked to record and is hearing nothing at all.
+///
+/// Separate from the silence guard next to it, and the difference is the whole
+/// point: that one watches for a room where nobody is speaking, this one
+/// watches for a channel that is not connected to a room. The first is about
+/// people, and its answer is to stop; the second is about hardware, and its
+/// answer is to say so immediately, because the recording is being lost right
+/// now and the user is the only one who can fix it.
+///
+/// The evidence is the level meter rather than transcribed words. A meter is a
+/// poor witness for "somebody spoke" — a fan moves it — but an excellent one
+/// for "this input is dead", which is the only question asked here.
+fn watch_for_deaf_channels(app: &AppHandle, state: &Arc<AppState>) {
+    use crate::domain::deaf::{deaf_channels, heard};
+
+    if state.recorder.is_paused() {
+        return;
+    }
+    let now = state.recorder.elapsed_ms();
+    let levels = state.recorder.levels();
+    if heard(levels.me_peak) {
+        state.heard_me_ms.store(now, Ordering::SeqCst);
+    }
+    if heard(levels.others_peak) {
+        state.heard_others_ms.store(now, Ordering::SeqCst);
+    }
+    let stamp = |v: u64| if v == 0 { None } else { Some(v) };
+    let channels = state.recorder.channels();
+    let deaf = deaf_channels(
+        now,
+        channels.me,
+        channels.others,
+        stamp(state.heard_me_ms.load(Ordering::SeqCst)),
+        stamp(state.heard_others_ms.load(Ordering::SeqCst)),
+    );
+    // Only on a change, and only ever towards worse. A channel that starts
+    // working mid-meeting takes its own warning down; one that has already been
+    // reported does not report itself again on the next tick.
+    let mut said = state.warned_deaf.lock();
+    if deaf != *said {
+        *said = deaf;
+        drop(said);
+        if deaf.any() {
+            tracing::error!(
+                "capture is silent — me: {}, others: {}",
+                deaf.me,
+                deaf.others
+            );
+        }
+        let _ = app.emit("recording://deaf", deaf);
+    }
+}
+
 fn watch_for_silence(app: &AppHandle, state: &Arc<AppState>) {
     use crate::domain::silence::{advance, Act};
 
