@@ -117,6 +117,13 @@ pub struct AppState {
     /// to leave in a log file. Drained by the command that reads it, so the
     /// notice appears once rather than at every launch.
     pub retired_models: Mutex<Vec<(String, String)>>,
+    /// When the first channel was first observed to have heard something, on
+    /// the recorder's clock. `0` means it has not happened yet.
+    ///
+    /// Stamped here rather than in the capture loop, which has no safe way to
+    /// read the elapsed clock — see `DualChannelRecorder::heard`. A whole poll
+    /// of granularity is nothing against a twenty-second wait, and it errs late.
+    pub evidence_at_ms: AtomicU64,
     /// Said once per recording. A banner that reappears every 1200 ms is not a
     /// warning, it is a fault of its own.
     pub warned_deaf: Mutex<crate::domain::deaf::Deaf>,
@@ -173,6 +180,7 @@ impl AppState {
             segmenters: Mutex::new(HashMap::new()),
             modal_open: AtomicBool::new(false),
             retired_models: Mutex::new(retired),
+            evidence_at_ms: AtomicU64::new(0),
             warned_deaf: Mutex::new(crate::domain::deaf::Deaf::default()),
             vigil: Mutex::new(crate::domain::silence::Vigil::default()),
             last_speech_ms: AtomicU64::new(0),
@@ -1010,7 +1018,8 @@ pub fn start_recording(
     *vigil = crate::domain::silence::Vigil::default();
     drop(vigil);
     // A fresh pair of ears for a fresh recording. The latch itself is cleared by
-    // the recorder in `start`; this is the half the window is holding.
+    // the recorder in `start`; these are the halves this side is holding.
+    state.evidence_at_ms.store(0, Ordering::SeqCst);
     *state.warned_deaf.lock() = crate::domain::deaf::Deaf::default();
     let _ = app.emit("recording://deaf", crate::domain::deaf::Deaf::default());
     // Said out loud rather than left to the window's own state. The question is
@@ -1894,8 +1903,22 @@ fn watch_for_deaf_channels(app: &AppHandle, state: &Arc<AppState>) {
     // the most recent chunk and is replaced every 20ms; this tick runs every
     // 1200ms, so reading it would sample one chunk in sixty and decide a
     // channel was dead over the fifty-nine it never saw.
-    let (heard_me, heard_others, evidence_at) = state.recorder.heard();
+    let (heard_me, heard_others) = state.recorder.heard();
     let channels = state.recorder.channels();
+    // The first tick that sees either latch set is when this recording got its
+    // evidence. Written once — a later tick must not push the deadline back.
+    if (heard_me || heard_others) && state.evidence_at_ms.load(Ordering::SeqCst) == 0 {
+        let _ = state.evidence_at_ms.compare_exchange(
+            0,
+            now.max(1),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+    let evidence_at = match state.evidence_at_ms.load(Ordering::SeqCst) {
+        0 => None,
+        at => Some(at),
+    };
     let deaf = deaf_channels(
         now,
         channels.me,

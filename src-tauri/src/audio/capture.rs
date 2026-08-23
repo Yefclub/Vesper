@@ -50,10 +50,6 @@ struct RecorderInner {
     /// question is "has this input ever produced sound", and one yes settles it.
     heard_me: bool,
     heard_others: bool,
-    /// When the first of them first heard something, on this recording's clock.
-    /// The short wait for a dead channel is measured from here rather than from
-    /// the start — see `domain::deaf`.
-    evidence_at_ms: Option<u64>,
     /// The channels this recording was started with.
     ///
     /// Kept here rather than read back from settings, because the two stop
@@ -118,7 +114,6 @@ impl DualChannelRecorder {
                 system_loopback_active: false,
                 heard_me: false,
                 heard_others: false,
-                evidence_at_ms: None,
                 channels: ChannelSelection::default(),
                 mic_ended: false,
                 sys_ended: false,
@@ -142,11 +137,17 @@ impl DualChannelRecorder {
         self.paused.load(Ordering::SeqCst)
     }
 
-    /// Whether each channel has ever delivered sound in this recording, and when
-    /// the first of them did.
-    pub fn heard(&self) -> (bool, bool, Option<u64>) {
+    /// Whether each channel has ever delivered sound in this recording.
+    ///
+    /// Booleans and no clock. Stamping the moment in here would mean reading the
+    /// elapsed time from a capture thread, which races `pause`: that sets its
+    /// flag before it takes this lock and adds the interval, so a worker landing
+    /// in the gap reads a stale elapsed and would start the wait early. The
+    /// watcher stamps it instead, from a thread that reads the clock the ordinary
+    /// way.
+    pub fn heard(&self) -> (bool, bool) {
         let g = self.inner.lock();
-        (g.heard_me, g.heard_others, g.evidence_at_ms)
+        (g.heard_me, g.heard_others)
     }
 
     pub fn levels(&self) -> ChannelLevels {
@@ -213,7 +214,6 @@ impl DualChannelRecorder {
             g.system_loopback_active = false;
             g.heard_me = false;
             g.heard_others = false;
-            g.evidence_at_ms = None;
             g.channels = channels;
             // A channel that is off is ended before it began — no thread to
             // finish, and never a sample to come. `flush_frontier` holds the
@@ -330,15 +330,6 @@ impl DualChannelRecorder {
                             // 20ms, so a reader on the 1200ms tick sees one chunk
                             // in sixty and would call a channel dead over the
                             // fifty-nine it never looked at.
-                            if crate::domain::deaf::heard(chunk.peak) && g.evidence_at_ms.is_none() {
-                                let at = elapsed(
-                                    g.start,
-                                    g.elapsed_before_pause_ms,
-                                    paused.load(Ordering::SeqCst),
-                                    Instant::now(),
-                                );
-                                g.evidence_at_ms = Some(at);
-                            }
                             g.heard_me |= crate::domain::deaf::heard(chunk.peak);
                             g.levels.me_peak = chunk.peak;
                             g.levels.me_rms = chunk.rms;
@@ -461,15 +452,6 @@ impl DualChannelRecorder {
                         while let Some(chunk) = stream.poll_chunk() {
                             let pcm = f32_to_i16_mono(&chunk.data, chunk.frames, 1);
                             let mut g = inner_sys.lock();
-                            if crate::domain::deaf::heard(chunk.peak) && g.evidence_at_ms.is_none() {
-                                let at = elapsed(
-                                    g.start,
-                                    g.elapsed_before_pause_ms,
-                                    paused_sys.load(Ordering::SeqCst),
-                                    Instant::now(),
-                                );
-                                g.evidence_at_ms = Some(at);
-                            }
                             g.heard_others |= crate::domain::deaf::heard(chunk.peak);
                             g.levels.others_peak = chunk.peak;
                             g.levels.others_rms = chunk.rms;

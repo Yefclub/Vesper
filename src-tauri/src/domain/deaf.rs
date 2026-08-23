@@ -73,8 +73,7 @@ pub fn deaf_channels(
 ) -> Deaf {
     let silent = |on: bool, heard: bool| on && !heard;
     let working = |on: bool, heard: bool| on && heard;
-    let have_evidence =
-        working(capture_me, heard_me) || working(capture_others, heard_others);
+    let have_evidence = working(capture_me, heard_me) || working(capture_others, heard_others);
     // One silent channel beside a working one is proof, and the clock starts at
     // the proof rather than at the recording. A call where nobody speaks for
     // twenty seconds and then somebody does would otherwise be accused the
@@ -137,8 +136,15 @@ mod tests {
             "accused a channel a millisecond after the first word of the meeting"
         );
         assert!(
-            deaf_channels(spoke_at + DEAF_AFTER_MS, true, true, true, false, Some(spoke_at))
-                .others
+            deaf_channels(
+                spoke_at + DEAF_AFTER_MS,
+                true,
+                true,
+                true,
+                false,
+                Some(spoke_at)
+            )
+            .others
         );
     }
 
