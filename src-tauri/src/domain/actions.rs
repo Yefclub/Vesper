@@ -78,9 +78,16 @@ pub fn split_stamp(line: &str) -> (String, Option<i64>) {
 
 /// `m:ss` or `h:mm:ss` as milliseconds.
 ///
-/// Rejects anything out of range rather than normalising it. `[75:00]` from a
-/// model that counted in minutes past the hour would otherwise become a seek to
-/// a moment the recording never had.
+/// The minutes are **not** bounded at 60 in the two-field form, and that is not
+/// leniency — it is the vocabulary the transcript itself uses.
+/// `timestamped_text` writes `[{minutes:02}:{seconds:02}]` from the total, so an
+/// hour and a quarter into a recording it emits `[75:00]`, and the prompt asks
+/// the model to copy what it was given. Refusing that would leave every action
+/// decided after the first hour without the citation this whole change is for.
+///
+/// Seconds are bounded, and so are the minutes of a three-field stamp: those
+/// are out of range in any reading, and a stamp that cannot be read is better
+/// left in the text than turned into a seek to a moment that was never there.
 fn parse_stamp(s: &str) -> Option<i64> {
     let parts: Vec<i64> = s
         .split(':')
@@ -88,10 +95,10 @@ fn parse_stamp(s: &str) -> Option<i64> {
         .collect::<Option<Vec<_>>>()?;
     let (h, m, sec) = match parts[..] {
         [m, sec] => (0, m, sec),
-        [h, m, sec] => (h, m, sec),
+        [h, m, sec] if (0..60).contains(&m) => (h, m, sec),
         _ => return None,
     };
-    if h < 0 || !(0..60).contains(&m) || !(0..60).contains(&sec) {
+    if h < 0 || m < 0 || !(0..60).contains(&sec) {
         return None;
     }
     Some((h * 3600 + m * 60 + sec) * 1000)
@@ -221,18 +228,29 @@ mod tests {
         }
     }
 
-    /// A model that counted minutes past the hour writes `[75:00]`. Normalising
-    /// it would produce a seek to a moment the recording never had.
+    /// The transcript the model is given writes minutes from the total, so an
+    /// hour and a quarter in it says `[75:00]` — and the prompt asks the model
+    /// to copy what it was given. Refusing that would leave every item decided
+    /// after the first hour without a citation, which is most of a long meeting.
     #[test]
-    fn an_impossible_stamp_is_refused_rather_than_normalised() {
+    fn minutes_past_the_hour_are_the_transcripts_own_vocabulary() {
         assert_eq!(
             split_stamp("Publicar [75:00]"),
-            ("Publicar [75:00]".to_string(), None)
+            ("Publicar".to_string(), Some(4_500_000))
         );
-        assert_eq!(
-            split_stamp("Publicar [10:61]"),
-            ("Publicar [10:61]".to_string(), None)
-        );
+    }
+
+    /// Out of range in any reading. A stamp that cannot be read is better left
+    /// in the text than turned into a seek to a moment that was never there.
+    #[test]
+    fn an_unreadable_stamp_is_refused_rather_than_normalised() {
+        for line in [
+            "Publicar [10:61]",
+            "Publicar [1:75:00]",
+            "Publicar [1:2:3:4]",
+        ] {
+            assert_eq!(split_stamp(line), (line.to_string(), None), "{line}");
+        }
     }
 
     /// The stamp must not make the same task look new. A model asked twice puts
