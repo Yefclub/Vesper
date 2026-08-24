@@ -42,23 +42,34 @@ export function BriefPanel({
   // `meeting://progress` event, and each reload would overwrite whatever the
   // user was in the middle of typing.
 
-  const save = async () => {
-    // Trimmed before the comparison, not only after. The backend trims what it
-    // stores, so `" Acme "` against a stored `"Acme"` is not an edit — comparing
-    // raw text would write the row and bump `updated_at` for a change that
-    // cannot be observed anywhere.
+  /// Write, without touching what is on screen.
+  ///
+  /// Trimmed before the comparison, not only after: the backend trims what it
+  /// stores, so `" Acme "` against a stored `"Acme"` is not an edit, and
+  /// comparing raw text would write the row and bump `updated_at` for a change
+  /// nothing can observe.
+  ///
+  /// It deliberately does not `setText`. This runs while the user is still
+  /// typing, and normalising the field mid-sentence would eat the space they
+  /// had just pressed and move the caret out from under them.
+  const persist = async () => {
     const next = text.trim();
     if (next === stored.current) return;
     try {
       await api.setMeetingBrief(meetingId, next);
       stored.current = next;
-      setText(next);
       onSaved(next);
       setError(null);
       setSaved(true);
     } catch (e) {
       setError(String(e));
     }
+  };
+
+  /// Leaving the field: write it, then show what was actually stored.
+  const save = async () => {
+    await persist();
+    setText(stored.current);
   };
 
   // Blur is not the only way this field can be left. Stopping a recording from
@@ -83,6 +94,26 @@ export function BriefPanel({
     },
     [],
   );
+
+  // Saved on a pause, not only on the way out.
+  //
+  // Blur alone left a window nothing in the front end can close: stopping a
+  // recording from the tray or the overlay begins the automatic summary, and
+  // the backend reads the brief from the database — which is still holding the
+  // previous one while the user has the field focused. Nothing here can make
+  // that call wait. A write per pause closes it, and the summary does not start
+  // until the whole recording has been transcribed, so the write lands long
+  // before it is read. It is a write per pause and not per keystroke: this is
+  // prose somebody is composing, and each one bumps the meeting's `updated_at`.
+  useEffect(() => {
+    if (text.trim() === stored.current) return;
+    const timer = setTimeout(() => void persist(), 800);
+    return () => clearTimeout(timer);
+    // `persist` is redefined on every render and reads `text` from that
+    // render's closure, which is exactly what this needs — the effect is keyed
+    // on the text it is about to write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text]);
 
   // The tick is an acknowledgement, not a state. Left up, it becomes chrome
   // that says "saved" about a field the user has since changed.
