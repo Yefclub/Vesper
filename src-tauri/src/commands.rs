@@ -507,9 +507,16 @@ fn segments_of(state: &AppState, id: &str) -> LiveTranscript {
 fn prompt_transcript(state: &AppState, meeting: &MeetingRecord) -> String {
     let transcript = segments_of(state, &meeting.id);
     if transcript.segments().is_empty() {
+        // Nothing left to read the clock off. The stored text is the plain one,
+        // and a summary without citations is the honest outcome — the prompt
+        // asks the model to leave the brackets off when the transcript does not
+        // show when something came up, and here it shows nothing.
         return meeting.transcript_text.clone();
     }
-    transcript.plain_text(&speaker_names(state, meeting))
+    // Stamped, not plain. Every action item is asked to end with the moment it
+    // was decided, and it can only copy a timestamp it was given. This costs a
+    // few tokens a line and buys an item that can be played back.
+    transcript.timestamped_text(&speaker_names(state, meeting))
 }
 
 #[tauri::command]
@@ -617,6 +624,7 @@ fn apply_action_items(state: &AppState, id: &str, insights: &MeetingInsights) {
                         status: crate::domain::actions::ActionStatus::Open,
                         source: crate::domain::actions::ActionSource::Ai,
                         edited: true,
+                        at_ms: None,
                     })
                     .collect()
             })
@@ -681,6 +689,7 @@ pub async fn add_action_item(
         // A person wrote it, so no summary may take it away.
         source: crate::domain::actions::ActionSource::User,
         edited: true,
+        at_ms: None,
     })?;
     state.db.insert_action_item(&id, &item)?;
     state.db.list_action_items(&id)
@@ -1385,7 +1394,10 @@ pub async fn stop_recording(
             .llm
             .summarize(
                 &settings,
-                &meeting.transcript_text,
+                // The same stamped text the manual path reads, for the same
+                // reason: `transcript_text` has no clock in it, and an action
+                // item cannot cite a timestamp it was never shown.
+                &prompt_transcript(&state, &meeting),
                 SummaryTemplate::General,
                 &state.db.list_context_notes(&id).unwrap_or_default(),
             )

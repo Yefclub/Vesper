@@ -284,6 +284,17 @@ impl Database {
                 return Err(message);
             }
         }
+        // Where in the recording an action item was decided. Nullable, and
+        // `NULL` is the ordinary case rather than a missing value: a person who
+        // wrote the item has no moment to point at, and a model that ignored the
+        // instruction leaves none either. The window shows a stamp when there is
+        // one and nothing at all when there is not.
+        if let Err(e) = conn.execute("ALTER TABLE action_items ADD COLUMN at_ms INTEGER", []) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
         drop(conn);
         self.backfill_search_index()
     }
@@ -335,7 +346,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, text, owner, due, status, source, edited FROM action_items
+                "SELECT id, text, owner, due, status, source, edited, at_ms FROM action_items
                  WHERE meeting_id=?1 ORDER BY position, id",
             )
             .map_err(|e| e.to_string())?;
@@ -359,6 +370,7 @@ impl Database {
                         ActionSource::Ai
                     },
                     edited: r.get::<_, i64>(6)? != 0,
+                    at_ms: r.get(7)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -419,8 +431,8 @@ impl Database {
             .map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO action_items
-               (meeting_id, text, owner, due, status, source, edited, position)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+               (meeting_id, text, owner, due, status, source, edited, position, at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 meeting_id,
                 item.text,
@@ -435,7 +447,8 @@ impl Database {
                     ActionSource::Ai => "ai",
                 },
                 item.edited as i64,
-                next
+                next,
+                item.at_ms
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -520,8 +533,8 @@ impl Database {
         for (position, item) in items.iter().enumerate() {
             tx.execute(
                 "INSERT INTO action_items
-                   (meeting_id, text, owner, due, status, source, edited, position)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                   (meeting_id, text, owner, due, status, source, edited, position, at_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![
                     meeting_id,
                     item.text,
@@ -536,7 +549,8 @@ impl Database {
                         ActionSource::Ai => "ai",
                     },
                     item.edited as i64,
-                    position as i64
+                    position as i64,
+                    item.at_ms
                 ],
             )
             .map_err(|e| e.to_string())?;

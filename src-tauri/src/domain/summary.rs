@@ -1,6 +1,11 @@
 use crate::domain::i18n::Locale;
 use serde::{Deserialize, Serialize};
 
+/// The heading every template ends with, named once because the prompt has to
+/// point the citation instruction at it and a second spelling would point it at
+/// a section that does not exist.
+const ACTIONS_HEADING: &str = "Action items";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SummaryTemplate {
@@ -46,7 +51,7 @@ impl SummaryTemplate {
         // Named consts, because a slice built inside the `match` is a temporary
         // and cannot be returned as `'static`.
         const SUMMARY: SectionSpec = SectionSpec::prose("summary", "Summary");
-        const ACTIONS: SectionSpec = SectionSpec::list("action_items", "Action items");
+        const ACTIONS: SectionSpec = SectionSpec::list("action_items", ACTIONS_HEADING);
         const GENERAL: &[SectionSpec] = &[
             SUMMARY,
             SectionSpec::list("key_points", "Key points"),
@@ -532,12 +537,26 @@ pub fn build_summary_prompt_with(
         .map(|s| format!("## {}", s.heading))
         .collect::<Vec<_>>()
         .join(", ");
+    // Every template ends in action items, and every action item is asked to
+    // name the moment it was decided. The transcript arrives stamped, so this is
+    // a copy rather than a judgement — and an item the model invented has no
+    // moment to copy, which is the point: a citation that does not play back is
+    // visible, where a plausible sentence is not.
+    let cite = format!(
+        "\n\nEnd every line under `## {}` with the moment it was decided, in \
+         square brackets, copied from the timestamp of the transcript line it \
+         came from: `[mm:ss]`. Put it last, after any owner or deadline. Leave \
+         it off only when the transcript does not show when it came up — never \
+         guess one.",
+        ACTIONS_HEADING
+    );
     format!(
-        "{}\n\nRespond in markdown with sections:\n{}\n\nWrite all prose in {}.\nKeep the headings exactly as written, in English: {}.\n\nTranscript:\n{}{}\n\n{}",
+        "{}\n\nRespond in markdown with sections:\n{}\n\nWrite all prose in {}.\nKeep the headings exactly as written, in English: {}.{}\n\nTranscript:\n{}{}\n\n{}",
         template.system_prompt(),
         headings,
         language_name(locale),
         names,
+        cite,
         transcript.trim(),
         crate::domain::context::notes_block(notes),
         // Last, and in the language it asks for. Everything above is English
@@ -676,6 +695,32 @@ We discussed the roadmap.
         let plain = build_summary_prompt(SummaryTemplate::General, "oi", Locale::En);
         let with = build_summary_prompt_with(SummaryTemplate::General, "oi", Locale::En, &[]);
         assert_eq!(plain, with);
+    }
+
+    /// The instruction has to name the section it applies to, and it has to
+    /// name it the way the prompt asked for it a few lines above. Two spellings
+    /// point the model at a heading that does not exist.
+    #[test]
+    fn every_template_points_the_citation_at_its_own_action_heading() {
+        for template in [
+            SummaryTemplate::General,
+            SummaryTemplate::Standup,
+            SummaryTemplate::OneOnOne,
+            SummaryTemplate::ClientCall,
+        ] {
+            let p = build_summary_prompt(template, "Me: ship it", Locale::En);
+            let heading = template
+                .sections()
+                .last()
+                .expect("every template ends in action items")
+                .heading;
+            assert!(
+                p.contains(&format!("End every line under `## {heading}`")),
+                "{template:?}: {p}"
+            );
+            assert!(p.contains("[mm:ss]"), "{template:?}");
+            assert!(p.contains("never guess one"), "{template:?}");
+        }
     }
 
     #[test]

@@ -2060,6 +2060,14 @@ function AppShell({
                                 key={selected.id}
                                 meetingId={selected.id}
                                 reloadKey={versionsKey}
+                                // Only when there is something to play. Without
+                                // a recording the stamp stays plain text rather
+                                // than a button that does nothing.
+                                onSeek={
+                                  audioPath
+                                    ? (ms) => seekTo(ms, true)
+                                    : undefined
+                                }
                               />
                             </div>
                             {/* Chrome inside this one, not out here: it returns
