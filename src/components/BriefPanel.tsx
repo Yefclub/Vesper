@@ -136,6 +136,21 @@ export function BriefPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
+  // And when the window itself loses focus.
+  //
+  // This is the flow the debounce only narrows: stopping a recording from the
+  // tray or the overlay begins the automatic summary, and the backend reads the
+  // brief from the database. Moving focus to another OS window does not blur
+  // the focused element — it stays `document.activeElement` — so the field's
+  // own handler never runs. `window` gets the event regardless, and reaching
+  // the tray or the overlay means leaving this window first.
+  useEffect(() => {
+    const flush = () => void persist(pending.current.text, meetingId, onSaved);
+    window.addEventListener("blur", flush);
+    return () => window.removeEventListener("blur", flush);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetingId]);
+
   // The tick is an acknowledgement, not a state. Left up, it becomes chrome
   // that says "saved" about a field the user has since changed.
   useEffect(() => {
