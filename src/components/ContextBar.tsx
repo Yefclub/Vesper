@@ -63,20 +63,36 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
   }, [open]);
 
   const shell = useRef<HTMLDivElement | null>(null);
-  /// The width the panel had while it was open, kept for the frames in which it
-  /// is leaving. Closing swaps the surface to `h-9 w-9` in a single frame, and a
+  /// Where the panel sat while it was open, kept for the frames in which it is
+  /// leaving. Closing swaps the surface to `h-9 w-9` in a single frame, and a
   /// panel still in flow reflows to fit it — the field went from 399px to 16px
   /// at full opacity, in plain view, before the fade had started. Held at its
-  /// last width and taken out of flow, it is covered by the closing surface
-  /// rather than crushed by it. `PADDING` is the `p-2` the open surface carries
-  /// and the collapsed one does not, so it has to be restored by hand.
-  const PADDING = 8;
-  const width = useRef<number | undefined>(undefined);
+  /// last size and taken out of flow, it is covered by the closing surface
+  /// rather than crushed by it.
+  ///
+  /// `inset` is read rather than written down: the open surface carries `p-2`
+  /// and the collapsed one does not, so the offset has to be restored by hand,
+  /// and a constant here would be a second copy of a number that lives in a
+  /// class.
+  const geometry = useRef<{ inset: number; width: number } | undefined>(
+    undefined,
+  );
   useLayoutEffect(() => {
-    if (open && shell.current) {
-      width.current = shell.current.clientWidth - PADDING * 2;
-    }
-  }, [open, notes.length]);
+    const el = shell.current;
+    if (!open || !el) return;
+    // Observed, not measured once. The window is resizable and adding a note
+    // changes the box, and neither passes through this effect's dependencies —
+    // a width taken before a resize and applied after it produces the very jump
+    // this is here to prevent.
+    const read = () => {
+      const inset = parseFloat(getComputedStyle(el).paddingLeft) || 0;
+      geometry.current = { inset, width: el.clientWidth - inset * 2 };
+    };
+    read();
+    const observer = new ResizeObserver(read);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [open]);
 
   // One element, not two. It used to return a separate collapsed button and
   // expanded panel joined by `layoutId`, and that is what deformed: a shared
@@ -111,7 +127,12 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
         // warp for the whole transition — the one deformation that survives even
         // when the children are held still.
         style={{ borderRadius: open ? 12 : 18 }}
-        className={`relative overflow-hidden border border-border bg-surface-2 ${
+        // The focus ring is worn by the surface, not by the collapsed button.
+        // `overflow-hidden` is what covers the leaving panel, and it clips the
+        // ring of a button that fills the box edge to edge — the buttons inside
+        // the open panel keep their own, since `p-2` leaves more room than the
+        // 4px the ring needs.
+        className={`relative overflow-hidden border border-border bg-surface-2 has-[[data-collapsed]:focus-visible]:shadow-focus ${
           open ? "w-full max-w-md p-2" : "h-9 w-9"
         }`}
       >
@@ -132,9 +153,9 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
               ? undefined
               : {
                   position: "absolute",
-                  left: PADDING,
-                  top: PADDING,
-                  width: width.current,
+                  left: geometry.current?.inset,
+                  top: geometry.current?.inset,
+                  width: geometry.current?.width,
                 }
           }
         >
@@ -232,7 +253,8 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
           }}
           title={t("context.placeholder")}
           aria-label={t("context.add")}
-          className={`absolute inset-0 flex items-center justify-center text-fg-muted transition-colors hover:text-fg ${FOCUS}`}
+          data-collapsed
+          className="absolute inset-0 flex items-center justify-center text-fg-muted transition-colors hover:text-fg focus-visible:outline-none"
         >
           <StickyNote size={16} aria-hidden />
         </motion.button>
