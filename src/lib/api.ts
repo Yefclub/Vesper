@@ -46,6 +46,10 @@ export interface MeetingRecord {
   /// they pick next.
   speaker_me?: string | null;
   speaker_others?: string | null;
+  /// Standing context the user wrote for this meeting, read before the
+  /// transcript every time it is summarised. Null when nobody wrote one —
+  /// distinct from an empty string, which the backend never stores.
+  brief?: string | null;
 }
 
 /** One section of a summary, as the template declared it. `key` is stable and
@@ -465,6 +469,8 @@ export const api = {
     invoke<ContextNote[]>("list_context_notes", { id }),
   deleteContextNote: (id: string, noteId: number) =>
     invoke<void>("delete_context_note", { id, noteId }),
+  setMeetingBrief: (id: string, brief: string) =>
+    invoke<void>("set_meeting_brief", { id, brief }),
   listActionItems: (id: string) =>
     invoke<ActionItem[]>("list_action_items", { id }),
   /// One item at a time. Each returns the whole list as stored, because a

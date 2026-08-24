@@ -464,10 +464,11 @@ impl LocalLlm {
             template,
             locale,
             notes,
+            brief,
         } = subject;
         if self.is_ready(model_id) {
             let mut prompt = crate::domain::summary::build_summary_prompt_with(
-                template, transcript, locale, notes,
+                template, transcript, locale, notes, brief,
             );
             if !reasoning {
                 // Qwen3's own switch, and inert for a model that has no such
@@ -840,6 +841,7 @@ mod tests {
                     template: SummaryTemplate::General,
                     locale: Locale::En,
                     notes: &[],
+                    brief: None,
                 },
                 "llama32-1b",
                 "cpu",
@@ -860,6 +862,7 @@ mod tests {
                     template: SummaryTemplate::General,
                     locale: Locale::En,
                     notes: &[],
+                    brief: None,
                 },
                 "llama32-1b",
                 "cpu",

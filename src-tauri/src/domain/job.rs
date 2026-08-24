@@ -127,6 +127,15 @@ pub struct MeetingRecord {
     pub speaker_me: Option<String>,
     #[serde(default)]
     pub speaker_others: Option<String>,
+    /// Standing context the participant wrote for this meeting: who was in the
+    /// room, what it was for, how a client's name is spelled.
+    ///
+    /// Read here, written only by `Db::set_brief` — the stop pipeline upserts a
+    /// record it has held since before transcription, and putting this in that
+    /// write would let the stale copy erase what the user typed during the
+    /// meeting.
+    #[serde(default)]
+    pub brief: Option<String>,
 }
 
 /// What the app is doing to a meeting after Stop, as the window renders it.

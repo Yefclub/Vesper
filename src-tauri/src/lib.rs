@@ -280,6 +280,7 @@ pub fn run() {
             commands::add_context_note,
             commands::list_context_notes,
             commands::delete_context_note,
+            commands::set_meeting_brief,
             commands::import_audio,
             commands::retranscribe,
             commands::interrupted_meetings,

@@ -508,7 +508,7 @@ pub fn language_name(locale: Locale) -> &'static str {
 /// answer into `summary` and persists two empty vectors. The headings are never
 /// shown — the cards title themselves from the catalog.
 pub fn build_summary_prompt(template: SummaryTemplate, transcript: &str, locale: Locale) -> String {
-    build_summary_prompt_with(template, transcript, locale, &[])
+    build_summary_prompt_with(template, transcript, locale, &[], None)
 }
 
 /// The same prompt, plus whatever the participant typed while it was happening.
@@ -522,6 +522,7 @@ pub fn build_summary_prompt_with(
     transcript: &str,
     locale: Locale,
     notes: &[crate::domain::context::ContextNote],
+    brief: Option<&str>,
 ) -> String {
     // The headings come from the template rather than from this string. Naming
     // them here is what made every template answer in the same three sections
@@ -551,12 +552,18 @@ pub fn build_summary_prompt_with(
         ACTIONS_HEADING
     );
     format!(
-        "{}\n\nRespond in markdown with sections:\n{}\n\nWrite all prose in {}.\nKeep the headings exactly as written, in English: {}.{}\n\nTranscript:\n{}{}\n\n{}",
+        "{}\n\nRespond in markdown with sections:\n{}\n\nWrite all prose in {}.\nKeep the headings exactly as written, in English: {}.{}{}\n\nTranscript:\n{}{}\n\n{}",
         template.system_prompt(),
         headings,
         language_name(locale),
         names,
+        // Beside the other instructions about the shape of the answer, since
+        // that is what it is about.
         cite,
+        // Before the transcript, because it is what the transcript is to be
+        // read against. After it, a model treats it as one more thing that
+        // was said near the end.
+        crate::domain::context::brief_block(brief),
         transcript.trim(),
         crate::domain::context::notes_block(notes),
         // Last, and in the language it asks for. Everything above is English
@@ -680,6 +687,7 @@ We discussed the roadmap.
             "falamos do contrato",
             Locale::PtBr,
             &notes,
+            None,
         );
         assert!(p.contains("Cliente = Acme"), "{p}");
         assert!(
@@ -688,12 +696,38 @@ We discussed the roadmap.
         );
     }
 
+    /// The brief is standing context, the notes are corrections made during the
+    /// call, and the order they reach the model in is the whole difference: read
+    /// first, the brief frames the transcript; read last, it is one more thing
+    /// somebody said near the end.
+    #[test]
+    fn the_brief_comes_before_the_transcript_and_the_notes_after() {
+        let notes = vec![crate::domain::context::ContextNote {
+            id: 1,
+            text: "Cliente = Acme".into(),
+            at_ms: Some(5_000),
+            created_at: "2026-08-04T00:00:00Z".into(),
+        }];
+        let p = build_summary_prompt_with(
+            SummaryTemplate::ClientCall,
+            "falamos do contrato",
+            Locale::PtBr,
+            &notes,
+            Some("Revisão trimestral da Acme"),
+        );
+        let brief = p.find("Revisão trimestral da Acme").expect("brief");
+        let transcript = p.find("falamos do contrato").expect("transcript");
+        let note = p.find("Cliente = Acme").expect("note");
+        assert!(brief < transcript, "the brief frames the transcript: {p}");
+        assert!(transcript < note, "the notes correct it: {p}");
+    }
+
     /// A meeting with no notes must read exactly as it did before, or every
     /// existing summary silently changes shape.
     #[test]
     fn no_notes_leaves_the_prompt_untouched() {
         let plain = build_summary_prompt(SummaryTemplate::General, "oi", Locale::En);
-        let with = build_summary_prompt_with(SummaryTemplate::General, "oi", Locale::En, &[]);
+        let with = build_summary_prompt_with(SummaryTemplate::General, "oi", Locale::En, &[], None);
         assert_eq!(plain, with);
     }
 
