@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Plus, StickyNote, X } from "lucide-react";
 import { useI18n } from "../lib/i18n";
@@ -62,15 +62,166 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
     }
   }, [open]);
 
-  if (!open) {
-    return (
-      <div
-        onMouseEnter={() => setHovered(true)}
-        className="pointer-events-auto mb-2 flex justify-center"
+  const shell = useRef<HTMLDivElement | null>(null);
+  /// The width the panel had while it was open, kept for the frames in which it
+  /// is leaving. Closing swaps the surface to `h-9 w-9` in a single frame, and a
+  /// panel still in flow reflows to fit it — the field went from 399px to 16px
+  /// at full opacity, in plain view, before the fade had started. Held at its
+  /// last width and taken out of flow, it is covered by the closing surface
+  /// rather than crushed by it. `PADDING` is the `p-2` the open surface carries
+  /// and the collapsed one does not, so it has to be restored by hand.
+  const PADDING = 8;
+  const width = useRef<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (open && shell.current) {
+      width.current = shell.current.clientWidth - PADDING * 2;
+    }
+  }, [open, notes.length]);
+
+  // One element, not two. It used to return a separate collapsed button and
+  // expanded panel joined by `layoutId`, and that is what deformed: a shared
+  // layout animation between a 36px circle and a full-width panel scales the
+  // box, and every child scales with it — the icon stretched on the way out,
+  // the input and the placeholder squashed on the way in.
+  //
+  // The surface morphs and nothing else does. `layout` animates this element's
+  // own size, the children carry `layout="position"` so they are moved rather
+  // than stretched, and the two contents cross-fade over the top.
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      className="pointer-events-auto mb-2 flex justify-center"
+    >
+      <motion.div
+        layout
+        ref={shell}
+        onFocusCapture={() => setFocused(true)}
+        onBlurCapture={(e) => {
+          // Only when focus has left the panel entirely. `relatedTarget` inside
+          // it is a tab between the field and the button, and closing on that
+          // would shut the panel while somebody is still using it.
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+            setFocused(false);
+          }
+        }}
+        transition={transition.base}
+        // Inline, not `rounded-full`/`rounded-lg`. A radius set through a class
+        // is a number the layout projection cannot counter-scale, so the corners
+        // warp for the whole transition — the one deformation that survives even
+        // when the children are held still.
+        style={{ borderRadius: open ? 12 : 18 }}
+        className={`relative overflow-hidden border border-border bg-surface-2 ${
+          open ? "w-full max-w-md p-2" : "h-9 w-9"
+        }`}
       >
+        {/* Mounted always, faded rather than unmounted — the same reason as the
+            icon below, plus one of its own. `AnimatePresence` re-renders the
+            element it cached from the last render in which the child was
+            present, so props cannot change while a child is leaving: the
+            positioning below would never have been applied. Off the flow and
+            held at its last width, it is covered by the closing surface instead
+            of reflowing to fit it. */}
+        <motion.div
+          layout="position"
+          animate={{ opacity: open ? 1 : 0 }}
+          transition={transition.fast}
+          inert={!open}
+          style={
+            open
+              ? undefined
+              : {
+                  position: "absolute",
+                  left: PADDING,
+                  top: PADDING,
+                  width: width.current,
+                }
+          }
+        >
+          <AnimatePresence initial={false}>
+            {notes.length > 0 && (
+              <motion.ul
+                layout="position"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: duration.instant, ease: ease.out }}
+                className="mb-2 max-h-28 space-y-1 overflow-y-auto"
+              >
+                {notes.map((n) => (
+                  <li
+                    key={n.id}
+                    className="group flex items-start gap-2 rounded-sm px-2 py-1 text-xs hover:bg-surface-3"
+                  >
+                    {n.at_ms !== null && n.at_ms !== undefined && (
+                      <span className="shrink-0 tabular-nums text-fg-subtle">
+                        {stamp(n.at_ms)}
+                      </span>
+                    )}
+                    <span className="min-w-0 flex-1 break-words">{n.text}</span>
+                    <button
+                      type="button"
+                      onClick={() => void remove(n.id)}
+                      aria-label={t("context.remove")}
+                      // 16px box for the 16px line of `text-xs`, icon
+                      // centred. See `NotesPanel` — same row, same fix, one
+                      // size down.
+                      className={`flex h-4 w-4 shrink-0 items-center justify-center text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS}`}
+                    >
+                      <X size={12} />
+                    </button>
+                  </li>
+                ))}
+              </motion.ul>
+            )}
+          </AnimatePresence>
+
+          <form
+            className="flex items-center gap-1"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submit();
+            }}
+          >
+            <input
+              ref={field}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              disabled={busy}
+              placeholder={t("context.placeholder")}
+              aria-label={t("context.placeholder")}
+              className="min-w-0 flex-1 rounded-sm bg-transparent px-2 py-1 text-sm outline-none placeholder:text-fg-subtle disabled:opacity-60"
+            />
+            <button
+              type="submit"
+              disabled={!text.trim() || busy}
+              aria-label={t("context.add")}
+              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent text-background transition-opacity hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40 ${FOCUS}`}
+            >
+              <Plus size={14} />
+            </button>
+          </form>
+
+          {notes.length === 0 && (
+            <p className="px-2 pt-1 text-[0.7rem] leading-relaxed text-fg-subtle">
+              {t("context.hint")}
+            </p>
+          )}
+        </motion.div>
+
+        {/* Mounted always, faded rather than unmounted. A child that appears
+            part-way through a layout animation has no previous box to be
+            projected from, so `layout="position"` cannot counter-scale it and
+            it inherits the surface's — the icon entered 26% too wide and took
+            150ms to settle. One that was there all along is corrected on every
+            frame. `inert` keeps it out of the tab order and the a11y tree while
+            the panel is up, which is what unmounting used to do for free. */}
         <motion.button
           type="button"
-          layoutId="context-bar"
+          layout="position"
+          animate={{ opacity: open ? 0 : 1 }}
+          transition={transition.fast}
+          inert={open}
           onFocus={() => {
             takeFocus.current = true;
             setFocused(true);
@@ -81,98 +232,11 @@ export function ContextBar({ meetingId }: { meetingId: string }) {
           }}
           title={t("context.placeholder")}
           aria-label={t("context.add")}
-          className={`flex h-9 w-9 items-center justify-center rounded-full border border-border bg-surface-2 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg ${FOCUS}`}
+          className={`absolute inset-0 flex items-center justify-center text-fg-muted transition-colors hover:text-fg ${FOCUS}`}
         >
           <StickyNote size={16} aria-hidden />
         </motion.button>
-      </div>
-    );
-  }
-
-  return (
-    <motion.div
-      layoutId="context-bar"
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onFocusCapture={() => setFocused(true)}
-      onBlurCapture={(e) => {
-        // Only when focus has left the panel entirely. `relatedTarget` inside it
-        // is a tab between the field and the button, and closing on that would
-        // shut the panel while somebody is still using it.
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-          setFocused(false);
-        }
-      }}
-      transition={transition.base}
-      className="pointer-events-auto mb-2 w-full max-w-md rounded-lg border border-border bg-surface-2 p-2"
-    >
-      <AnimatePresence initial={false}>
-        {notes.length > 0 && (
-          <motion.ul
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: duration.instant, ease: ease.out }}
-            className="mb-2 max-h-28 space-y-1 overflow-y-auto"
-          >
-            {notes.map((n) => (
-              <li
-                key={n.id}
-                className="group flex items-start gap-2 rounded-sm px-2 py-1 text-xs hover:bg-surface-3"
-              >
-                {n.at_ms !== null && n.at_ms !== undefined && (
-                  <span className="shrink-0 tabular-nums text-fg-subtle">
-                    {stamp(n.at_ms)}
-                  </span>
-                )}
-                <span className="min-w-0 flex-1 break-words">{n.text}</span>
-                <button
-                  type="button"
-                  onClick={() => void remove(n.id)}
-                  aria-label={t("context.remove")}
-                  // 16px box for the 16px line of `text-xs`, icon centred. See
-                  // `NotesPanel` — same row, same fix, one size down.
-                  className={`flex h-4 w-4 shrink-0 items-center justify-center text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS}`}
-                >
-                  <X size={12} />
-                </button>
-              </li>
-            ))}
-          </motion.ul>
-        )}
-      </AnimatePresence>
-
-      <form
-        className="flex items-center gap-1"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-      >
-        <input
-          ref={field}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          disabled={busy}
-          placeholder={t("context.placeholder")}
-          aria-label={t("context.placeholder")}
-          className="min-w-0 flex-1 rounded-sm bg-transparent px-2 py-1 text-sm outline-none placeholder:text-fg-subtle disabled:opacity-60"
-        />
-        <button
-          type="submit"
-          disabled={!text.trim() || busy}
-          aria-label={t("context.add")}
-          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent text-background transition-opacity hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40 ${FOCUS}`}
-        >
-          <Plus size={14} />
-        </button>
-      </form>
-
-      {notes.length === 0 && (
-        <p className="px-2 pt-1 text-[0.7rem] leading-relaxed text-fg-subtle">
-          {t("context.hint")}
-        </p>
-      )}
-    </motion.div>
+      </motion.div>
+    </div>
   );
 }
