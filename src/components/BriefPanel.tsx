@@ -42,6 +42,21 @@ export function BriefPanel({
   // `meeting://progress` event, and each reload would overwrite whatever the
   // user was in the middle of typing.
 
+  // The current values, reachable from a closure that was created before them.
+  // The unmount cleanup below runs once and cannot close over the last render.
+  const pending = useRef({ meetingId, text, onSaved });
+  pending.current = { meetingId, text, onSaved };
+
+  // Writes run one after another, and each is dropped if a newer one was asked
+  // for before it started. Three things write this field — a pause, a blur and
+  // an unmount — and they overlap: a debounce that has already been issued can
+  // resolve after the blur that superseded it, putting the older text back into
+  // the row and reporting it to the parent. Chained rather than merely counted,
+  // because dropping the stale one on the way back still leaves two `invoke`s
+  // in flight with no ordering guarantee between them.
+  const queue = useRef<Promise<void>>(Promise.resolve());
+  const issued = useRef(0);
+
   /// Write, without touching what is on screen.
   ///
   /// Trimmed before the comparison, not only after: the backend trims what it
@@ -52,46 +67,51 @@ export function BriefPanel({
   /// It deliberately does not `setText`. This runs while the user is still
   /// typing, and normalising the field mid-sentence would eat the space they
   /// had just pressed and move the caret out from under them.
-  const persist = async () => {
-    const next = text.trim();
-    if (next === stored.current) return;
-    try {
-      await api.setMeetingBrief(meetingId, next);
-      stored.current = next;
-      onSaved(next);
-      setError(null);
-      setSaved(true);
-    } catch (e) {
-      setError(String(e));
-    }
+  const persist = (raw: string, id: string, report: (brief: string) => void) => {
+    const next = raw.trim();
+    const mine = ++issued.current;
+    queue.current = queue.current.then(async () => {
+      // Superseded while it waited its turn. The newer value is the one the
+      // user means and it is already queued behind this.
+      if (issued.current !== mine || next === stored.current) return;
+      try {
+        await api.setMeetingBrief(id, next);
+        stored.current = next;
+        report(next);
+        setError(null);
+        // Only when the field still holds what was written. Typing during the
+        // write would otherwise leave a tick saying "saved" over text that is
+        // not.
+        if (pending.current.text.trim() === next) setSaved(true);
+      } catch (e) {
+        setError(String(e));
+      }
+    });
+    return queue.current;
   };
 
   /// Leaving the field: write it, then show what was actually stored.
   const save = async () => {
-    await persist();
-    setText(stored.current);
+    await persist(text, meetingId, onSaved);
+    // Only if the write landed — on success `stored` now equals the trimmed
+    // text. A rejected write (over the length limit, say) leaves them apart,
+    // and replacing the field with the old value would throw away the text the
+    // user has to shorten before they can try again.
+    if (text.trim() === stored.current) setText(stored.current);
   };
 
   // Blur is not the only way this field can be left. Stopping a recording from
   // the tray or the overlay selects the finished meeting, which remounts this
   // panel by key — and removing a focused node does not dispatch `blur`, so
-  // whatever was being typed at that moment would be lost. The ref carries the
-  // current values into a cleanup that cannot close over them.
-  const pending = useRef({ meetingId, text, onSaved });
-  pending.current = { meetingId, text, onSaved };
+  // whatever was being typed at that moment would be lost.
   useEffect(
     () => () => {
       const { meetingId: id, text: latest, onSaved: report } = pending.current;
-      const next = latest.trim();
-      if (next === stored.current) return;
-      // Nothing to report a failure to — this component is going away and the
-      // panel that replaces it belongs to a different meeting. The write is
-      // still worth attempting; losing it silently is the worse of the two.
-      api.setMeetingBrief(id, next).then(
-        () => report(next),
-        () => {},
-      );
+      void persist(latest, id, report);
     },
+    // Deliberately once, on unmount. `persist` reads everything it needs from
+    // the refs above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
 
@@ -107,11 +127,12 @@ export function BriefPanel({
   // prose somebody is composing, and each one bumps the meeting's `updated_at`.
   useEffect(() => {
     if (text.trim() === stored.current) return;
-    const timer = setTimeout(() => void persist(), 800);
+    const timer = setTimeout(
+      () => void persist(text, meetingId, onSaved),
+      800,
+    );
     return () => clearTimeout(timer);
-    // `persist` is redefined on every render and reads `text` from that
-    // render's closure, which is exactly what this needs — the effect is keyed
-    // on the text it is about to write.
+    // Keyed on the text it is about to write, which is what the timer needs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
