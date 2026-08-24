@@ -217,6 +217,14 @@ export interface ActionItem {
   /// never what a person said.
   source: "ai" | "user";
   edited: boolean;
+  /// Where in the recording this was decided, in milliseconds from the start.
+  ///
+  /// The model is asked to end each suggestion with the moment it came up, and
+  /// the offset is split off the text on the way in. Null for anything a person
+  /// wrote, for a model that ignored the instruction, and for every item that
+  /// predates the column — the row shows a stamp when there is one and nothing
+  /// at all when there is not.
+  at_ms?: number | null;
 }
 
 export interface MeetingInsights {

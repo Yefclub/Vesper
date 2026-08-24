@@ -42,6 +42,73 @@ pub struct ActionItem {
     /// edit, and never cleared — it is what protects the item from the next
     /// summary.
     pub edited: bool,
+    /// Where in the recording this was decided, in milliseconds from the start.
+    ///
+    /// The model is asked to end each suggestion with the moment it came up,
+    /// and the offset is split off the text and kept here. It is what turns an
+    /// action item from something to take on trust into something you can play
+    /// back — and an item the model invented has no moment to point at, so a
+    /// missing or wrong one is visible rather than plausible.
+    ///
+    /// `None` for anything a person wrote, for a model that ignored the
+    /// instruction, and for every item that predates this column.
+    #[serde(default)]
+    pub at_ms: Option<i64>,
+}
+
+/// Split a trailing `[m:ss]`, `[mm:ss]` or `[h:mm:ss]` off a suggestion.
+///
+/// Returns the text without it and the offset in milliseconds. Anything that is
+/// not a stamp is left where it is: a line ending in `[TBD]` is text, and
+/// eating it would silently shorten somebody's task.
+pub fn split_stamp(line: &str) -> (String, Option<i64>) {
+    let bare = || (line.trim().to_string(), None);
+    let trimmed = line.trim_end();
+    if !trimmed.ends_with(']') {
+        return bare();
+    }
+    let Some(open) = trimmed.rfind('[') else {
+        return bare();
+    };
+    match parse_stamp(&trimmed[open + 1..trimmed.len() - 1]) {
+        Some(ms) => (trimmed[..open].trim().to_string(), Some(ms)),
+        None => bare(),
+    }
+}
+
+/// `m:ss` or `h:mm:ss` as milliseconds.
+///
+/// The minutes are **not** bounded at 60 in the two-field form, and that is not
+/// leniency — it is the vocabulary the transcript itself uses.
+/// `timestamped_text` writes `[{minutes:02}:{seconds:02}]` from the total, so an
+/// hour and a quarter into a recording it emits `[75:00]`, and the prompt asks
+/// the model to copy what it was given. Refusing that would leave every action
+/// decided after the first hour without the citation this whole change is for.
+///
+/// Seconds are bounded, and so are the minutes of a three-field stamp: those
+/// are out of range in any reading, and a stamp that cannot be read is better
+/// left in the text than turned into a seek to a moment that was never there.
+fn parse_stamp(s: &str) -> Option<i64> {
+    let parts: Vec<i64> = s
+        .split(':')
+        .map(|p| p.trim().parse::<i64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let (h, m, sec) = match parts[..] {
+        [m, sec] => (0, m, sec),
+        [h, m, sec] if (0..60).contains(&m) => (h, m, sec),
+        _ => return None,
+    };
+    if h < 0 || m < 0 || !(0..60).contains(&sec) {
+        return None;
+    }
+    // Checked, because the minutes are unbounded on purpose and the text comes
+    // from a model. `[999999999999999999:00]` is syntactically a stamp, and
+    // multiplying it out overflows — a panic with overflow checks on, a
+    // nonsense seek offset without them.
+    h.checked_mul(3600)?
+        .checked_add(m.checked_mul(60)?)?
+        .checked_add(sec)?
+        .checked_mul(1000)
 }
 
 /// What a re-summarise is allowed to do to the existing list.
@@ -64,17 +131,38 @@ pub fn merge_suggestions(existing: &[ActionItem], suggested: &[String]) -> Vec<A
         i.source == ActionSource::User || i.edited || i.status == ActionStatus::Done
     };
 
+    // The stamp comes off before anything is compared. A model asked twice puts
+    // the same task a second either side of where it put it last time, and
+    // comparing the stamped lines would make that a different piece of work —
+    // the list would grow by its whole length on every re-summarise.
+    let suggested: Vec<(String, Option<i64>)> = suggested.iter().map(|s| split_stamp(s)).collect();
+
     let mut kept: Vec<ActionItem> = Vec::new();
     for item in existing {
         // A suggestion the model makes again is the same piece of work, so the
         // row — and the status on it — stays.
-        let repeated = suggested.iter().any(|s| same_work(s, &item.text));
-        if protected(item) || repeated {
-            kept.push(item.clone());
+        let repeated = suggested.iter().find(|(s, _)| same_work(s, &item.text));
+        match repeated {
+            // Its own untouched suggestion is the one thing the model is allowed
+            // to replace, so a stamp it did not produce last time can land now.
+            // A protected row keeps everything it had, including no stamp.
+            //
+            // `or`, not a plain replacement: a repeat with no stamp is not a
+            // statement that there is no moment. Improving any other section
+            // sends the current items back through here as plain text, and they
+            // never carried one — replacing outright would clear the citation
+            // off every suggestion the moment somebody improved Key points.
+            Some((_, at_ms)) if !protected(item) => kept.push(ActionItem {
+                at_ms: at_ms.or(item.at_ms),
+                ..item.clone()
+            }),
+            Some(_) => kept.push(item.clone()),
+            None if protected(item) => kept.push(item.clone()),
+            None => {}
         }
     }
 
-    for text in suggested {
+    for (text, at_ms) in &suggested {
         if kept.iter().any(|i| same_work(text, &i.text)) {
             continue;
         }
@@ -86,6 +174,7 @@ pub fn merge_suggestions(existing: &[ActionItem], suggested: &[String]) -> Vec<A
             status: ActionStatus::Open,
             source: ActionSource::Ai,
             edited: false,
+            at_ms: *at_ms,
         });
     }
     kept
@@ -123,7 +212,118 @@ mod tests {
             status: ActionStatus::Open,
             source: ActionSource::Ai,
             edited: false,
+            at_ms: None,
         }
+    }
+
+    #[test]
+    fn a_stamp_comes_off_the_end_and_becomes_an_offset() {
+        assert_eq!(
+            split_stamp("Assinar o build [12:05]"),
+            ("Assinar o build".to_string(), Some(725_000))
+        );
+        assert_eq!(
+            split_stamp("Assinar o build [1:02:05]"),
+            ("Assinar o build".to_string(), Some(3_725_000))
+        );
+    }
+
+    /// A line that merely ends in brackets is a line, not a citation.
+    #[test]
+    fn something_that_is_not_a_stamp_stays_in_the_text() {
+        for line in [
+            "Definir o prazo [TBD]",
+            "Rever o item [3]",
+            "Conferir a nota [a:b]",
+            "Sem colchete nenhum",
+        ] {
+            assert_eq!(split_stamp(line), (line.trim().to_string(), None), "{line}");
+        }
+    }
+
+    /// The transcript the model is given writes minutes from the total, so an
+    /// hour and a quarter in it says `[75:00]` — and the prompt asks the model
+    /// to copy what it was given. Refusing that would leave every item decided
+    /// after the first hour without a citation, which is most of a long meeting.
+    #[test]
+    fn minutes_past_the_hour_are_the_transcripts_own_vocabulary() {
+        assert_eq!(
+            split_stamp("Publicar [75:00]"),
+            ("Publicar".to_string(), Some(4_500_000))
+        );
+    }
+
+    /// Minutes are unbounded on purpose and the text comes from a model, so the
+    /// arithmetic has to be able to say no.
+    #[test]
+    fn a_stamp_too_large_to_multiply_out_is_refused() {
+        assert_eq!(
+            split_stamp("Publicar [999999999999999999:00]"),
+            ("Publicar [999999999999999999:00]".to_string(), None)
+        );
+    }
+
+    /// Out of range in any reading. A stamp that cannot be read is better left
+    /// in the text than turned into a seek to a moment that was never there.
+    #[test]
+    fn an_unreadable_stamp_is_refused_rather_than_normalised() {
+        for line in [
+            "Publicar [10:61]",
+            "Publicar [1:75:00]",
+            "Publicar [1:2:3:4]",
+        ] {
+            assert_eq!(split_stamp(line), (line.to_string(), None), "{line}");
+        }
+    }
+
+    /// The stamp must not make the same task look new. A model asked twice puts
+    /// it a second either side of where it was, and the list would double.
+    #[test]
+    fn a_moved_stamp_is_still_the_same_piece_of_work() {
+        let existing = vec![ActionItem {
+            at_ms: Some(725_000),
+            ..ai(1, "Assinar o build")
+        }];
+        let kept = merge_suggestions(&existing, &["Assinar o build [12:07]".into()]);
+        assert_eq!(kept.len(), 1, "one task, not two");
+        assert_eq!(kept[0].id, 1, "and it kept its row");
+        assert_eq!(kept[0].at_ms, Some(727_000), "with the newer moment");
+    }
+
+    /// Improving Key points sends the existing action items back through here as
+    /// the plain text they are stored as, with no stamp on them. That is not the
+    /// model saying there is no moment — it is the round trip — and clearing the
+    /// citation off every suggestion because somebody improved another section
+    /// would empty the feature out in one click.
+    #[test]
+    fn a_repeat_without_a_stamp_keeps_the_one_it_had() {
+        let existing = vec![ActionItem {
+            at_ms: Some(45_000),
+            ..ai(1, "Assinar o build")
+        }];
+        let kept = merge_suggestions(&existing, &["Assinar o build".into()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].at_ms, Some(45_000));
+    }
+
+    /// The stamp is the model's, so it may refresh its own suggestion — and may
+    /// not touch a row a person has claimed.
+    #[test]
+    fn a_stamp_never_lands_on_an_item_a_person_touched() {
+        let existing = vec![ActionItem {
+            edited: true,
+            ..ai(1, "Assinar o build")
+        }];
+        let kept = merge_suggestions(&existing, &["Assinar o build [12:07]".into()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].at_ms, None, "their row, their contents");
+    }
+
+    #[test]
+    fn a_new_suggestion_arrives_with_its_moment() {
+        let kept = merge_suggestions(&[], &["Publicar a release [0:45]".into()]);
+        assert_eq!(kept[0].text, "Publicar a release");
+        assert_eq!(kept[0].at_ms, Some(45_000));
     }
 
     #[test]

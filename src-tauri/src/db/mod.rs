@@ -294,6 +294,17 @@ impl Database {
                 return Err(message);
             }
         }
+        // Where in the recording an action item was decided. Nullable, and
+        // `NULL` is the ordinary case rather than a missing value: a person who
+        // wrote the item has no moment to point at, and a model that ignored the
+        // instruction leaves none either. The window shows a stamp when there is
+        // one and nothing at all when there is not.
+        if let Err(e) = conn.execute("ALTER TABLE action_items ADD COLUMN at_ms INTEGER", []) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
         drop(conn);
         self.backfill_search_index()
     }
@@ -345,7 +356,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, text, owner, due, status, source, edited FROM action_items
+                "SELECT id, text, owner, due, status, source, edited, at_ms FROM action_items
                  WHERE meeting_id=?1 ORDER BY position, id",
             )
             .map_err(|e| e.to_string())?;
@@ -369,6 +380,7 @@ impl Database {
                         ActionSource::Ai
                     },
                     edited: r.get::<_, i64>(6)? != 0,
+                    at_ms: r.get(7)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -429,8 +441,8 @@ impl Database {
             .map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO action_items
-               (meeting_id, text, owner, due, status, source, edited, position)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+               (meeting_id, text, owner, due, status, source, edited, position, at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 meeting_id,
                 item.text,
@@ -445,7 +457,8 @@ impl Database {
                     ActionSource::Ai => "ai",
                 },
                 item.edited as i64,
-                next
+                next,
+                item.at_ms
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -469,10 +482,23 @@ impl Database {
         // untouched suggestion while its field is being edited, and an UPDATE
         // that matches nothing is not a success — reporting one would hand back
         // a list without the correction and no sign it had been dropped.
+        // The citation goes when the words go. It says "this was decided here",
+        // and rewriting the task into a different one leaves that pointing at
+        // the moment somebody discussed something else — a stamp that plays the
+        // wrong words while presenting itself as evidence for the new ones,
+        // which is worse than no stamp at all. Kept for an owner, a deadline or
+        // a tick, because none of those change what was decided.
+        //
+        // Compared in SQL rather than read first: a summary running alongside
+        // this can rewrite the row between a read and a write, and the version
+        // being replaced is the one on disk, not the one this call was built
+        // from.
         let changed = tx
             .execute(
-                "UPDATE action_items SET text=?3, owner=?4, due=?5, status=?6, edited=1
-             WHERE id=?1 AND meeting_id=?2",
+                "UPDATE action_items
+                    SET text=?3, owner=?4, due=?5, status=?6, edited=1,
+                        at_ms = CASE WHEN text=?3 THEN at_ms ELSE NULL END
+                  WHERE id=?1 AND meeting_id=?2",
                 params![
                     item.id,
                     meeting_id,
@@ -530,8 +556,8 @@ impl Database {
         for (position, item) in items.iter().enumerate() {
             tx.execute(
                 "INSERT INTO action_items
-                   (meeting_id, text, owner, due, status, source, edited, position)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                   (meeting_id, text, owner, due, status, source, edited, position, at_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![
                     meeting_id,
                     item.text,
@@ -546,7 +572,8 @@ impl Database {
                         ActionSource::Ai => "ai",
                     },
                     item.edited as i64,
-                    position as i64
+                    position as i64,
+                    item.at_ms
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -1616,6 +1643,62 @@ mod tests {
             speaker_others: None,
             brief: None,
         }
+    }
+
+    /// The citation says "this was decided here". Rewriting the task into a
+    /// different one leaves it pointing at the moment somebody discussed
+    /// something else, and a stamp that plays the wrong words while presenting
+    /// itself as evidence for the new ones is worse than no stamp at all.
+    #[test]
+    fn editing_the_words_of_an_item_drops_its_citation() {
+        use crate::domain::actions::{ActionItem, ActionSource, ActionStatus};
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.upsert_meeting(&sample_meeting("m1", "Sync")).unwrap();
+        db.insert_action_item(
+            "m1",
+            &ActionItem {
+                id: 0,
+                text: "Assinar o build".into(),
+                owner: None,
+                due: None,
+                status: ActionStatus::Open,
+                source: ActionSource::Ai,
+                edited: false,
+                at_ms: Some(45_000),
+            },
+        )
+        .unwrap();
+        let stored = db.list_action_items("m1").unwrap().remove(0);
+        assert_eq!(stored.at_ms, Some(45_000));
+
+        // An owner, a deadline and a tick change none of what was decided.
+        db.update_action_item(
+            "m1",
+            &ActionItem {
+                owner: Some("Ana".into()),
+                due: Some("sexta".into()),
+                status: ActionStatus::Done,
+                ..stored.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            db.list_action_items("m1").unwrap()[0].at_ms,
+            Some(45_000),
+            "the task is the same task"
+        );
+
+        // The words do.
+        db.update_action_item(
+            "m1",
+            &ActionItem {
+                text: "Publicar as notas".into(),
+                ..stored
+            },
+        )
+        .unwrap();
+        assert_eq!(db.list_action_items("m1").unwrap()[0].at_ms, None);
     }
 
     #[test]

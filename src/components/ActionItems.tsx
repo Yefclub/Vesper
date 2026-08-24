@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { Plus, X } from "lucide-react";
-import { api, type ActionItem } from "../lib/api";
+import { api, formatDuration, type ActionItem } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { MarkdownInline } from "./Markdown";
 import { FOCUS } from "./Button";
@@ -21,11 +21,16 @@ import { FOCUS } from "./Button";
 export function ActionItems({
   meetingId,
   reloadKey,
+  onSeek,
 }: {
   meetingId: string;
   /// Bumped whenever a summary rewrote this list. Without it the panel kept
   /// showing the rows from before the run.
   reloadKey: number;
+  /// Move the playhead to the moment an item was decided. Absent when this
+  /// meeting has no recording to play — the stamp is then plain text, because
+  /// the app must never offer an action it cannot perform.
+  onSeek?: (ms: number) => void;
 }) {
   const { t } = useI18n();
   const [items, setItems] = useState<ActionItem[]>([]);
@@ -180,6 +185,33 @@ export function ActionItems({
                   onBlur={() => leave(item)}
                   className="w-32 bg-transparent outline-none placeholder:text-fg-subtle/60"
                 />
+                {/* Where the model says this was decided.
+ 
+                    It is the difference between a list to take on trust and one
+                    that can be checked: an item somebody invented has no moment
+                    to play, so a citation that lands on the wrong words is
+                    visible where a plausible sentence is not. Shown only when
+                    there is one — a person's own item has no moment, and
+                    inventing one would read as evidence. */}
+                {typeof item.at_ms === "number" &&
+                  (onSeek ? (
+                    <button
+                      type="button"
+                      onClick={() => onSeek(item.at_ms as number)}
+                      title={t("actions.cite")}
+                      aria-label={t("actions.cite")}
+                      className={clsx(
+                        "shrink-0 rounded-xs tabular-nums hover:text-accent",
+                        FOCUS,
+                      )}
+                    >
+                      {formatDuration(item.at_ms)}
+                    </button>
+                  ) : (
+                    <span className="shrink-0 tabular-nums">
+                      {formatDuration(item.at_ms)}
+                    </span>
+                  ))}
               </div>
             </div>
             <button
