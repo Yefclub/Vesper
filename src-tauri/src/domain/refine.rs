@@ -79,6 +79,19 @@ pub fn build_refine_prompt(
             "Add actions the transcript states or clearly implies, name the owner where the transcript names one, and cut anything nobody committed to.",
         ),
     };
+    // Action items are the one section stored as rows rather than as text, and
+    // each row carries the moment it was decided. Without this the summary's
+    // items are playable and anything this path adds is not — the same list,
+    // half of it citable, which reads as the citation being unreliable rather
+    // than absent. The transcript here is already the timestamped one.
+    let cite = match section {
+        Section::ActionItems => {
+            "\n         - end every line with the moment it was decided, in square brackets, \
+             copied from the timestamp of the transcript line it came from: `[mm:ss]`. \
+             Put it last, after any owner or deadline, and leave it off rather than guess one"
+        }
+        Section::KeyPoints => "",
+    };
     let language = match locale {
         Locale::PtBr => "Write the list in Brazilian Portuguese.",
         Locale::En => "Write the list in English.",
@@ -89,7 +102,7 @@ pub fn build_refine_prompt(
          - answer with the improved {label} only, one per line, each starting with `- `\n\
          - no heading, no preamble, no closing remark\n\
          - {aim}\n\
-         - {language}\n\
+         - {language}{cite}\n\
          - if the transcript genuinely supports nothing, answer with the current list unchanged\n\n\
          Current {label}:\n{current}\n\n\
          Transcript:\n{transcript}\n"
@@ -153,6 +166,25 @@ mod tests {
         assert!(!p.contains("key points"));
         assert!(p.contains("- do a thing"));
         assert!(p.contains("0:00 Me: hi"));
+    }
+
+    /// Action items are rows carrying the moment they were decided, and a
+    /// refinement adds to that list. Without the instruction the summary's items
+    /// would be playable and anything added here would not — the same list, half
+    /// of it citable, which reads as the citation being unreliable.
+    #[test]
+    fn refining_action_items_asks_for_the_moment_too() {
+        let p = build_refine_prompt(Section::ActionItems, "", "0:00 Me: hi", Locale::En);
+        assert!(p.contains("[mm:ss]"), "{p}");
+        assert!(p.contains("rather than guess one"), "{p}");
+    }
+
+    /// Key points are stored as text and nothing plays them back. Asking for a
+    /// stamp there would put brackets in the middle of a summary.
+    #[test]
+    fn refining_key_points_does_not() {
+        let p = build_refine_prompt(Section::KeyPoints, "", "0:00 Me: hi", Locale::En);
+        assert!(!p.contains("[mm:ss]"), "{p}");
     }
 
     #[test]

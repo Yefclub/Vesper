@@ -101,7 +101,14 @@ fn parse_stamp(s: &str) -> Option<i64> {
     if h < 0 || m < 0 || !(0..60).contains(&sec) {
         return None;
     }
-    Some((h * 3600 + m * 60 + sec) * 1000)
+    // Checked, because the minutes are unbounded on purpose and the text comes
+    // from a model. `[999999999999999999:00]` is syntactically a stamp, and
+    // multiplying it out overflows — a panic with overflow checks on, a
+    // nonsense seek offset without them.
+    h.checked_mul(3600)?
+        .checked_add(m.checked_mul(60)?)?
+        .checked_add(sec)?
+        .checked_mul(1000)
 }
 
 /// What a re-summarise is allowed to do to the existing list.
@@ -243,6 +250,16 @@ mod tests {
         assert_eq!(
             split_stamp("Publicar [75:00]"),
             ("Publicar".to_string(), Some(4_500_000))
+        );
+    }
+
+    /// Minutes are unbounded on purpose and the text comes from a model, so the
+    /// arithmetic has to be able to say no.
+    #[test]
+    fn a_stamp_too_large_to_multiply_out_is_refused() {
+        assert_eq!(
+            split_stamp("Publicar [999999999999999999:00]"),
+            ("Publicar [999999999999999999:00]".to_string(), None)
         );
     }
 
