@@ -1389,7 +1389,11 @@ pub async fn stop_recording(
                 &meeting.transcript_text,
                 SummaryTemplate::General,
                 &state.db.list_context_notes(&id).unwrap_or_default(),
-                meeting.brief.as_deref(),
+                // Read now, not from `meeting`. That record was captured before
+                // transcription began and the user can write context at any
+                // point up to this call — reading its copy drops a brief that
+                // is already stored.
+                state.db.get_brief(&id).unwrap_or_default().as_deref(),
             )
             .await
         {

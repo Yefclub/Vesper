@@ -43,20 +43,46 @@ export function BriefPanel({
   // user was in the middle of typing.
 
   const save = async () => {
-    if (text === stored.current) return;
+    // Trimmed before the comparison, not only after. The backend trims what it
+    // stores, so `" Acme "` against a stored `"Acme"` is not an edit — comparing
+    // raw text would write the row and bump `updated_at` for a change that
+    // cannot be observed anywhere.
+    const next = text.trim();
+    if (next === stored.current) return;
     try {
-      await api.setMeetingBrief(meetingId, text);
-      // Trimmed here as well as in the backend, so what the field shows next is
-      // what a summary would actually read.
-      stored.current = text.trim();
-      setText(stored.current);
-      onSaved(stored.current);
+      await api.setMeetingBrief(meetingId, next);
+      stored.current = next;
+      setText(next);
+      onSaved(next);
       setError(null);
       setSaved(true);
     } catch (e) {
       setError(String(e));
     }
   };
+
+  // Blur is not the only way this field can be left. Stopping a recording from
+  // the tray or the overlay selects the finished meeting, which remounts this
+  // panel by key — and removing a focused node does not dispatch `blur`, so
+  // whatever was being typed at that moment would be lost. The ref carries the
+  // current values into a cleanup that cannot close over them.
+  const pending = useRef({ meetingId, text, onSaved });
+  pending.current = { meetingId, text, onSaved };
+  useEffect(
+    () => () => {
+      const { meetingId: id, text: latest, onSaved: report } = pending.current;
+      const next = latest.trim();
+      if (next === stored.current) return;
+      // Nothing to report a failure to — this component is going away and the
+      // panel that replaces it belongs to a different meeting. The write is
+      // still worth attempting; losing it silently is the worse of the two.
+      api.setMeetingBrief(id, next).then(
+        () => report(next),
+        () => {},
+      );
+    },
+    [],
+  );
 
   // The tick is an acknowledgement, not a state. Left up, it becomes chrome
   // that says "saved" about a field the user has since changed.

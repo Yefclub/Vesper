@@ -781,6 +781,20 @@ impl Database {
         Ok(())
     }
 
+    /// The brief as it stands right now.
+    ///
+    /// Its own read for the same reason it has its own write. The automatic
+    /// summary runs off a record captured before transcription began, and the
+    /// user can type context at any point up to the moment it starts — reading
+    /// the snapshot's copy would drop a brief that is sitting in the database.
+    pub fn get_brief(&self, id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row("SELECT brief FROM meetings WHERE id=?1", params![id], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())
+    }
+
     pub fn save_transcript(
         &self,
         meeting_id: &str,
@@ -1626,6 +1640,25 @@ mod tests {
         assert_eq!(
             db.list_meetings().unwrap()[0].brief.as_deref(),
             Some("Acme, quarterly review. Ana is the client.")
+        );
+    }
+
+    /// What the automatic summary reads. It runs off a record captured before
+    /// transcription began, so it has to ask the database rather than that copy.
+    #[test]
+    fn reading_the_brief_alone_sees_a_write_the_snapshot_missed() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let snapshot = sample_meeting("m1", "Sync");
+        db.upsert_meeting(&snapshot).unwrap();
+        assert_eq!(db.get_brief("m1").unwrap(), None);
+
+        db.set_brief("m1", "Acme, quarterly review").unwrap();
+
+        assert_eq!(snapshot.brief, None, "the held copy is still empty");
+        assert_eq!(
+            db.get_brief("m1").unwrap().as_deref(),
+            Some("Acme, quarterly review")
         );
     }
 
