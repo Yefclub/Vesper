@@ -47,6 +47,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { SummarizeButton } from "./components/SummarizeButton";
 import { ActionItems } from "./components/ActionItems";
 import { NotesPanel } from "./components/NotesPanel";
+import { BriefPanel } from "./components/BriefPanel";
 import { EditableLine } from "./components/EditableLine";
 import { AudioPlayer } from "./components/AudioPlayer";
 import { ProcessingStatus } from "./components/ProcessingStatus";
@@ -1975,6 +1976,26 @@ function AppShell({
                         className="mx-auto max-w-pane"
                         data-testid="summary-panel"
                       >
+                        {/* Above both branches, because it is an input to the
+                            summary rather than part of one: a meeting with no
+                            summary yet is exactly when writing it is worth
+                            most. Keyed by meeting so switching between two
+                            remounts the field instead of carrying one
+                            meeting's context into the other. */}
+                        <div className="mb-4">
+                          <BriefPanel
+                            key={selected.id}
+                            meetingId={selected.id}
+                            value={selected.brief}
+                            onSaved={(brief) =>
+                              setMeetings((prev) =>
+                                prev.map((m) =>
+                                  m.id === selected.id ? { ...m, brief } : m,
+                                ),
+                              )
+                            }
+                          />
+                        </div>
                         {selected.summary ||
                         selected.key_points ||
                         selected.action_items ||

@@ -43,6 +43,32 @@ pub fn notes_block(notes: &[ContextNote]) -> String {
     out
 }
 
+/// Render the standing context for a prompt, or nothing at all.
+///
+/// Not a note. A note is something the participant observed at a moment in the
+/// meeting and carries the offset it was written at; this is what was true
+/// before anybody spoke — who is in the room, what the call is for, how the
+/// client spells their name. The model is told as much, because a line of
+/// standing context dropped into the transcript reads as something that was
+/// said, and then gets summarised as if it had been.
+///
+/// Whitespace-only in is empty out, for the same reason as `notes_block`: the
+/// caller appends unconditionally, and an empty heading is an invitation to
+/// invent something to put under it.
+pub fn brief_block(brief: Option<&str>) -> String {
+    let text = brief.unwrap_or_default().trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nContext the participant gave about this meeting before it was \
+         summarised — who was in the room, what it was for, how names are \
+         spelled. It is true of the meeting rather than said in it, so do not \
+         attribute any of it to a speaker or report it as something that \
+         happened:\n{text}\n"
+    )
+}
+
 /// `mm:ss`, or `h:mm:ss` once there is an hour to show.
 fn stamp(ms: i64) -> String {
     let total = (ms.max(0) / 1000) as u64;
@@ -65,6 +91,9 @@ pub struct SummarySubject<'a> {
     pub template: crate::domain::summary::SummaryTemplate,
     pub locale: crate::domain::i18n::Locale,
     pub notes: &'a [ContextNote],
+    /// Standing context for this meeting, as the participant wrote it. See
+    /// `brief_block` for why it is kept apart from the notes.
+    pub brief: Option<&'a str>,
 }
 
 /// Everything a chat answer is grounded in, for the same reason.
@@ -103,6 +132,26 @@ mod tests {
     fn past_an_hour_the_stamp_grows_a_field() {
         let block = notes_block(&[note("Decisão", Some(3_725_000))]);
         assert!(block.contains("[1:02:05]"), "{block}");
+    }
+
+    #[test]
+    fn no_brief_adds_nothing_to_the_prompt() {
+        assert!(brief_block(None).is_empty());
+    }
+
+    /// A field the user opened, typed a space into and left is not context.
+    #[test]
+    fn a_blank_brief_adds_nothing_either() {
+        assert!(brief_block(Some("   \n  ")).is_empty());
+    }
+
+    /// The whole point of keeping this apart from the notes: it must not be
+    /// summarised as something that was said in the meeting.
+    #[test]
+    fn the_brief_is_marked_as_not_having_been_said() {
+        let block = brief_block(Some("Cliente: Acme. Trimestral."));
+        assert!(block.contains("Cliente: Acme. Trimestral."), "{block}");
+        assert!(block.contains("rather than said in it"), "{block}");
     }
 
     /// A note written after the recording stopped has no offset, and must not

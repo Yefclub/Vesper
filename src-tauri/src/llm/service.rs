@@ -74,6 +74,7 @@ impl LlmService {
         transcript: &str,
         template: SummaryTemplate,
         notes: &[crate::domain::context::ContextNote],
+        brief: Option<&str>,
     ) -> Result<(MeetingInsights, Option<i64>), String> {
         match settings.llm_provider {
             // A local model costs nothing, which is not the same as costing
@@ -87,6 +88,7 @@ impl LlmService {
                 let backend = settings.compute_backend.clone();
                 let reasoning = settings.reasoning_enabled;
                 let notes = notes.to_vec();
+                let brief = brief.map(str::to_string);
                 tokio::task::spawn_blocking(move || {
                     local.summarize(
                         crate::domain::context::SummarySubject {
@@ -94,6 +96,7 @@ impl LlmService {
                             template,
                             locale,
                             notes: &notes,
+                            brief: brief.as_deref(),
                         },
                         &model,
                         &backend,
@@ -115,6 +118,7 @@ impl LlmService {
                             template,
                             locale: settings.locale(),
                             notes,
+                            brief,
                         },
                         settings.reasoning_enabled,
                     )
