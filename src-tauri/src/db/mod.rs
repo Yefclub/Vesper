@@ -284,6 +284,16 @@ impl Database {
                 return Err(message);
             }
         }
+        // Standing context for the summary: who was in the room, what the call
+        // was for. Nullable rather than `NOT NULL DEFAULT ''` because the
+        // window draws nothing at all for a meeting nobody wrote one for, and
+        // `NULL` and `''` would then have to mean the same thing in two places.
+        if let Err(e) = conn.execute("ALTER TABLE meetings ADD COLUMN brief TEXT", []) {
+            let message = e.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(message);
+            }
+        }
         drop(conn);
         self.backfill_search_index()
     }
@@ -638,7 +648,7 @@ impl Database {
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
                         transcript_text, summary, action_items, key_points, project, title_locked,
-                        cost_nano_usd, sections_json, speaker_me, speaker_others
+                        cost_nano_usd, sections_json, speaker_me, speaker_others, brief
                  FROM meetings WHERE id=?1",
             )
             .map_err(|e| e.to_string())?;
@@ -660,7 +670,7 @@ impl Database {
             .prepare(
                 "SELECT id, title, status, created_at, updated_at, duration_ms, audio_path,
                         '' AS transcript_text, summary, action_items, key_points, project, title_locked,
-                        cost_nano_usd, sections_json, speaker_me, speaker_others
+                        cost_nano_usd, sections_json, speaker_me, speaker_others, brief
                  FROM meetings ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -747,6 +757,42 @@ impl Database {
                 "{done} of {total} meetings were deleted. The rest are still on this computer: {e}"
             )),
         }
+    }
+
+    /// Write the standing context for a meeting.
+    ///
+    /// Its own statement rather than a field of `upsert_meeting`, and that is
+    /// deliberate: the stop pipeline upserts a record it has been holding since
+    /// before transcription began, and a brief typed during the meeting would
+    /// be overwritten by that stale copy. Nothing else writes this column, so
+    /// the last thing the user typed is what survives.
+    ///
+    /// Blank in is `NULL` out. A user who clears the field means there is no
+    /// context here, and storing `''` would leave two spellings of that.
+    pub fn set_brief(&self, id: &str, brief: &str) -> Result<(), String> {
+        let trimmed = brief.trim();
+        let value = (!trimmed.is_empty()).then_some(trimmed);
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE meetings SET brief=?2, updated_at=?3 WHERE id=?1",
+            params![id, value, chrono::Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The brief as it stands right now.
+    ///
+    /// Its own read for the same reason it has its own write. The automatic
+    /// summary runs off a record captured before transcription began, and the
+    /// user can type context at any point up to the moment it starts — reading
+    /// the snapshot's copy would drop a brief that is sitting in the database.
+    pub fn get_brief(&self, id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row("SELECT brief FROM meetings WHERE id=?1", params![id], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())
     }
 
     pub fn save_transcript(
@@ -1242,6 +1288,7 @@ fn row_to_meeting(row: &rusqlite::Row<'_>) -> Result<MeetingRecord, String> {
             .map(crate::domain::cost::format_cost),
         speaker_me: row.get(15).map_err(|e| e.to_string())?,
         speaker_others: row.get(16).map_err(|e| e.to_string())?,
+        brief: row.get(17).map_err(|e| e.to_string())?,
     })
 }
 
@@ -1279,6 +1326,7 @@ mod tests {
             cost_label: None,
             speaker_me: None,
             speaker_others: None,
+            brief: None,
         };
         db.upsert_meeting(&m).unwrap();
         let mut t = LiveTranscript::new();
@@ -1566,7 +1614,89 @@ mod tests {
             project: None,
             speaker_me: None,
             speaker_others: None,
+            brief: None,
         }
+    }
+
+    #[test]
+    fn a_brief_round_trips_and_survives_a_reopen() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.upsert_meeting(&sample_meeting("m1", "Client call"))
+            .unwrap();
+        assert_eq!(db.get_meeting("m1").unwrap().unwrap().brief, None);
+
+        db.set_brief("m1", "  Acme, quarterly review. Ana is the client.  ")
+            .unwrap();
+        drop(db);
+
+        let db = Database::open(dir.path()).unwrap();
+        assert_eq!(
+            db.get_meeting("m1").unwrap().unwrap().brief.as_deref(),
+            Some("Acme, quarterly review. Ana is the client."),
+            "stored trimmed, so the field shows what a summary would read"
+        );
+        // The list is what the sidebar and the summary tab read from.
+        assert_eq!(
+            db.list_meetings().unwrap()[0].brief.as_deref(),
+            Some("Acme, quarterly review. Ana is the client.")
+        );
+    }
+
+    /// What the automatic summary reads. It runs off a record captured before
+    /// transcription began, so it has to ask the database rather than that copy.
+    #[test]
+    fn reading_the_brief_alone_sees_a_write_the_snapshot_missed() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let snapshot = sample_meeting("m1", "Sync");
+        db.upsert_meeting(&snapshot).unwrap();
+        assert_eq!(db.get_brief("m1").unwrap(), None);
+
+        db.set_brief("m1", "Acme, quarterly review").unwrap();
+
+        assert_eq!(snapshot.brief, None, "the held copy is still empty");
+        assert_eq!(
+            db.get_brief("m1").unwrap().as_deref(),
+            Some("Acme, quarterly review")
+        );
+    }
+
+    /// Clearing the field is a statement — there is no context here — and it has
+    /// to be stored the same way as never having written one, or the two spell
+    /// the same thing differently everywhere downstream.
+    #[test]
+    fn clearing_a_brief_stores_nothing_rather_than_an_empty_string() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.upsert_meeting(&sample_meeting("m1", "Sync")).unwrap();
+        db.set_brief("m1", "temporary").unwrap();
+        db.set_brief("m1", "   \n  ").unwrap();
+        assert_eq!(db.get_meeting("m1").unwrap().unwrap().brief, None);
+    }
+
+    /// The reason `brief` is not a field of `upsert_meeting`. The stop pipeline
+    /// writes a record it has been holding since before transcription began; if
+    /// that write carried this column, a brief typed during the meeting would be
+    /// erased by a copy that predates it.
+    #[test]
+    fn upserting_a_stale_record_does_not_erase_the_brief() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let stale = sample_meeting("m1", "Sync");
+        db.upsert_meeting(&stale).unwrap();
+
+        db.set_brief("m1", "Acme, quarterly review").unwrap();
+
+        // The same record the caller has been holding all along — its `brief`
+        // is still `None`, because it was read before the user typed one.
+        assert_eq!(stale.brief, None);
+        db.upsert_meeting(&stale).unwrap();
+
+        assert_eq!(
+            db.get_meeting("m1").unwrap().unwrap().brief.as_deref(),
+            Some("Acme, quarterly review")
+        );
     }
 
     /// The columns arrive on a database that already holds somebody's meetings,

@@ -138,6 +138,7 @@ mod tests {
             cost_label: None,
             speaker_me: None,
             speaker_others: None,
+            brief: None,
         }
     }
 

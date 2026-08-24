@@ -993,6 +993,7 @@ pub fn start_recording(
         // so changing the defaults before the next call leaves this one alone.
         speaker_me: settings.default_speaker_me.clone(),
         speaker_others: settings.default_speaker_others.clone(),
+        brief: None,
     };
     state.db.upsert_meeting(&meeting)?;
     state.live.lock().insert(id.clone(), LiveTranscript::new());
@@ -1388,6 +1389,11 @@ pub async fn stop_recording(
                 &meeting.transcript_text,
                 SummaryTemplate::General,
                 &state.db.list_context_notes(&id).unwrap_or_default(),
+                // Read now, not from `meeting`. That record was captured before
+                // transcription began and the user can write context at any
+                // point up to this call — reading its copy drops a brief that
+                // is already stored.
+                state.db.get_brief(&id).unwrap_or_default().as_deref(),
             )
             .await
         {
@@ -2085,6 +2091,7 @@ pub async fn summarize_meeting(
             // Empty on failure rather than refusing to summarise: a note that
             // cannot be read is a worse summary, not a lost meeting.
             &state.db.list_context_notes(&id).unwrap_or_default(),
+            m.brief.as_deref(),
         )
         .await;
     // Put the status back before propagating. `Summarizing` was written to the
@@ -2242,6 +2249,27 @@ pub fn delete_context_note(
     state.db.delete_context_note(&id, note_id)
 }
 
+/// Standing context for one meeting: who was in the room, what it was for.
+///
+/// Bounded for the same reason a note is — it reaches a prompt, and a megabyte
+/// pasted here would push the transcript out of the model's window and quietly
+/// ruin the summary. Larger than a note's limit because this is prose about the
+/// whole meeting rather than one observation in it.
+///
+/// Blank is not an error: clearing the field is how a user says there is no
+/// context here, and `set_brief` stores that as `NULL`.
+#[tauri::command]
+pub fn set_meeting_brief(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    brief: String,
+) -> Result<(), String> {
+    if brief.chars().count() > 4_000 {
+        return Err("that context is too long".into());
+    }
+    state.db.set_brief(&id, &brief)
+}
+
 #[tauri::command]
 pub fn list_chat(state: State<'_, Arc<AppState>>, id: String) -> Result<Vec<ChatMessage>, String> {
     state.db.list_chat(&id)
@@ -2299,6 +2327,7 @@ pub async fn import_audio(
         // too, and it keeps the names the app was set to when it arrived.
         speaker_me: settings.default_speaker_me.clone(),
         speaker_others: settings.default_speaker_others.clone(),
+        brief: None,
     };
     state.db.upsert_meeting(&meeting)?;
     // Mono import: Me channel only (no dual split in source file)

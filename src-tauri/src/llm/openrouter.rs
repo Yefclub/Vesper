@@ -140,8 +140,9 @@ impl OpenRouterLlm {
             template,
             locale,
             notes,
+            brief,
         } = subject;
-        let prompt = build_summary_prompt_with(template, transcript, locale, notes);
+        let prompt = build_summary_prompt_with(template, transcript, locale, notes, brief);
         let messages = vec![
             ChatMessage {
                 role: "system".into(),
