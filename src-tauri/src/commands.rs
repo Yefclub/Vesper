@@ -507,15 +507,29 @@ fn segments_of(state: &AppState, id: &str) -> LiveTranscript {
 fn prompt_transcript(state: &AppState, meeting: &MeetingRecord) -> String {
     let transcript = segments_of(state, &meeting.id);
     if transcript.segments().is_empty() {
-        // Nothing left to read the clock off. The stored text is the plain one,
-        // and a summary without citations is the honest outcome — the prompt
-        // asks the model to leave the brackets off when the transcript does not
-        // show when something came up, and here it shows nothing.
         return meeting.transcript_text.clone();
     }
-    // Stamped, not plain. Every action item is asked to end with the moment it
-    // was decided, and it can only copy a timestamp it was given. This costs a
-    // few tokens a line and buys an item that can be played back.
+    transcript.plain_text(&speaker_names(state, meeting))
+}
+
+/// The same meeting with its clock, for the one thing that needs it.
+///
+/// Only summarising. Every action item is asked to end with the moment it was
+/// decided and can only copy a timestamp it was given — but the title and the
+/// chat read `prompt_transcript` and must go on reading the plain one. Chat
+/// truncates at a fixed number of characters and the title gets a fixed
+/// excerpt, so a stamp a line there would push the end of a long meeting out of
+/// the window and buy nothing.
+///
+/// A meeting with no segments falls back to the stored text, which has no clock
+/// in it. A summary without citations is the honest outcome there: the prompt
+/// asks the model to leave the brackets off when the transcript does not show
+/// when something came up, and here it shows nothing.
+fn summary_transcript(state: &AppState, meeting: &MeetingRecord) -> String {
+    let transcript = segments_of(state, &meeting.id);
+    if transcript.segments().is_empty() {
+        return meeting.transcript_text.clone();
+    }
     transcript.timestamped_text(&speaker_names(state, meeting))
 }
 
@@ -1397,7 +1411,7 @@ pub async fn stop_recording(
                 // The same stamped text the manual path reads, for the same
                 // reason: `transcript_text` has no clock in it, and an action
                 // item cannot cite a timestamp it was never shown.
-                &prompt_transcript(&state, &meeting),
+                &summary_transcript(&state, &meeting),
                 SummaryTemplate::General,
                 &state.db.list_context_notes(&id).unwrap_or_default(),
             )
@@ -2092,7 +2106,7 @@ pub async fn summarize_meeting(
         .llm
         .summarize(
             &settings,
-            &prompt_transcript(&state, &m),
+            &summary_transcript(&state, &m),
             tpl,
             // Empty on failure rather than refusing to summarise: a note that
             // cannot be read is a worse summary, not a lost meeting.

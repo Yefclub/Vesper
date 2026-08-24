@@ -139,8 +139,14 @@ pub fn merge_suggestions(existing: &[ActionItem], suggested: &[String]) -> Vec<A
             // Its own untouched suggestion is the one thing the model is allowed
             // to replace, so a stamp it did not produce last time can land now.
             // A protected row keeps everything it had, including no stamp.
+            //
+            // `or`, not a plain replacement: a repeat with no stamp is not a
+            // statement that there is no moment. Improving any other section
+            // sends the current items back through here as plain text, and they
+            // never carried one — replacing outright would clear the citation
+            // off every suggestion the moment somebody improved Key points.
             Some((_, at_ms)) if !protected(item) => kept.push(ActionItem {
-                at_ms: *at_ms,
+                at_ms: at_ms.or(item.at_ms),
                 ..item.clone()
             }),
             Some(_) => kept.push(item.clone()),
@@ -265,6 +271,22 @@ mod tests {
         assert_eq!(kept.len(), 1, "one task, not two");
         assert_eq!(kept[0].id, 1, "and it kept its row");
         assert_eq!(kept[0].at_ms, Some(727_000), "with the newer moment");
+    }
+
+    /// Improving Key points sends the existing action items back through here as
+    /// the plain text they are stored as, with no stamp on them. That is not the
+    /// model saying there is no moment — it is the round trip — and clearing the
+    /// citation off every suggestion because somebody improved another section
+    /// would empty the feature out in one click.
+    #[test]
+    fn a_repeat_without_a_stamp_keeps_the_one_it_had() {
+        let existing = vec![ActionItem {
+            at_ms: Some(45_000),
+            ..ai(1, "Assinar o build")
+        }];
+        let kept = merge_suggestions(&existing, &["Assinar o build".into()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].at_ms, Some(45_000));
     }
 
     /// The stamp is the model's, so it may refresh its own suggestion — and may
