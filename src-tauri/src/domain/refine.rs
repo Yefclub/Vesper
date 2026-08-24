@@ -84,9 +84,13 @@ pub fn build_refine_prompt(
     // items are playable and anything this path adds is not — the same list,
     // half of it citable, which reads as the citation being unreliable rather
     // than absent. The transcript here is already the timestamped one.
+    // No indentation on the inserted line. The rules above are written inside a
+    // line-continued literal, where the leading whitespace of each source line
+    // is stripped; this one is not, so spaces put here for tidiness would reach
+    // the model as an indented block rather than a rule beside the others.
     let cite = match section {
         Section::ActionItems => {
-            "\n         - end every line with the moment it was decided, in square brackets, \
+            "\n- end every line with the moment it was decided, in square brackets, \
              copied from the timestamp of the transcript line it came from: `[mm:ss]`. \
              Put it last, after any owner or deadline, and leave it off rather than guess one"
         }
@@ -177,6 +181,16 @@ mod tests {
         let p = build_refine_prompt(Section::ActionItems, "", "0:00 Me: hi", Locale::En);
         assert!(p.contains("[mm:ss]"), "{p}");
         assert!(p.contains("rather than guess one"), "{p}");
+        // Beside the other rules, not indented under one. The rules above are
+        // written inside a line-continued literal and arrive at column zero;
+        // whitespace put on this one for tidiness would survive and make it an
+        // indented block the model reads as an example rather than an
+        // instruction.
+        let rule = p
+            .lines()
+            .find(|l| l.contains("[mm:ss]"))
+            .expect("the rule is on a line of its own");
+        assert!(rule.starts_with("- end every line"), "{rule:?}");
     }
 
     /// Key points are stored as text and nothing plays them back. Asking for a
