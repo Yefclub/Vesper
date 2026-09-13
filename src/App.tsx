@@ -347,6 +347,10 @@ function AppShell({
   }
 
   function expandSidebarTo(target: "search" | "list") {
+    // Out of the rail before it goes inert: the button just pressed is inside
+    // it, and focus must not sit in an inert subtree even for the one render
+    // before the list can take it.
+    toggleRef.current?.focus();
     setPendingFocus(target);
     setSidebarOpen(true);
   }
