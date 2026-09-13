@@ -43,8 +43,9 @@ resumes after a restart.
   have refused.
 - Nothing about a dictation is logged: not the text, not the audio, not the
   target. The target is a handful of opaque numbers held in memory for one
-  dictation; on macOS its window and field are described by frame and role, and
-  no title or value ever leaves the script that reads them.
+  dictation; on macOS its window and field are described by frame, role and a
+  number folded from the window's title, and no title or value ever leaves the
+  script that reads them.
 - The audio exists only while a transcription may need it. Once transcribed it
   is deleted; a failed transcription keeps it for the retry.
 - Nothing is summarised and no model is called beyond the transcriber.
@@ -71,7 +72,7 @@ the other is running, *Type again* included.
 | | Windows | macOS | Linux X11 | Linux Wayland |
 |---|---|---|---|---|
 | Global shortcut | yes | yes | yes | no |
-| Target check | window, focused control, the text field when UI Automation names one, process and its start time | frontmost process, its focused window and element by frame and role | active window, input-focus window and process | — |
+| Target check | window, focused control, the text field when UI Automation names one, process and its start time | frontmost process, its focused window by frame and title, its focused element by frame and role | active window, input-focus window and process | — |
 | How text goes in | `SendInput` Unicode | Accessibility selected text; otherwise Cmd+V, clipboard put back | XTest (enigo) | not typed, kept |
 | Confirmation | UI Automation read-back | Accessibility read-back | none: `unconfirmed` | — |
 | Refused | targets running as administrator, read-only fields, non-text controls | missing Accessibility or Automation permission, password fields | — | — |
@@ -87,9 +88,10 @@ promises data it will not hand over — nothing is pasted (`clipboard_unsafe`).
 
 - **macOS**: clicking the indicator can activate Vesper (tauri#14102), which
   makes Vesper the target and keeps the text instead of typing it. The shortcut
-  is unaffected. A window moved or a page scrolled while dictating reads as a
-  different target, and the text is kept — as it is in an application whose
-  focused field Accessibility cannot describe at all. No CI job builds macOS; the scripts are
+  is unaffected. A window moved, a page scrolled or a title changed while
+  dictating — an unread count arriving, another tab — reads as a different
+  target, and the text is kept, as it is in an application whose focused field
+  Accessibility cannot describe at all. No CI job builds macOS; the scripts are
   checked by tests on every platform but only run on a Mac.
 - **Windows**: a field is told apart from its neighbours only when UI Automation
   names it as a field — an edit control or a writable value. Rich editors that
@@ -158,6 +160,8 @@ transcription, an ordinary text editor unless the step says otherwise.
 - Chrome, Slack or VS Code: text arrives through the paste. Copy an image before
   dictating; after the dictation, pasting gives the image back.
 - Two TextEdit windows: start in one, click into the other, stop. *Not typed*.
+- Two Chrome tabs with the same page: start in a field of one, switch to the
+  other tab, stop. *Not typed*.
 - A password field focused: *Not typed* — a password field has the keyboard.
 - Click the indicator's record button while an editor is frontmost: note whether
   the editor loses focus (known limit above).

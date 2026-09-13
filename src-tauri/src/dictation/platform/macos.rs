@@ -51,11 +51,12 @@ fn osascript(language: Language, script: &str) -> Result<String, String> {
     }
 }
 
-/// The frontmost process, then the frame of its focused window, then the role
-/// and frame of its focused element — one per line, an empty line for what
-/// Accessibility would not describe, and the word denied in place of the element
-/// when macOS refused to be asked. Geometry and roles only: no title and no value
-/// ever comes back.
+/// The frontmost process, then its focused window — frame, and a number folded
+/// from its title inside the script — then the role and frame of its focused
+/// element: one per line, an empty line for what Accessibility would not
+/// describe, and the word denied in place of the element when macOS refused to
+/// be asked. Geometry, roles and that number only: no title and no value ever
+/// comes back.
 const CAPTURE_SCRIPT: &str = "on frameOf(x)\n\
     tell application \"System Events\"\n\
     set {px, py} to value of attribute \"AXPosition\" of x\n\
@@ -63,6 +64,15 @@ const CAPTURE_SCRIPT: &str = "on frameOf(x)\n\
     end tell\n\
     return (px as text) & \",\" & (py as text) & \",\" & (sx as text) & \",\" & (sy as text)\n\
     end frameOf\n\
+    on hashOf(t)\n\
+    if t is \"\" then return 0\n\
+    set codes to (id of t) as list\n\
+    set h to 5381\n\
+    repeat with i from 1 to count of codes\n\
+    set h to (h * 33 + (item i of codes)) mod 4294967291\n\
+    end repeat\n\
+    return h\n\
+    end hashOf\n\
     with timeout of 3 seconds\n\
     try\n\
     tell application \"System Events\"\n\
@@ -77,7 +87,11 @@ const CAPTURE_SCRIPT: &str = "on frameOf(x)\n\
     set w to \"\"\n\
     set e to \"\"\n\
     try\n\
-    set w to my frameOf(value of attribute \"AXFocusedWindow\" of p)\n\
+    set fw to value of attribute \"AXFocusedWindow\" of p\n\
+    set w to my frameOf(fw)\n\
+    try\n\
+    set w to w & \" \" & ((my hashOf((value of attribute \"AXTitle\" of fw) as text)) as text)\n\
+    end try\n\
     end try\n\
     try\n\
     set el to value of attribute \"AXFocusedUIElement\" of p\n\
@@ -96,10 +110,12 @@ pub fn capture_target() -> Option<Target> {
 /// What the capture script described, as a target — or none, when it could not
 /// describe the focused field.
 ///
-/// Windows and fields are named by where they are and what they are, since
-/// System Events hands out no identifier a later call could compare. A window
-/// moved or a page scrolled while dictating reads as a different target, which
-/// keeps the text rather than typing it somewhere else. A field nothing could
+/// Windows and fields are named by where they are and what they are, and a
+/// window by its title's number too — which tells apart two tabs whose fields
+/// sit in the same place — since System Events hands out no identifier a later
+/// call could compare. A window moved, a page scrolled or a title changed while
+/// dictating reads as a different target, which keeps the text rather than
+/// typing it somewhere else. A field nothing could
 /// describe is no target at all: there would be nothing to check the insertion
 /// against. A refused permission is described as itself, so the insertion fails
 /// with the permission's own reason, and a permission granted in between reads
@@ -423,5 +439,15 @@ mod tests {
         assert_eq!(refused.process, 0);
         let granted = target_from("0\n\nAXTextField 1,2,3,4").unwrap();
         assert_ne!(refused.element, granted.element);
+    }
+
+    /// The window's title reaches the output only folded into a number, and
+    /// nowhere else in the script is it read.
+    #[test]
+    fn the_capture_returns_the_title_only_as_a_number() {
+        assert!(
+            CAPTURE_SCRIPT.contains(r#"my hashOf((value of attribute "AXTitle" of fw) as text)"#)
+        );
+        assert_eq!(CAPTURE_SCRIPT.matches("AXTitle").count(), 1);
     }
 }
