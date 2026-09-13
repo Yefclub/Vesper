@@ -113,15 +113,48 @@ O produto promete privacidade. Regressão aqui é quebra de promessa, não bug d
 
 Dois, em momentos diferentes:
 
-- **Antes da PR — build QA** (`npm run qa`, só Windows). A branch roda como a Vesper instalada roda — release, `gpu-vulkan`, os mesmos modelos —, mas como outra aplicação: identificador `com.yefclub.vesper.qa`, dados em `%APPDATA%\Vesper QA`, chave de API em outra entrada do cofre, sem atalho global e sem updater. Modelos e backends baixados são copiados da Vesper instalada na primeira subida: nada é baixado de novo, e nada que a QA faça com eles chega na instalada. Cópia, não hard link — o unpacker de backend e os marcadores de digest reescrevem arquivo no lugar, e através de um link reescreveriam o da instalada. O agente sobe quando a mudança precisa ser vista rodando, **sem pedir**. Como usar: skill `qa`.
+- **Antes da PR — build QA** (`npm run qa`, só Windows). A branch roda como a Vesper instalada roda — release, `gpu-vulkan`, os mesmos modelos —, mas como outra aplicação: identificador `com.yefclub.vesper.qa`, dados em `%APPDATA%\Vesper QA`, chave de API em outra entrada do cofre, sem atalho global e sem updater. Modelos e backends baixados são copiados da Vesper instalada na primeira subida: nada é baixado de novo, e nada que a QA faça com eles chega na instalada. Cópia, não hard link — o unpacker de backend e os marcadores de digest reescrevem arquivo no lugar, e através de um link reescreveriam o da instalada. O agente sobe quando a mudança precisa ser vista rodando, **sem pedir**.
 - **Depois do merge — canal dev**: a tag `dev-*` publica a Vesper Dev, que atualiza a app instalada de quem testa.
 
 A QA roda na máquina de alguém que está usando ela. Por isso:
 
 - **Só pelo DevTools do WebView** (`npm run qa -- cdp`). Nunca mouse, teclado, foco ou captura de tela do sistema: clique sintético em coordenada de tela já fechou o editor de quem estava trabalhando.
-- **Gravação real** só quando a mudança mexe em áudio: curta, transcrição local, gravação apagada ao fim, e o que foi dito não é lido nem relatado. Precisão de transcrição se confere importando áudio de exemplo.
-- **Janela aberta ao terminar** só quando for para uma pessoa conferir. Teste do próprio agente termina com `npm run qa -- stop`.
-- Mudança que só existe em macOS ou Linux não passa pela QA: verificar por teste e build, e **dizer no relato** que não foi vista rodando.
+- **Gravação real** só quando a mudança mexe em áudio: curta, transcrição local, gravação apagada ao fim, e o que foi dito não é lido nem relatado — o áudio do sistema pega o que estiver tocando, até uma chamada de quem está usando. Precisão de transcrição se confere importando áudio de exemplo.
+- **Janela aberta ao terminar** só quando for para uma pessoa conferir, dizendo no relato o que olhar. Teste do próprio agente termina com `npm run qa -- stop`.
+- Mudança que só existe em macOS ou Linux não passa pela QA: verificar por teste e build, e **dizer no relato** que não foi vista rodando. O relato sempre separa o que foi visto rodando do que não foi.
+
+### Usar a QA
+
+```bash
+npm run qa -- build                         # da worktree da branch; encerra a QA que estiver rodando
+npm run qa -- start                         # segundo plano; espera a página da app responder
+npm run qa -- cdp shot tela.png             # screenshot só da página
+npm run qa -- cdp click <data-testid>
+npm run qa -- cdp key Tab                   # Shift+Tab, Enter, Escape, ArrowDown, Space
+npm run qa -- cdp type "texto"              # no elemento com foco
+npm run qa -- cdp eval "document.activeElement?.dataset.testid"
+npm run qa -- cdp eval "window.__TAURI_INTERNALS__.invoke('get_settings')"
+npm run qa -- cdp shot card.png --overlay    # a janela do card
+npm run qa -- stop
+npm run qa -- reset                         # encerra e apaga só os dados da QA
+```
+
+- **Clique só por `data-testid`.** Seletor largo erra alvo mesmo dentro da página: `[aria-label*=Fechar]` já casou com o fechar da janela e derrubou a app. Elemento sem testid ganha um na própria mudança.
+- `click` recusa quando outro elemento cobre o alvo e diz qual. `MISS` e `COVERED` são falha do teste, não ruído.
+- Screenshot se lê com ferramenta de imagem e se mede no pixel: box model passa em review e falha na tela.
+- `invoke` direto testa o backend sem diálogo nativo — importar áudio é `import_audio` com `path`.
+
+### Armadilhas da QA
+
+- **Primeira build de uma versão de llama/whisper compila o C++ inteiro.** Depois, `C:\vt` guarda isso para todas as worktrees e a build recompila só a Vesper e o front.
+- **Uma QA por vez.** Toda worktree constrói o mesmo `C:\vt\release\vesper.exe`; o que roda é a última build.
+- **Perfil QA começa vazio**, então a primeira execução cai no onboarding, cujos botões não têm `data-testid`. Para passar sem clicar por texto: `invoke('get_settings')`, devolver o objeto em `invoke('complete_onboarding', { settings })` e `location.reload()`.
+- **Atalho global aparece como indisponível**: a QA não registra nenhum, de propósito. Tecla dentro da janela chega por `cdp key`.
+- **`eval` espera no máximo 15 s.** Operação longa (importar, transcrever, resumir) se dispara sem `await`, guardando o resultado em `window`, e se consulta depois com outro `eval`.
+- **A primeira subida copia modelos e backends da instalada** — alguns GB, segundos em SSD. `reset` apaga a cópia e a subida seguinte copia de novo.
+- **Lançada de dentro de um app MSIX** (o Claude desktop, por exemplo), a escrita da QA em `%APPDATA%`/`%LOCALAPPDATA%` vai para `...\Packages\<app>\LocalCache\`: de dentro o caminho continua `%APPDATA%\Vesper QA`, no Explorer ele não existe. A leitura atravessa para os arquivos reais — é assim que a cópia acha os modelos da instalada.
+- **Porta 9333 ocupada** faz o `start` recusar. Descobrir quem está nela antes de mexer em qualquer coisa.
+- **Ninja e LLVM**: o `build` põe no PATH o LLVM de `C:\Program Files\LLVM\bin` e o Ninja das Build Tools. Faltando um, ele diz qual.
 
 ## O que o agente não faz sem pedir
 

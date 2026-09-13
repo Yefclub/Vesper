@@ -13,6 +13,14 @@ Read-only. Esta skill **não fecha, não edita, não rotula** issue — só repo
 gh issue list --state open --json number,title,body,labels,assignees,createdAt,updatedAt --limit 100
 ```
 
+Uma issue inteira, com os comentários, sai por `--json`:
+
+```bash
+gh issue view N --json title,body,labels,comments
+```
+
+Nunca por `gh issue view N --comments`: fora de um terminal interativo ele imprime **só os comentários**, e uma issue sem comentário sai vazia — parece issue sem corpo.
+
 ## Analisar cada issue
 
 **Ler o corpo, não só o título.** Triagem por título é chute com formatação bonita — o título mente sobre o escopo na maioria das issues.
