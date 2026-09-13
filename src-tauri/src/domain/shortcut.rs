@@ -103,11 +103,22 @@ pub fn dictation_chosen_or_default(stored: &str) -> &'static str {
 }
 
 /// `status_from`, for dictation.
-pub fn dictation_status_from<E>(result: Result<(), E>, accelerator: &str) -> ShortcutStatus {
+///
+/// A refusal this app made itself — a desktop with no global keys to give —
+/// arrives as its own reason key and is kept; anything the OS answered is the
+/// combination being taken.
+pub fn dictation_status_from(result: Result<(), &str>, accelerator: &str) -> ShortcutStatus {
     ShortcutStatus {
         registered: result.is_ok(),
         accelerator: accelerator.to_string(),
-        reason_key: result.is_err().then(|| "shortcut.unavailable".to_string()),
+        reason_key: result.err().map(|e| {
+            if e.starts_with("dictation.") {
+                e
+            } else {
+                "dictation.shortcut.unavailable"
+            }
+            .to_string()
+        }),
         choices: DICTATION_CHOICES.iter().map(|c| c.to_string()).collect(),
     }
 }
@@ -145,9 +156,27 @@ mod tests {
             DICTATION_ACCELERATOR
         );
         assert_eq!(
-            dictation_status_from::<&str>(Ok(()), DICTATION_ACCELERATOR).choices[0],
+            dictation_status_from(Ok(()), DICTATION_ACCELERATOR).choices[0],
             DICTATION_CHOICES[0]
         );
+    }
+
+    /// The record shortcut's reason names Ctrl+Shift+R, so dictation carries
+    /// its own — and a desktop's refusal is not reported as a taken key.
+    #[test]
+    fn a_dictation_refusal_names_its_own_reason() {
+        let taken = dictation_status_from(Err("HotKey already registered"), "Ctrl+Alt+H");
+        assert!(!taken.registered);
+        assert_eq!(
+            taken.reason_key.as_deref(),
+            Some("dictation.shortcut.unavailable")
+        );
+        let wayland = dictation_status_from(Err("dictation.shortcut.wayland"), "Ctrl+Alt+H");
+        assert_eq!(
+            wayland.reason_key.as_deref(),
+            Some("dictation.shortcut.wayland")
+        );
+        assert_eq!(dictation_status_from(Ok(()), "Ctrl+Alt+H").reason_key, None);
     }
 
     /// The window reads these names off the IPC payload and nothing checks that

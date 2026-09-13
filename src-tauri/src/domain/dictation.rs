@@ -10,6 +10,7 @@ use crate::domain::channels::ChannelSelection;
 use crate::domain::gate::can_start_recording_with;
 use crate::domain::settings::{AppSettings, SttProvider};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 /// What a dictation records: the microphone, never the system audio.
 ///
@@ -141,10 +142,14 @@ pub enum DictationEvent {
 /// instead of acting twice — and acting twice is typing the text twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
-    NotListening,
-    NotTranscribing,
-    NotInserting,
-    NotRetryable,
+    /// A stop, when the session is not listening.
+    Stop,
+    /// A transcription's result, when none is running.
+    Transcription,
+    /// An insertion's result, when none is running.
+    Insertion,
+    /// A retry, of a dictation with nothing to retry.
+    Retry,
 }
 
 /// The state a session moves to, or why it does not.
@@ -153,7 +158,7 @@ pub fn next(state: DictationState, event: DictationEvent) -> Result<DictationSta
     use DictationState as S;
     match (state, event) {
         (S::Listening, E::Stop) => Ok(S::Transcribing),
-        (_, E::Stop) => Err(Refused::NotListening),
+        (_, E::Stop) => Err(Refused::Stop),
 
         (
             S::Transcribing,
@@ -164,21 +169,21 @@ pub fn next(state: DictationState, event: DictationEvent) -> Result<DictationSta
         ) => Ok(S::Inserting),
         (S::Transcribing, E::Transcribed { .. }) => Ok(S::Saved),
         (S::Transcribing, E::TranscriptionFailed) => Ok(S::TranscriptionFailed),
-        (_, E::Transcribed { .. } | E::TranscriptionFailed) => Err(Refused::NotTranscribing),
+        (_, E::Transcribed { .. } | E::TranscriptionFailed) => Err(Refused::Transcription),
 
         (S::Inserting, E::Insertion(outcome)) => Ok(match outcome {
             InsertionOutcome::Inserted => S::Inserted,
             InsertionOutcome::Unconfirmed => S::Unconfirmed,
             InsertionOutcome::Failed(_) => S::InsertionFailed,
         }),
-        (_, E::Insertion(_)) => Err(Refused::NotInserting),
+        (_, E::Insertion(_)) => Err(Refused::Insertion),
 
         // `Unconfirmed` is retryable because only the user can see whether the
         // text arrived, and the retry is theirs to ask for. It never happens by
         // itself.
         (S::Saved | S::InsertionFailed | S::Unconfirmed, E::RetryInsertion) => Ok(S::Inserting),
         (S::TranscriptionFailed, E::RetryTranscription) => Ok(S::Transcribing),
-        (_, E::RetryInsertion | E::RetryTranscription) => Err(Refused::NotRetryable),
+        (_, E::RetryInsertion | E::RetryTranscription) => Err(Refused::Retry),
     }
 }
 
@@ -344,6 +349,88 @@ pub fn can_start(
     }
 }
 
+/// Where the keyboard was when a dictation started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Aim {
+    /// Started from Vesper's own window or its tray menu. The keyboard is not in
+    /// the application the words are for, so they are kept, as asked.
+    Keep,
+    /// Started from the shortcut or the indicator, and no window had the keyboard.
+    Nowhere,
+    At(Target),
+}
+
+/// What a finished transcription does: the target to type into, or why the text
+/// is only kept — `None` when keeping it is what was asked for.
+pub fn after_transcription(
+    has_text: bool,
+    can_insert: bool,
+    aim: Aim,
+    own_process: u32,
+) -> Result<Target, Option<FailureReason>> {
+    if !has_text {
+        return Err(None);
+    }
+    match aim {
+        Aim::Keep => Err(None),
+        // Vesper had the keyboard, which is the same as starting from its window.
+        Aim::At(t) if t.process == own_process => Err(None),
+        _ if !can_insert => Err(Some(FailureReason::Unsupported)),
+        Aim::Nowhere => Err(Some(FailureReason::NoEditableTarget)),
+        Aim::At(t) => Ok(t),
+    }
+}
+
+/// How long a held combination may go on repeating and still be one press, when
+/// the platform never says the keys went up. Longer than the slowest delay a
+/// keyboard waits before it starts repeating.
+const HELD_FOR: Duration = Duration::from_secs(3);
+
+/// Whether a press of the dictation shortcut is a new press.
+///
+/// Holding a combination repeats it, and macOS delivers every repeat as another
+/// press: counted, they would start a dictation and stop it before a word was
+/// said. A press counts once the keys have gone up since the last one — or,
+/// where a release never arrives, once the repeats have stopped for a while.
+#[derive(Debug, Default)]
+pub struct PressGate {
+    down: bool,
+    last: Option<Instant>,
+}
+
+impl PressGate {
+    pub fn press(&mut self, now: Instant) -> bool {
+        let repeat = self.down
+            && self
+                .last
+                .is_some_and(|last| now.saturating_duration_since(last) < HELD_FOR);
+        self.down = true;
+        self.last = Some(now);
+        !repeat
+    }
+
+    pub fn release(&mut self) {
+        self.down = false;
+    }
+}
+
+/// The indicator's footprints, in logical pixels: a sliver on the screen edge,
+/// and the controls it opens into under the pointer.
+///
+/// Mirrored in `src/dictation/Indicator.tsx`, which draws both inside them.
+pub const INDICATOR_COLLAPSED: (u32, u32) = (12, 72);
+pub const INDICATOR_EXPANDED: (u32, u32) = (64, 168);
+
+/// Whether the dictation indicator is on screen.
+///
+/// Never during a meeting, whose own card takes the same edge — and dictation
+/// cannot start then anyway. The setting hides it at rest only: a dictation in
+/// progress, or one whose result is still being shown, is always visible, or
+/// the user would be speaking into nothing they could see.
+pub fn indicator_visible(floats: bool, wanted: bool, meeting: bool, busy: bool) -> bool {
+    floats && !meeting && (wanted || busy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,18 +482,18 @@ mod tests {
     fn duplicates_are_refused() {
         assert_eq!(
             next(DictationState::Transcribing, DictationEvent::Stop),
-            Err(Refused::NotListening)
+            Err(Refused::Stop)
         );
         assert_eq!(
             next(DictationState::Idle, DictationEvent::Stop),
-            Err(Refused::NotListening)
+            Err(Refused::Stop)
         );
         assert_eq!(
             next(
                 DictationState::Inserted,
                 DictationEvent::Insertion(InsertionOutcome::Inserted)
             ),
-            Err(Refused::NotInserting)
+            Err(Refused::Insertion)
         );
         assert_eq!(
             next(
@@ -416,7 +503,7 @@ mod tests {
                     will_insert: true
                 }
             ),
-            Err(Refused::NotTranscribing)
+            Err(Refused::Transcription)
         );
     }
 
@@ -468,7 +555,7 @@ mod tests {
         }
         assert_eq!(
             next(DictationState::Inserted, DictationEvent::RetryInsertion),
-            Err(Refused::NotRetryable)
+            Err(Refused::Retry)
         );
         assert_eq!(
             next(
@@ -482,7 +569,7 @@ mod tests {
                 DictationState::Listening,
                 DictationEvent::RetryTranscription
             ),
-            Err(Refused::NotRetryable)
+            Err(Refused::Retry)
         );
     }
 
@@ -659,6 +746,75 @@ mod tests {
             can_start(&s, false, false, false).reason_key.as_deref(),
             Some("dictation.gate.offline")
         );
+    }
+
+    #[test]
+    fn a_transcript_goes_to_the_window_it_was_aimed_at() {
+        assert_eq!(
+            after_transcription(true, true, Aim::At(target()), OWN),
+            Ok(target())
+        );
+    }
+
+    /// Kept rather than typed, and only a failure when something prevented what
+    /// the user asked for.
+    #[test]
+    fn a_transcript_is_kept_when_there_is_nothing_to_type_into() {
+        for aim in [Aim::Keep, Aim::Nowhere, Aim::At(target())] {
+            assert_eq!(after_transcription(false, true, aim, OWN), Err(None));
+        }
+        assert_eq!(after_transcription(true, true, Aim::Keep, OWN), Err(None));
+        let own = Target {
+            process: OWN,
+            ..target()
+        };
+        assert_eq!(
+            after_transcription(true, true, Aim::At(own), OWN),
+            Err(None)
+        );
+        assert_eq!(
+            after_transcription(true, true, Aim::Nowhere, OWN),
+            Err(Some(FailureReason::NoEditableTarget))
+        );
+        assert_eq!(
+            after_transcription(true, false, Aim::At(target()), OWN),
+            Err(Some(FailureReason::Unsupported))
+        );
+    }
+
+    #[test]
+    fn a_held_shortcut_is_one_press() {
+        let t0 = Instant::now();
+        let mut gate = PressGate::default();
+        assert!(gate.press(t0));
+        for ms in [500, 530, 560, 1_000] {
+            assert!(
+                !gate.press(t0 + Duration::from_millis(ms)),
+                "repeat at {ms}ms"
+            );
+        }
+        gate.release();
+        assert!(gate.press(t0 + Duration::from_millis(1_100)));
+    }
+
+    /// A platform that never reports the keys going up must not leave the
+    /// shortcut dead after its first use.
+    #[test]
+    fn a_missing_release_does_not_swallow_the_next_press() {
+        let t0 = Instant::now();
+        let mut gate = PressGate::default();
+        assert!(gate.press(t0));
+        assert!(gate.press(t0 + HELD_FOR + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn the_indicator_steps_aside_for_a_meeting_and_the_setting() {
+        assert!(indicator_visible(true, true, false, false));
+        assert!(!indicator_visible(true, true, true, false));
+        assert!(!indicator_visible(true, false, false, false));
+        // Hidden at rest, never while in use.
+        assert!(indicator_visible(true, false, false, true));
+        assert!(!indicator_visible(false, true, false, true));
     }
 
     #[test]

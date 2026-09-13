@@ -125,6 +125,10 @@ pub struct AppSettings {
     /// in another application sends the microphone out of the machine.
     #[serde(default)]
     pub dictation_cloud_consent: bool,
+    /// Whether the dictation indicator rests on the screen edge. Off hides it
+    /// at rest only: a dictation in progress still shows it.
+    #[serde(default = "default_true")]
+    pub dictation_indicator: bool,
     /// Where the floating record card docks: `right_top`, `right_center`,
     /// `right_bottom` or `top`.
     ///
@@ -240,6 +244,7 @@ impl Default for AppSettings {
             record_shortcut: default_shortcut(),
             dictation_shortcut: default_dictation_shortcut(),
             dictation_cloud_consent: false,
+            dictation_indicator: true,
             overlay_position: default_overlay_position(),
             close_to_tray: false,
             recent_openrouter_llm_models: Vec::new(),

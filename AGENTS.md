@@ -135,6 +135,7 @@ npm run qa -- cdp type "texto"              # no elemento com foco
 npm run qa -- cdp eval "document.activeElement?.dataset.testid"
 npm run qa -- cdp eval "window.__TAURI_INTERNALS__.invoke('get_settings')"
 npm run qa -- cdp shot card.png --overlay    # a janela do card
+npm run qa -- cdp shot ditado.png --dictation  # o indicador de ditado
 npm run qa -- stop
 npm run qa -- reset                         # encerra e apaga só os dados da QA
 ```

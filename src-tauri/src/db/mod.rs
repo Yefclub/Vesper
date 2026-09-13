@@ -1412,6 +1412,49 @@ impl Database {
         tx.commit().map_err(|e| e.to_string())
     }
 
+    /// Deletes a dictation's take and records that it is gone, keeping its
+    /// length. Once transcribed, the audio is not history.
+    pub fn forget_dictation_audio(&self, id: &str, duration_ms: i64) -> Result<(), String> {
+        if let Some(path) = self.dictation_audio(id)? {
+            delete_dictation_audio(&path)?;
+        }
+        self.set_dictation_audio(id, None, duration_ms)
+    }
+
+    /// Where the accepted segments end, so a retry transcribes only past them
+    /// and never writes a sentence twice.
+    pub fn dictation_accepted_until(&self, id: &str) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT COALESCE(MAX(end_ms), 0) FROM dictation_segments WHERE dictation_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Every dictation, one delete at a time so each takes its audio with it.
+    pub fn delete_all_dictations(&self) -> Result<usize, String> {
+        let ids: Vec<String> = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare("SELECT id FROM dictations")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            let mut ids = Vec::new();
+            for r in rows {
+                ids.push(r.map_err(|e| e.to_string())?);
+            }
+            ids
+        };
+        for id in &ids {
+            self.delete_dictation(id)?;
+        }
+        Ok(ids.len())
+    }
+
     fn dictation_text(conn: &Connection, id: &str) -> Result<String, String> {
         let mut stmt = conn
             .prepare("SELECT text FROM dictation_segments WHERE dictation_id = ?1 ORDER BY seq")

@@ -51,7 +51,8 @@ const usage = `npm run qa -- <command>
   cdp type <text>
   cdp key <combo>      Tab, Shift+Tab, Enter, Escape, ArrowDown, Space, a
   cdp shot <file.png>
-                       --overlay addresses the overlay window instead of the main one`;
+                       --overlay addresses the overlay window instead of the main one
+                       --dictation addresses the dictation indicator`;
 
 function fail(message) {
   console.error(message);
@@ -379,8 +380,9 @@ const cdpCommands = {
 };
 
 async function cdp(args) {
-  const overlay = args.includes("--overlay");
-  const [command, ...rest] = args.filter((arg) => arg !== "--overlay");
+  const windows = { "--overlay": "overlay.html", "--dictation": "dictation.html" };
+  const flag = Object.keys(windows).find((arg) => args.includes(arg));
+  const [command, ...rest] = args.filter((arg) => !Object.hasOwn(windows, arg));
   const found = await pages().catch(() => fail("the QA build is not running: npm run qa -- start"));
   if (command === "targets") {
     for (const page of found) console.log(page.url);
@@ -389,10 +391,16 @@ async function cdp(args) {
   if (!Object.hasOwn(cdpCommands, command ?? "")) fail(usage);
   // The app's own pages only: WebView2 also lists an `about:blank` while a
   // window is being set up, and it can come first.
+  // The main page is the one that is none of the others.
+  const document = flag ? windows[flag] : null;
   const page = found.find(
-    (p) => p.url.startsWith("http://tauri.localhost/") && p.url.includes("overlay.html") === overlay,
+    (p) =>
+      p.url.startsWith("http://tauri.localhost/") &&
+      (document
+        ? p.url.includes(document)
+        : !Object.values(windows).some((other) => p.url.includes(other))),
   );
-  if (!page) fail(`no ${overlay ? "overlay" : "main"} page is open`);
+  if (!page) fail(`no ${document ?? "main"} page is open`);
   const session = await connect(page.webSocketDebuggerUrl);
   try {
     await cdpCommands[command](session, rest);

@@ -10,11 +10,12 @@ export default defineConfig(async () => ({
   clearScreen: false,
   build: {
     rollupOptions: {
-      // Two windows, two documents. `main` must stay — Tauri loads the app from
+      // One document per window. `main` must stay — Tauri loads the app from
       // the dev server root and from `index.html` in the bundle.
       input: {
         main: "index.html",
         overlay: "overlay.html",
+        dictation: "dictation.html",
       },
     },
   },

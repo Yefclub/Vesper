@@ -6,6 +6,7 @@ use crate::domain::actions::ActionItem;
 use crate::domain::capabilities::{detect_capabilities, CapabilityReport};
 use crate::domain::channels::ChannelSelection;
 use crate::domain::chat::ChatMessage;
+use crate::domain::dictation::DictationRecord;
 use crate::domain::export::{build_markdown, export_meeting, safe_file_stem, ExportFormat};
 use crate::domain::gate::{can_start_recording_with, StartGate};
 use crate::domain::i18n::{catalog, t, Locale};
@@ -19,7 +20,10 @@ use crate::domain::refine::{build_refine_prompt, parse_refined_list, Section, Su
 use crate::domain::search::SearchHit;
 use crate::domain::segmenter::{Segmenter, Utterance};
 use crate::domain::settings::{AppSettings, LlmProvider, SttProvider};
-use crate::domain::shortcut::ShortcutStatus;
+use crate::domain::shortcut::{
+    dictation_chosen_or_default, dictation_status_from, is_offered_for_dictation, ShortcutStatus,
+    CHOICES, DICTATION_CHOICES,
+};
 use crate::domain::speaker::{clean_speaker_name, Speaker, SpeakerNames};
 use crate::domain::summary::{MeetingInsights, SummaryTemplate};
 use crate::domain::title::{fallback_title, is_fallback_title, parse_title};
@@ -124,6 +128,7 @@ pub struct AppState {
     pub last_speech_ms: AtomicU64,
     pub stt: SttService,
     pub llm: LlmService,
+    pub dictation: crate::dictation::DictationService,
 }
 
 impl AppState {
@@ -178,6 +183,7 @@ impl AppState {
             last_speech_ms: AtomicU64::new(0),
             stt: SttService::new(),
             llm: LlmService::new(),
+            dictation: crate::dictation::DictationService::new(),
         })
     }
 }
@@ -320,6 +326,9 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
     // agreed to and the next launch would unregister everything to ask for it.
     // `set_record_shortcut` is the only writer.
     settings.record_shortcut = state.settings.lock().record_shortcut.clone();
+    // And the dictation shortcut, for the same reason: `set_dictation_shortcut`
+    // is its only writer.
+    settings.dictation_shortcut = state.settings.lock().dictation_shortcut.clone();
     // Only an actual change counts as a pick: every save comes through here, and a
     // save that touched the microphone must not reshuffle the model list.
     if settings.openrouter_llm_model != previous_llm_model {
@@ -380,10 +389,14 @@ fn persist_settings(state: &AppState, mut settings: AppSettings) -> Result<AppSe
 
 #[tauri::command]
 pub fn save_settings(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    Ok(persist_settings(&state, settings)?.public_view())
+    let saved = persist_settings(&state, settings)?.public_view();
+    // The indicator's switch takes effect on Save, not at the next launch.
+    crate::dictation::sync_indicator(&app, &state);
+    Ok(saved)
 }
 
 /// Write the theme and nothing else.
@@ -821,7 +834,7 @@ pub fn recorder_status(state: State<'_, Arc<AppState>>) -> RecorderStatus {
     status_of(&state)
 }
 
-fn local_stt_ready(settings: &AppSettings) -> bool {
+pub(crate) fn local_stt_ready(settings: &AppSettings) -> bool {
     LocalSttEngine::new().is_model_ready(&settings.local_stt_model)
 }
 
@@ -834,6 +847,15 @@ fn local_stt_present(settings: &AppSettings) -> bool {
 
 #[tauri::command]
 pub fn can_record(state: State<'_, Arc<AppState>>) -> StartGate {
+    // A dictation holds the microphone and the transcriber, and the two never
+    // run at once.
+    if state.dictation.is_active() {
+        return StartGate {
+            allowed: false,
+            reason: Some("A dictation is in progress.".into()),
+            reason_key: Some("gate.dictation".into()),
+        };
+    }
     let s = state.settings.lock().clone();
     can_start_recording_with(
         &s,
@@ -973,6 +995,17 @@ pub fn start_recording(
         }
         *active = Some(id.clone());
     }
+    // A dictation holds the microphone and the transcriber, and the two never
+    // run at once. Asked with the claim held, the way a dictation asks about a
+    // meeting after claiming its own session: whichever starts second sees the
+    // other.
+    if state.dictation.is_active() {
+        let mut active = state.active_meeting.lock();
+        if active.as_deref() == Some(id.as_str()) {
+            *active = None;
+        }
+        return Err("A dictation is in progress.".into());
+    }
     if let Err(e) = state.recorder.start(
         audio_path.clone(),
         // Copied into the capture like the device ids beside it, so the
@@ -1054,6 +1087,8 @@ pub fn start_recording(
     // is already minimized, so the card has to be considered here and not only
     // when the window is minimized.
     sync_overlay(&app, &state, false);
+    // The dictation indicator steps off the edge the card is about to take.
+    crate::dictation::sync_indicator(&app, &state);
     Ok(meeting)
 }
 
@@ -1131,6 +1166,8 @@ pub async fn stop_recording(
     // Before the tail transcription and the summary, which take seconds: the
     // card must not sit there advertising a recording that has already stopped.
     sync_overlay(&app, &state, false);
+    // And the dictation indicator comes back to the edge the card has left.
+    crate::dictation::sync_indicator(&app, &state);
     // Here rather than in the window, because the window is not the only thing
     // that stops a recording: the overlay, the shortcut and the tray all reach
     // this command directly. A question about a meeting that has ended has to
@@ -1510,7 +1547,7 @@ const RECORDING_FLUSH_INTERVAL_MS: u64 = 1200;
 const PROMPT_TAIL_CHARS: usize = 200;
 
 /// The last `PROMPT_TAIL_CHARS` of a line.
-fn prompt_tail(text: &str) -> String {
+pub(crate) fn prompt_tail(text: &str) -> String {
     let text = text.trim();
     // On a character boundary, not a byte one: this is Portuguese as often as
     // English, and slicing an accented letter in half panics.
@@ -2732,6 +2769,11 @@ pub async fn wipe_all_cmd(state: State<'_, Arc<AppState>>) -> Result<usize, Stri
     if state.recorder.is_recording() {
         return Err("stop the recording first".into());
     }
+    // Nor while a dictation is listening, transcribing or typing: it writes its
+    // segments as they land, and a wipe would be followed by the next one.
+    if state.dictation.is_active() {
+        return Err("stop the dictation first".into());
+    }
     // And not while anything else is still writing a meeting. `is_recording` is
     // already false the moment Stop is pressed, but `stop_recording` goes on for
     // seconds afterwards — final transcription, then the summary — and it holds
@@ -2754,6 +2796,15 @@ pub async fn wipe_all_cmd(state: State<'_, Arc<AppState>>) -> Result<usize, Stri
     if claim.is_some() || state.recorder.is_recording() {
         return Err("stop the recording first".into());
     }
+    // Asked again under the claim: a dictation that started while this waited
+    // for the locks above. One starting from here on waits for the claim.
+    if state.dictation.is_active() {
+        return Err("stop the dictation first".into());
+    }
+    // Every dictation first. This button means every word the app holds, and a
+    // failure here stops before any meeting is touched rather than leaving the
+    // user with half a wipe they were told was whole.
+    state.db.delete_all_dictations()?;
     let removed = state.db.delete_all_meetings();
     drop(claim);
     // The in-memory transcripts, whatever the rows did. `get_transcript` answers
@@ -2871,6 +2922,209 @@ fn is_minisign_key_line(line: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Register a combination as the dictation accelerator.
+///
+/// `register_record_shortcut`, for dictation, with one refusal of its own: a
+/// desktop that cannot say which window has the keyboard is not handed a key
+/// that would start a dictation into nowhere.
+pub fn register_dictation_shortcut(app: &AppHandle, accelerator: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+    if !crate::paths::profile().takes_global_shortcut() {
+        return Err("the QA build takes no global shortcut".into());
+    }
+    if let Some(refusal) = crate::dictation::shortcut_refusal() {
+        return Err(refusal.into());
+    }
+    let parsed: Shortcut = accelerator
+        .parse()
+        .map_err(|_| format!("{accelerator} is not a combination this build can register"))?;
+    for choice in DICTATION_CHOICES {
+        if let Ok(shortcut) = choice.parse::<Shortcut>() {
+            let _ = app.global_shortcut().unregister(shortcut);
+        }
+    }
+    let handle = app.clone();
+    app.global_shortcut()
+        .on_shortcut(parsed, move |_app, _sc, event| {
+            let state = handle.state::<Arc<AppState>>();
+            match event.state {
+                ShortcutState::Pressed => {
+                    if state.dictation.accept_press() {
+                        crate::dictation::toggle(&handle, crate::dictation::Route::Shortcut);
+                    }
+                }
+                ShortcutState::Released => state.dictation.release_press(),
+            }
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn dictation_shortcut_status(state: State<'_, Arc<AppState>>) -> ShortcutStatus {
+    state.dictation.shortcut_status()
+}
+
+/// Change the dictation accelerator, and say whether the OS agreed.
+///
+/// `set_record_shortcut`'s contract: the allow-list before anything is parsed,
+/// and a refusal puts the previous combination back.
+#[tauri::command]
+pub fn set_dictation_shortcut(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    accelerator: String,
+) -> Result<ShortcutStatus, String> {
+    if !is_offered_for_dictation(&accelerator) {
+        return Err("that is not one of the offered combinations".into());
+    }
+    // A desktop that gives out no global keys refuses every combination, and
+    // the reason is the desktop's rather than the one picked.
+    if let Some(refusal) = crate::dictation::shortcut_refusal() {
+        return Err(refusal.into());
+    }
+    let previous = state.settings.lock().dictation_shortcut.clone();
+    if register_dictation_shortcut(&app, &accelerator).is_err() {
+        let restore = dictation_chosen_or_default(&previous);
+        let restored = register_dictation_shortcut(&app, restore);
+        state.dictation.set_shortcut_status(dictation_status_from(
+            restored.as_ref().map(|_| ()).map_err(String::as_str),
+            restore,
+        ));
+        return Err(if restored.is_ok() {
+            "shortcut.taken".to_string()
+        } else {
+            "shortcut.none".to_string()
+        });
+    }
+    // Whichever home is holding the API key keeps holding it — the guard
+    // `set_record_shortcut` carries, for the reason it gives.
+    let home = if state.key_in_keychain.load(Ordering::Relaxed) {
+        KeyHome::Keychain
+    } else {
+        KeyHome::KeepInRow
+    };
+    let snapshot = {
+        let mut settings = state.settings.lock();
+        settings.dictation_shortcut = accelerator.clone();
+        settings.clone()
+    };
+    if let Err(e) = state.db.save_settings_with(&snapshot, home) {
+        let restore = dictation_chosen_or_default(&previous);
+        let _ = register_dictation_shortcut(&app, restore);
+        state.settings.lock().dictation_shortcut = previous;
+        return Err(e);
+    }
+    let status = dictation_status_from(Ok(()), &accelerator);
+    state.dictation.set_shortcut_status(status.clone());
+    Ok(status)
+}
+
+/// What dictation can do on this desktop, for the settings screen to say so.
+#[derive(Debug, Clone, Serialize)]
+pub struct DictationSupport {
+    pub can_insert: bool,
+    pub shortcut_refusal_key: Option<String>,
+    pub platform: &'static str,
+}
+
+#[tauri::command]
+pub fn dictation_support() -> DictationSupport {
+    DictationSupport {
+        can_insert: crate::dictation::can_insert(),
+        shortcut_refusal_key: crate::dictation::shortcut_refusal().map(str::to_string),
+        platform: std::env::consts::OS,
+    }
+}
+
+#[tauri::command]
+pub fn dictation_status(state: State<'_, Arc<AppState>>) -> crate::dictation::DictationStatus {
+    state.dictation.status()
+}
+
+/// Starts or stops a dictation from the indicator or from Vesper's window.
+///
+/// `route` says which, and it decides where the words go: the indicator never
+/// takes focus, so what it starts is typed where the keyboard is, while a start
+/// from Vesper's own window is kept rather than typed anywhere.
+#[tauri::command]
+pub fn toggle_dictation(app: AppHandle, route: crate::dictation::Route) {
+    crate::dictation::toggle(&app, route);
+}
+
+#[tauri::command]
+pub fn list_dictations(
+    state: State<'_, Arc<AppState>>,
+    query: Option<String>,
+) -> Result<Vec<DictationRecord>, String> {
+    match query.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        Some(q) => state.db.search_dictations(q, 200),
+        None => state.db.list_dictations(500),
+    }
+}
+
+#[tauri::command]
+pub fn delete_dictation(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    if state.dictation.holds(&id) {
+        return Err("dictation.delete.active".into());
+    }
+    state.db.delete_dictation(&id)
+}
+
+#[tauri::command]
+pub async fn retry_dictation_insertion(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    crate::dictation::retry_insertion(&app, &state, id).await
+}
+
+#[tauri::command]
+pub async fn retry_dictation_transcription(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    crate::dictation::retry_transcription(&app, &state, id).await
+}
+
+/// Writes a dictation's text to the file the save dialog named — the same
+/// contract as a meeting's export.
+#[tauri::command]
+pub fn export_dictation_cmd(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    path: String,
+) -> Result<String, String> {
+    let record = state
+        .db
+        .dictation(&id)?
+        .ok_or_else(|| "dictation not found".to_string())?;
+    let path = PathBuf::from(path);
+    // Text into a text file and nothing else: the path comes from the WebView,
+    // and without this the same command writes a `.bat` as readily as a `.txt`.
+    let text_file = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("md"));
+    if !text_file {
+        return Err("a dictation is exported as .txt or .md".into());
+    }
+    std::fs::write(&path, format!("{}\n", record.text))
+        .map_err(|e| format!("the dictation could not be written: {e}"))?;
+    Ok(path.display().to_string())
+}
+
+/// The indicator asking to grow or shrink as the pointer arrives and leaves.
+#[tauri::command]
+pub fn set_dictation_indicator_expanded(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    expanded: bool,
+) {
+    crate::dictation::set_indicator_expanded(&app, &state, expanded);
+}
+
 /// Whether the OS granted the global accelerator, and which one it is.
 ///
 /// Registration happens once during setup; this only reads the result, so the
@@ -2887,9 +3141,11 @@ pub fn shortcut_status(status: State<'_, std::sync::Mutex<ShortcutStatus>>) -> S
 /// Register a combination as the record accelerator, replacing whatever held it.
 ///
 /// Shared by startup and by the settings screen so there is one place that
-/// knows what the callback does. Unregistering everything first is deliberate:
-/// this application owns exactly one accelerator, and leaving the old one live
-/// would give a user who changed it two working shortcuts.
+/// knows what the callback does. Unregistering the record choices first is
+/// deliberate: leaving the old one live would give a user who changed it two
+/// working shortcuts. Only those — the dictation accelerator is registered
+/// beside this one, from a list that never shares a combination with it, and a
+/// change to either must leave the other where it is.
 pub fn register_record_shortcut(app: &AppHandle, accelerator: &str) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
     // Refused before the OS is asked. The QA build runs beside the installed
@@ -2901,7 +3157,11 @@ pub fn register_record_shortcut(app: &AppHandle, accelerator: &str) -> Result<()
     let parsed: Shortcut = accelerator
         .parse()
         .map_err(|_| format!("{accelerator} is not a combination this build can register"))?;
-    let _ = app.global_shortcut().unregister_all();
+    for choice in CHOICES {
+        if let Ok(shortcut) = choice.parse::<Shortcut>() {
+            let _ = app.global_shortcut().unregister(shortcut);
+        }
+    }
     let handle = app.clone();
     app.global_shortcut()
         .on_shortcut(parsed, move |_app, _sc, event| {

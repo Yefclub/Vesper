@@ -16,6 +16,7 @@ import {
   AppSettings,
   AudioDevice,
   CapabilityReport,
+  DictationSupport,
   DownloadProgress,
   ModelInfo,
   OrModel,
@@ -95,7 +96,9 @@ export function SettingsPanel({
   // By job, not by backend. The old axis (Local | OpenRouter) asked the user to
   // pick a tab before they could pick a model, and the model they wanted was
   // under whichever tab they had not chosen.
-  const [tab, setTab] = useState<"models" | "devices" | "appearance">("models");
+  const [tab, setTab] = useState<"models" | "devices" | "appearance" | "dictation">(
+    "models",
+  );
   const panelRef = useRef<HTMLDivElement>(null);
 
   /// Whether anything is waiting to be saved.
@@ -308,6 +311,17 @@ export function SettingsPanel({
   const [dataMessage, setDataMessage] = useState<string | null>(null);
   const [confirmWipe, setConfirmWipe] = useState(false);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
+  /// Dictation's accelerator is the drawer's own to ask about: nothing else on
+  /// screen names it.
+  const [dictationShortcut, setDictationShortcutStatus] = useState<ShortcutStatus | null>(
+    null,
+  );
+  const [dictationShortcutError, setDictationShortcutError] = useState<string | null>(null);
+  const [dictationSupport, setDictationSupport] = useState<DictationSupport | null>(null);
+  useEffect(() => {
+    api.dictationShortcutStatus().then(setDictationShortcutStatus).catch(() => {});
+    api.dictationSupport().then(setDictationSupport).catch(() => {});
+  }, []);
 
   const exportEverything = async () => {
     // Same reason as the import and export pickers: the floating card must not
@@ -422,6 +436,7 @@ export function SettingsPanel({
             { id: "models", label: t("settings.models") },
             { id: "devices", label: t("settings.devices") },
             { id: "appearance", label: t("settings.appearance") },
+            { id: "dictation", label: t("settings.dictation") },
           ]}
         />
 
@@ -1140,6 +1155,77 @@ export function SettingsPanel({
               {draft.close_to_tray && (
                 <p className="mt-2 text-xs leading-relaxed text-fg-muted">
                   {t("settings.close_to_tray_on")}
+                </p>
+              )}
+            </div>
+          )}
+
+          {tab === "dictation" && (
+            <div className="space-y-4" data-testid="settings-dictation">
+              <p className="text-xs leading-relaxed text-fg-muted">
+                {t("settings.dictation_how")}
+              </p>
+              {dictationSupport?.shortcut_refusal_key ? (
+                <p className="text-xs leading-relaxed text-warn">
+                  {t(dictationSupport.shortcut_refusal_key)}
+                </p>
+              ) : (
+                <>
+                  {/* Applied on click, like the record shortcut and for its
+                      reason: whether a combination works is the OS's answer.
+                      `set_dictation_shortcut` writes the row itself, and a Save
+                      carries the stored one back whatever the draft says. */}
+                  <FieldSelect
+                    label={t("settings.dictation_shortcut")}
+                    value={dictationShortcut?.accelerator ?? draft.dictation_shortcut ?? ""}
+                    onChange={(v) => {
+                      setDictationShortcutError(null);
+                      void api
+                        .setDictationShortcut(v)
+                        .then(setDictationShortcutStatus)
+                        .catch((e) => {
+                          setDictationShortcutError(t(String(e)));
+                          void api
+                            .dictationShortcutStatus()
+                            .then(setDictationShortcutStatus)
+                            .catch(() => {});
+                        });
+                    }}
+                    options={(dictationShortcut?.choices ?? []).map((c) => ({
+                      value: c,
+                      label: c,
+                    }))}
+                  />
+                  {dictationShortcutError && (
+                    <p className="text-xs leading-relaxed text-danger">
+                      {dictationShortcutError}
+                    </p>
+                  )}
+                  {dictationShortcut &&
+                    !dictationShortcut.registered &&
+                    !dictationShortcutError && (
+                      <p className="text-xs leading-relaxed text-warn">
+                        {t(dictationShortcut.reason_key ?? "dictation.shortcut.unavailable")}
+                      </p>
+                    )}
+                </>
+              )}
+              <CheckBox
+                label={t("settings.dictation_indicator")}
+                checked={draft.dictation_indicator ?? true}
+                onChange={(v) => setDraft((d) => ({ ...d, dictation_indicator: v }))}
+              />
+              <CheckBox
+                label={t("settings.dictation_cloud_consent")}
+                checked={draft.dictation_cloud_consent ?? false}
+                onChange={(v) => setDraft((d) => ({ ...d, dictation_cloud_consent: v }))}
+              />
+              <p className="text-xs leading-relaxed text-fg-muted">
+                {t("settings.dictation_cloud_body")}
+              </p>
+              {dictationSupport?.platform === "macos" && (
+                <p className="text-xs leading-relaxed text-fg-muted">
+                  {t("settings.dictation_macos")}
                 </p>
               )}
             </div>
