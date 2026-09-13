@@ -52,9 +52,10 @@ fn osascript(language: Language, script: &str) -> Result<String, String> {
 }
 
 /// The frontmost process, then the frame of its focused window, then the role
-/// and frame of its focused element — one per line, and an empty line for what
-/// Accessibility would not describe. Geometry and roles only: no title and no
-/// value ever comes back.
+/// and frame of its focused element — one per line, an empty line for what
+/// Accessibility would not describe, and the word denied in place of the element
+/// when macOS refused to be asked. Geometry and roles only: no title and no value
+/// ever comes back.
 const CAPTURE_SCRIPT: &str = "on frameOf(x)\n\
     tell application \"System Events\"\n\
     set {px, py} to value of attribute \"AXPosition\" of x\n\
@@ -63,9 +64,16 @@ const CAPTURE_SCRIPT: &str = "on frameOf(x)\n\
     return (px as text) & \",\" & (py as text) & \",\" & (sx as text) & \",\" & (sy as text)\n\
     end frameOf\n\
     with timeout of 3 seconds\n\
+    try\n\
     tell application \"System Events\"\n\
     set p to first application process whose frontmost is true\n\
     set pid to unix id of p\n\
+    end tell\n\
+    on error number n\n\
+    if n is -1743 or n is -1719 or n is -25211 then return \"0\" & linefeed & linefeed & \"denied\"\n\
+    error number n\n\
+    end try\n\
+    tell application \"System Events\"\n\
     set w to \"\"\n\
     set e to \"\"\n\
     try\n\
@@ -74,23 +82,40 @@ const CAPTURE_SCRIPT: &str = "on frameOf(x)\n\
     try\n\
     set el to value of attribute \"AXFocusedUIElement\" of p\n\
     set e to ((value of attribute \"AXRole\" of el) as text) & \" \" & my frameOf(el)\n\
+    on error number n\n\
+    if n is -1719 or n is -25211 then set e to \"denied\"\n\
     end try\n\
     end tell\n\
     end timeout\n\
     return (pid as text) & linefeed & w & linefeed & e";
 
 pub fn capture_target() -> Option<Target> {
-    let out = osascript(Language::AppleScript, CAPTURE_SCRIPT).ok()?;
+    target_from(&osascript(Language::AppleScript, CAPTURE_SCRIPT).ok()?)
+}
+
+/// What the capture script described, as a target — or none, when it could not
+/// describe the focused field.
+///
+/// Windows and fields are named by where they are and what they are, since
+/// System Events hands out no identifier a later call could compare. A window
+/// moved or a page scrolled while dictating reads as a different target, which
+/// keeps the text rather than typing it somewhere else. A field nothing could
+/// describe is no target at all: there would be nothing to check the insertion
+/// against. A refused permission is described as itself, so the insertion fails
+/// with the permission's own reason, and a permission granted in between reads
+/// as a different target.
+fn target_from(out: &str) -> Option<Target> {
     let mut lines = out.lines();
     let pid = lines.next()?.trim().parse::<u32>().ok()?;
-    // Windows and fields named by where they are and what they are, since
-    // System Events hands out no identifier a later call could compare. A window
-    // moved or a page scrolled while dictating reads as a different target,
-    // which keeps the text rather than typing it somewhere else.
+    let window = fingerprint(lines.next().unwrap_or(""));
+    let element = fingerprint(lines.next().unwrap_or(""));
+    if element == 0 {
+        return None;
+    }
     Some(Target {
-        window: fingerprint(lines.next().unwrap_or("")),
+        window,
         control: 0,
-        element: fingerprint(lines.next().unwrap_or("")),
+        element,
         process: pid,
         process_started: 0,
     })
@@ -372,5 +397,31 @@ mod tests {
         assert!(script.contains("org.nspasteboard.TransientType"));
         assert!(script.contains("org.nspasteboard.ConcealedType"));
         assert!(script.contains("clipboard_unsafe"));
+    }
+
+    /// A field nothing could describe gives no target, so nothing is typed
+    /// where nothing can be checked.
+    #[test]
+    fn a_field_accessibility_cannot_describe_is_no_target() {
+        assert_eq!(target_from("42\n0,0,800,600\n"), None);
+        assert_eq!(target_from("42"), None);
+        assert_eq!(target_from(""), None);
+        let field = target_from("42\n0,0,800,600\nAXTextField 10,20,300,24").unwrap();
+        assert_eq!(field.process, 42);
+        assert_ne!(field.window, 0);
+        assert_ne!(field.element, 0);
+        // Another field of the same window is another target.
+        let other = target_from("42\n0,0,800,600\nAXTextField 10,60,300,24").unwrap();
+        assert_ne!(field.element, other.element);
+    }
+
+    /// A refused permission still aims somewhere, so the insertion can say so,
+    /// and a capture after the permission is granted is a different target.
+    #[test]
+    fn a_refused_permission_is_a_target_of_its_own() {
+        let refused = target_from("0\n\ndenied").unwrap();
+        assert_eq!(refused.process, 0);
+        let granted = target_from("0\n\nAXTextField 1,2,3,4").unwrap();
+        assert_ne!(refused.element, granted.element);
     }
 }

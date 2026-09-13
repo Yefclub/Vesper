@@ -88,7 +88,8 @@ promises data it will not hand over — nothing is pasted (`clipboard_unsafe`).
 - **macOS**: clicking the indicator can activate Vesper (tauri#14102), which
   makes Vesper the target and keeps the text instead of typing it. The shortcut
   is unaffected. A window moved or a page scrolled while dictating reads as a
-  different target, and the text is kept. No CI job builds macOS; the scripts are
+  different target, and the text is kept — as it is in an application whose
+  focused field Accessibility cannot describe at all. No CI job builds macOS; the scripts are
   checked by tests on every platform but only run on a Mac.
 - **Windows**: a field is told apart from its neighbours only when UI Automation
   names it as a field — an edit control or a writable value. Rich editors that

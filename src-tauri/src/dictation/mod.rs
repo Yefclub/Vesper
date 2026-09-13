@@ -23,7 +23,6 @@ use crate::domain::dictation::{
 use crate::domain::i18n::{t, Locale};
 use crate::domain::overlay::{dock_at, OverlayPosition};
 use crate::domain::segmenter::{Segmenter, Utterance};
-use crate::domain::settings::AppSettings;
 use crate::domain::shortcut::{dictation_status_from, ShortcutStatus, DICTATION_ACCELERATOR};
 use crate::domain::speaker::Speaker;
 use crate::paths::dictation_audio_dir;
@@ -498,8 +497,7 @@ async fn live_pass(state: &AppState, id: &str, generation: u64) {
     if utterances.is_empty() {
         return;
     }
-    let settings = state.settings.lock().clone();
-    let untried = transcribe(state, &settings, id, utterances, sample_rate, 0).await;
+    let untried = transcribe(state, id, utterances, sample_rate, 0).await;
     // Back into the segmenter, oldest at the head, for the next pass or the stop.
     if let Some(s) = state
         .dictation
@@ -540,28 +538,31 @@ fn spawn_flush(app: &AppHandle, generation: u64) {
 /// and a retry resumes from the end of the last one.
 async fn transcribe(
     state: &AppState,
-    settings: &AppSettings,
     id: &str,
     utterances: Vec<Utterance>,
     sample_rate: u32,
     offset_ms: u64,
 ) -> Vec<Utterance> {
-    // The provider as it is now, not as it was when the take started: a switch
-    // to the cloud halfway through a local dictation sends it nothing the start
-    // would have refused. Untried is kept — the audio stays for a retry.
-    if crate::domain::dictation::transcriber_refusal(settings).is_some() {
-        return utterances;
-    }
     let mut prompt = match state.db.dictation(id) {
         Ok(Some(d)) => prompt_tail(&d.text),
         _ => String::new(),
     };
     let mut left = utterances.into_iter();
     for u in left.by_ref() {
+        // The settings as they are at this call, not as a caller read them: a
+        // pass can wait minutes for the transcriber, and a provider switched to
+        // the cloud or a consent withdrawn meanwhile must stop the very next
+        // utterance. What is refused stays untried, with its audio, for a retry.
+        let settings = state.settings.lock().clone();
+        if crate::domain::dictation::transcriber_refusal(&settings).is_some() {
+            let mut untried = vec![u];
+            untried.extend(left);
+            return untried;
+        }
         let kept = match state
             .stt
             .transcribe_channel(
-                settings,
+                &settings,
                 Speaker::Me,
                 &u.pcm,
                 sample_rate,
@@ -649,8 +650,7 @@ async fn stop(app: &AppHandle, state: &AppState) {
             None => Vec::new(),
         }
     };
-    let settings = state.settings.lock().clone();
-    let untried = transcribe(state, &settings, &id, utterances, sample_rate, 0).await;
+    let untried = transcribe(state, &id, utterances, sample_rate, 0).await;
     drop(flight);
     if !untried.is_empty() {
         // What landed is kept, and so is the audio, for a retry to finish from.
@@ -881,6 +881,12 @@ pub async fn retry_transcription(
             .unwrap_or_else(|| "dictation.start_failed".into()));
     }
     state.dictation.claim(&id, DictationState::Transcribing)?;
+    // Again with the claim held: a meeting that started after the gate either
+    // sees this claim or is seen here, so the two never transcribe together.
+    if meeting_active(state) {
+        state.dictation.release(&id);
+        return Err("dictation.gate.meeting".into());
+    }
     let _ = state
         .db
         .set_dictation_state(&id, DictationState::Transcribing, None);
@@ -904,7 +910,7 @@ pub async fn retry_transcription(
             let mut segmenter = Segmenter::new(sample_rate);
             let mut utterances = segmenter.push(mic.get(from..).unwrap_or_default());
             utterances.extend(segmenter.flush());
-            transcribe(state, &settings, &id, utterances, sample_rate, from_ms)
+            transcribe(state, &id, utterances, sample_rate, from_ms)
                 .await
                 .is_empty()
         }
