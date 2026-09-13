@@ -2892,6 +2892,12 @@ pub fn shortcut_status(status: State<'_, std::sync::Mutex<ShortcutStatus>>) -> S
 /// would give a user who changed it two working shortcuts.
 pub fn register_record_shortcut(app: &AppHandle, accelerator: &str) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+    // Refused before the OS is asked. The QA build runs beside the installed
+    // app, and a combination it held would start recording in the test copy
+    // when the user meant the real one.
+    if !crate::paths::profile().takes_global_shortcut() {
+        return Err("the QA build takes no global shortcut".into());
+    }
     let parsed: Shortcut = accelerator
         .parse()
         .map_err(|_| format!("{accelerator} is not a combination this build can register"))?;

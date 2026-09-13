@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "preflight": "python scripts/check-workflows.py",
-    "notices": "python scripts/notices.py"
+    "notices": "python scripts/notices.py",
+    "qa": "node scripts/qa.mjs"
   },
   "dependencies": {
     "@animateicons/react": "^0.4.1",

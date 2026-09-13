@@ -1,0 +1,17 @@
+{
+  "productName": "Vesper QA",
+  "identifier": "com.yefclub.vesper.qa",
+  "app": {
+    "windows": [
+      {
+        "title": "Vesper QA",
+        "focus": false
+      }
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  }
+}

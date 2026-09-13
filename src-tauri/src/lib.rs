@@ -24,6 +24,14 @@ fn default_log_filter() -> tracing_subscriber::EnvFilter {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before the log file, the database or the keychain is touched: the
+    // identifier says whose files those are, and the QA build shares a machine
+    // with the installed app.
+    let context = tauri::generate_context!();
+    paths::set_profile(domain::profile::Profile::from_identifier(
+        &context.config().identifier,
+    ));
+
     // A release build has no console — `main.rs` sets
     // `windows_subsystem = "windows"` — so until now every `tracing::warn!` in
     // the shipped app went to a stdout that does not exist. The refused global
@@ -129,6 +137,9 @@ pub fn run() {
             )?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &rec_i, &quit_i])?;
+            // The product name, not a literal: a QA build running beside the
+            // installed app must not be a second icon called "Vesper".
+            let tooltip = app.package_info().name.clone();
 
             // The only tray icon. `tauri.conf.json` used to carry a `trayIcon`
             // block as well, and Tauri builds one from that at startup — so the
@@ -138,7 +149,7 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip("Vesper")
+                .tooltip(&tooltip)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
                     "show" => {
@@ -296,6 +307,6 @@ pub fn run() {
             commands::download_model_cmd,
             commands::check_updates_config,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running Vesper");
 }

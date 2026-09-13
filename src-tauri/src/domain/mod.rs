@@ -15,6 +15,7 @@ pub mod job;
 pub mod offline;
 pub mod overlay;
 pub mod playback;
+pub mod profile;
 pub mod recovery;
 pub mod refine;
 pub mod search;
