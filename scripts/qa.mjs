@@ -158,7 +158,12 @@ function copyMissing(from, to) {
     const target = path.join(to, entry.name);
     if (entry.isDirectory()) {
       copyMissing(source, target);
-    } else if (entry.isFile() && !/\.(part|etag)$/.test(entry.name) && !fs.existsSync(target)) {
+      continue;
+    }
+    // A target that still shares its file — a link left by an earlier version
+    // of this script, or made by hand — is replaced: the copy is the isolation.
+    if (fs.existsSync(target) && fs.statSync(target).nlink > 1) fs.unlinkSync(target);
+    if (entry.isFile() && !/\.(part|etag)$/.test(entry.name) && !fs.existsSync(target)) {
       // Renamed into place, so an interrupted copy is never taken for a model.
       fs.copyFileSync(source, `${target}.qa-copy`);
       fs.renameSync(`${target}.qa-copy`, target);
