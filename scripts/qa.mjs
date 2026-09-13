@@ -3,10 +3,11 @@
 // Vesper, driven through the WebView's DevTools protocol — never through the
 // mouse, keyboard, focus or screen of whoever is using the machine.
 //
-// When and how to use it: .claude/skills/qa/SKILL.md
+// When and how to use it: AGENTS.md, "Ambiente de QA".
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -176,10 +177,23 @@ async function pages() {
   return (await response.json()).filter((target) => target.type === "page");
 }
 
+// Any listener at all, not only a DevTools one: WebView2 cannot take a port that
+// is held, and asking for DevTools pages of something that answers otherwise
+// used to read as a free port.
+function portTaken() {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port }, () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.on("error", () => resolve(false));
+  });
+}
+
 async function start() {
   if (!fs.existsSync(exe)) fail(`no QA build at ${exe}: npm run qa -- build`);
   if (qaPids().length) fail("the QA build is already running: npm run qa -- stop");
-  if (await pages().catch(() => null)) fail(`something else already answers on port ${port}`);
+  if (await portTaken()) fail(`port ${port} is already in use: find out what holds it`);
   for (const dir of ["models", "backends"]) {
     copyMissing(path.join(installedData, dir), path.join(qaData, dir));
   }
@@ -202,7 +216,9 @@ async function start() {
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  fail("started, but DevTools never answered");
+  // Nothing can drive a copy DevTools does not reach, so it is not left running.
+  stop();
+  fail("started, but DevTools never answered; stopped it again");
 }
 
 function reset() {
