@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type Ref,
+} from "react";
 import { FileUp, Search, SearchX, SquarePen, Trash2 } from "lucide-react";
 import { MeetingRecord, SearchHit, formatDuration } from "../lib/api";
 import { formatMeetingTime } from "../lib/datetime";
@@ -22,6 +29,16 @@ interface Props {
   onDelete: (id: string) => void;
   onImport: () => void;
   onNew: () => void;
+  ref?: Ref<SidebarHandle>;
+}
+
+/** For the rail: its Search and Meetings buttons expand the list and hand focus
+ *  straight to the field or the row they name, without reaching into it. */
+export interface SidebarHandle {
+  focusSearch: () => void;
+  /** The list's tab stop — the selected row, or the first — and the search field
+   *  when there is no row to land on. */
+  focusList: () => void;
 }
 
 /** Local midnight for a timestamp, so comparisons are by calendar day. */
@@ -65,10 +82,24 @@ export function Sidebar({
   onDelete,
   onImport,
   onNew,
+  ref,
 }: Props) {
   const { t } = useI18n();
   const showingHits = query.trim().length > 0;
   const listRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      focusSearch: () => searchRef.current?.focus(),
+      focusList: () => {
+        const row = listRef.current?.querySelector<HTMLElement>("[data-row][tabindex='0']");
+        (row ?? searchRef.current)?.focus();
+      },
+    }),
+    [],
+  );
 
   // Nothing at all for the first 300ms. A list that resolves in 80ms would
   // otherwise flash five grey bars, and a placeholder that appears and leaves
@@ -165,6 +196,7 @@ export function Sidebar({
             className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-subtle"
           />
           <input
+            ref={searchRef}
             data-testid="search-input"
             value={query}
             onChange={(e) => onSearch(e.target.value)}

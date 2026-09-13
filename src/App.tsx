@@ -14,7 +14,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { clsx } from "clsx";
-import { House, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sparkles, Sun, TriangleAlert } from "lucide-react";
+import { FileUp, HistoryIcon, Moon, PanelLeftClose, PanelLeftOpen, Search, Settings, Sparkles, SquarePen, Sun, TriangleAlert } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -55,7 +55,7 @@ import { RecordDock } from "./components/RecordDock";
 import { ContextBar } from "./components/ContextBar";
 import { EgressBadge } from "./components/EgressBadge";
 import { RecordTransport } from "./components/RecordTransport";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, type SidebarHandle } from "./components/Sidebar";
 import { WindowControls } from "./components/WindowControls";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Onboarding } from "./components/Onboarding";
@@ -86,6 +86,23 @@ async function dragWindow(stillPressed: () => boolean) {
 /// The sidebar's width, in pixels. Named because two places have to agree on
 /// it: the backdrop that draws it and the card that slides exactly that far.
 const SIDEBAR_WIDTH = 288;
+
+/// Where the card stops with the list collapsed. Its own 8px gutter puts its
+/// edge at 64px, which is the width the rail paints — and 32px, the centre of
+/// that, is the centre of the titlebar toggle right above the rail's buttons.
+const RAIL_WIDTH = 56;
+
+/// localStorage, not the settings row: this is where the window was left, not
+/// something to carry into an export or across a reinstall.
+const SIDEBAR_KEY = "vesper-sidebar";
+
+function readSidebarOpen() {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) !== "collapsed";
+  } catch {
+    return true;
+  }
+}
 
 /// Whether a key event is the accelerator the backend registered.
 ///
@@ -289,11 +306,54 @@ function AppShell({
   const pressRef = useRef<{ x: number; y: number; started: boolean } | null>(
     null,
   );
-  /// Open by default: the list of meetings is the reason the window is this
-  /// wide. Not persisted — hiding it is a gesture for the current task, not a
-  /// preference, and a window that came back without its list would read as
-  /// having lost it.
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  /// Expanded by default: the list of meetings is the reason the window is this
+  /// wide. Persisted now — collapsed, the rail keeps New, Import, Search and the
+  /// way back to the list on screen, so a window that comes back compact has
+  /// lost nothing; it is the width the user last chose.
+  const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
+  /// What a rail button expanded the list to reach. Focused once the list is no
+  /// longer inert, which is a render after the click.
+  const [pendingFocus, setPendingFocus] = useState<"search" | "list" | null>(null);
+  const sidebarRef = useRef<SidebarHandle>(null);
+  const sidebarWrapRef = useRef<HTMLDivElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  /// Read on every render, not once at mount like framer's `useReducedMotion`:
+  /// the slide starts on the render the toggle causes, so that is when the
+  /// setting has to be current — including after it changed with the app open.
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_KEY, sidebarOpen ? "expanded" : "collapsed");
+    } catch {
+      /* best effort, like the theme's boot cache */
+    }
+  }, [sidebarOpen]);
+
+  useEffect(() => {
+    if (!sidebarOpen || !pendingFocus) return;
+    if (pendingFocus === "search") sidebarRef.current?.focusSearch();
+    else sidebarRef.current?.focusList();
+    setPendingFocus(null);
+  }, [sidebarOpen, pendingFocus]);
+
+  /// Collapsing makes the list inert, and focus left inside an inert subtree is
+  /// focus nowhere. It goes to the toggle first — the control that just acted.
+  function toggleSidebar() {
+    if (sidebarOpen && sidebarWrapRef.current?.contains(document.activeElement)) {
+      toggleRef.current?.focus();
+    }
+    setSidebarOpen((v) => !v);
+  }
+
+  function expandSidebarTo(target: "search" | "list") {
+    // Out of the rail before it goes inert: the button just pressed is inside
+    // it, and focus must not sit in an inert subtree even for the one render
+    // before the list can take it.
+    toggleRef.current?.focus();
+    setPendingFocus(target);
+    setSidebarOpen(true);
+  }
   const [showOnboarding, setShowOnboarding] = useState(
     !initialSettings.onboarding_complete,
   );
@@ -1210,33 +1270,15 @@ function AppShell({
           <Button
             variant="ghost"
             size="icon"
+            ref={toggleRef}
             data-testid="btn-toggle-sidebar"
-            onClick={() => setSidebarOpen((v) => !v)}
-            title={t(sidebarOpen ? "sidebar.hide" : "sidebar.show")}
-            aria-label={t(sidebarOpen ? "sidebar.hide" : "sidebar.show")}
+            onClick={toggleSidebar}
+            title={t(sidebarOpen ? "sidebar.collapse" : "sidebar.expand")}
+            aria-label={t(sidebarOpen ? "sidebar.collapse" : "sidebar.expand")}
             aria-expanded={sidebarOpen}
           >
             {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
           </Button>
-          {/* Only with the sidebar closed and a meeting open. The way back to
-              the empty screen lived in the sidebar and nowhere else, so closing
-              the sidebar took it away — and closing the sidebar is exactly when
-              somebody is reading a meeting and wants out of it.
-
-              Hidden with the sidebar open on purpose: the same action is right
-              there in the list header, and two buttons for one thing on screen
-              at once is how a user learns to distrust both. */}
-          {!sidebarOpen && selected && (
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={startNewMeeting}
-              title={t("nav.new")}
-              aria-label={t("nav.new")}
-            >
-              <House size={16} />
-            </Button>
-          )}
           {/* No radius: the asset is the mark alone now, not a rounded tile, so
               a corner clip would shave the artwork instead of a background. */}
           <img src={logo} alt="" className="h-8 w-8" />
@@ -1353,8 +1395,13 @@ function AppShell({
             this the search field, the import button and every meeting row stay
             in the tab order — reachable, actionable, and with the focus ring
             drawn behind the card where nobody can see it. */}
-        <div className="absolute inset-y-0 left-0 w-72" inert={!sidebarOpen}>
+        <div
+          ref={sidebarWrapRef}
+          className="absolute inset-y-0 left-0 w-72"
+          inert={!sidebarOpen}
+        >
           <Sidebar
+          ref={sidebarRef}
           meetings={meetings}
           selectedId={selectedId}
           query={query}
@@ -1369,12 +1416,82 @@ function AppShell({
           />
         </div>
 
+        {/* The rail: what stays on screen while the card covers the list.
+            Painted over the list's first 64px in the same canvas colour — up to
+            the card's edge, gutter included: at 56px the list's heading, search
+            field and titles showed through the 8px strip between the rail and
+            the card. `inert` while the list is out, the same rule as the list
+            itself. Opacity only: the card's slide already says where the list
+            went. */}
+        <motion.nav
+          data-testid="rail"
+          aria-label={t("nav.meetings")}
+          inert={sidebarOpen}
+          initial={false}
+          animate={{ opacity: sidebarOpen ? 0 : 1 }}
+          transition={reduceMotion ? { duration: 0 } : transition.fast}
+          className="absolute inset-y-0 left-0 flex w-16 flex-col items-center gap-1 bg-background pt-4"
+        >
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid="rail-new"
+            onClick={startNewMeeting}
+            title={t("nav.new")}
+            aria-label={t("nav.new")}
+          >
+            <SquarePen size={16} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid="rail-import"
+            onClick={handleImport}
+            title={t("nav.import")}
+            aria-label={t("nav.import")}
+          >
+            <FileUp size={16} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid="rail-search"
+            onClick={() => expandSidebarTo("search")}
+            title={t("nav.search")}
+            aria-label={t("nav.search")}
+          >
+            <Search size={16} />
+          </Button>
+          {/* Carries the open meeting: the dot says one is selected and the
+              label names it, so it stays identifiable with the list collapsed —
+              to the eye and to a screen reader. */}
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid="rail-meetings"
+            onClick={() => expandSidebarTo("list")}
+            title={selected ? `${t("nav.meetings")}: ${selected.title}` : t("nav.meetings")}
+            aria-label={selected ? `${t("nav.meetings")}: ${selected.title}` : t("nav.meetings")}
+            className="relative"
+          >
+            <HistoryIcon size={16} />
+            {selected && (
+              <span
+                aria-hidden
+                className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-accent"
+              />
+            )}
+          </Button>
+        </motion.nav>
+
         <motion.main
           // `initial={false}` so the first paint is wherever the sidebar
           // already is, rather than an animation nobody asked for on launch.
           initial={false}
-          animate={{ marginLeft: sidebarOpen ? SIDEBAR_WIDTH : 0 }}
-          transition={transition.base}
+          animate={{ marginLeft: sidebarOpen ? SIDEBAR_WIDTH : RAIL_WIDTH }}
+          // `reducedMotion="user"` stops transforms, and a margin is not one:
+          // without this the card still slid for someone who asked for none.
+          transition={reduceMotion ? { duration: 0 } : transition.base}
           className="relative z-10 flex min-w-0 flex-1 flex-col">
           {/* THE CARD. One JSX element and not a component, because it has
               exactly one consumer. `overflow-hidden` clips its own descendants
