@@ -88,11 +88,16 @@ promises data it will not hand over — nothing is pasted (`clipboard_unsafe`).
 
 - **macOS**: clicking the indicator can activate Vesper (tauri#14102), which
   makes Vesper the target and keeps the text instead of typing it. The shortcut
-  is unaffected. A window moved, a page scrolled or a title changed while
-  dictating — an unread count arriving, another tab — reads as a different
-  target, and the text is kept, as it is in an application whose focused field
-  Accessibility cannot describe at all. No CI job builds macOS; the scripts are
-  checked by tests on every platform but only run on a Mac.
+  is unaffected. System Events gives a script no identity for a window or a
+  field, only what it looks like: frame, role and title. A window moved, a page
+  scrolled or a title changed while dictating — an unread count arriving,
+  another tab — reads as a different target, and the text is kept, as it is in
+  an application whose focused field Accessibility cannot describe at all. The
+  reverse holds too: two tabs of one window showing the same page, with the
+  field in the same place, look identical, and switching between them before
+  stopping types into the other tab. Telling those apart needs the native
+  Accessibility API rather than scripting. No CI job builds macOS; the scripts
+  are checked by tests on every platform but only run on a Mac.
 - **Windows**: a field is told apart from its neighbours only when UI Automation
   names it as a field — an edit control or a writable value. Rich editors that
   describe themselves as a document are checked by window and control.
@@ -160,8 +165,9 @@ transcription, an ordinary text editor unless the step says otherwise.
 - Chrome, Slack or VS Code: text arrives through the paste. Copy an image before
   dictating; after the dictation, pasting gives the image back.
 - Two TextEdit windows: start in one, click into the other, stop. *Not typed*.
-- Two Chrome tabs with the same page: start in a field of one, switch to the
-  other tab, stop. *Not typed*.
+- Two Chrome tabs on different pages: start in a field of one, switch to the
+  other tab, stop. *Not typed*. Two tabs on the same page are the known limit
+  above.
 - A password field focused: *Not typed* — a password field has the keyboard.
 - Click the indicator's record button while an editor is frontmost: note whether
   the editor loses focus (known limit above).
