@@ -145,24 +145,23 @@ function stop() {
   }
 }
 
-// Models and downloaded backends come from the installed app as hard links:
-// nothing is fetched or copied again, and a QA build that deletes or replaces
-// one — downloads are renamed into place — only drops its own link.
-// Unfinished downloads are left to the app that started them.
-function link(from, to) {
+// Models and downloaded backends are copied from the installed app on the first
+// start, so nothing is fetched again. Copied, not hard-linked: a link shares the
+// file, and the backend unpacker and the digest markers rewrite files in place —
+// through a link, into the installed app's copy. Unfinished downloads are left
+// to the app that started them.
+function copyMissing(from, to) {
   if (!fs.existsSync(from)) return;
   fs.mkdirSync(to, { recursive: true });
   for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
     const source = path.join(from, entry.name);
     const target = path.join(to, entry.name);
     if (entry.isDirectory()) {
-      link(source, target);
+      copyMissing(source, target);
     } else if (entry.isFile() && !/\.(part|etag)$/.test(entry.name) && !fs.existsSync(target)) {
-      try {
-        fs.linkSync(source, target);
-      } catch (e) {
-        console.warn(`not linked, so the QA build goes without it: ${target} (${e.code})`);
-      }
+      // Renamed into place, so an interrupted copy is never taken for a model.
+      fs.copyFileSync(source, `${target}.qa-copy`);
+      fs.renameSync(`${target}.qa-copy`, target);
     }
   }
 }
@@ -177,7 +176,7 @@ async function start() {
   if (qaPids().length) fail("the QA build is already running: npm run qa -- stop");
   if (await pages().catch(() => null)) fail(`something else already answers on port ${port}`);
   for (const dir of ["models", "backends"]) {
-    link(path.join(installedData, dir), path.join(qaData, dir));
+    copyMissing(path.join(installedData, dir), path.join(qaData, dir));
   }
 
   const child = spawn(exe, [], {
@@ -189,7 +188,9 @@ async function start() {
   child.unref();
   for (let attempt = 0; attempt < 120; attempt++) {
     const found = await pages().catch(() => []);
-    if (found.length) {
+    // Not the first page listed: that can be the `about:blank` WebView2 opens
+    // before the app loads, and a `cdp` command straight after would find no app.
+    if (found.some((page) => page.url.startsWith("http://tauri.localhost/"))) {
       console.log(`running as ${child.pid}; pages:`);
       for (const page of found) console.log(`  ${page.url}`);
       return;
@@ -201,8 +202,7 @@ async function start() {
 
 function reset() {
   stop();
-  // Only ever these two: the QA copy's data and its WebView profile. The models
-  // in there are links, so the installed app's files stay where they are.
+  // Only ever these two: the QA copy's data and its WebView profile.
   for (const dir of [qaData, qaWebView]) {
     try {
       fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });

@@ -41,7 +41,8 @@ npm run qa -- cdp shot card.png --overlay          # a janela do card
 - **Perfil QA começa vazio**, então a primeira execução cai no onboarding, e os botões dele não têm `data-testid`. Para passar sem clicar por texto: `invoke('get_settings')`, devolver o objeto em `invoke('complete_onboarding', { settings })` e `location.reload()`. `npm run qa -- reset` volta ao perfil vazio.
 - **Atalho global aparece como indisponível**: a QA não registra nenhum, de propósito. Tecla dentro da janela chega por `cdp key`.
 - **`eval` espera no máximo 15 s.** Operação longa (importar, transcrever, resumir) se dispara sem `await`, guardando o resultado em `window`, e se consulta depois com outro `eval`.
-- **Lançada de dentro do Claude desktop, a QA grava no contêiner do pacote.** O app é MSIX, e o Windows redireciona o que processos filhos escrevem em `%APPDATA%`/`%LOCALAPPDATA%` para `...\Packages\Claude_*\LocalCache\`. De dentro, o caminho continua sendo `%APPDATA%\Vesper QA`; no Explorer ele não existe. Os hard links funcionam do mesmo jeito.
+- **Lançada de dentro do Claude desktop, a QA grava no contêiner do pacote.** O app é MSIX, e o Windows redireciona o que processos filhos escrevem em `%APPDATA%`/`%LOCALAPPDATA%` para `...\Packages\Claude_*\LocalCache\`. De dentro, o caminho continua sendo `%APPDATA%\Vesper QA`; no Explorer ele não existe.
+- **A primeira subida copia modelos e backends da instalada** — alguns GB, segundos em SSD. `reset` apaga a cópia e a subida seguinte copia de novo. Nunca trocar a cópia por hard link: o unpacker e os marcadores de digest reescrevem arquivo no lugar.
 - **Porta 9333 ocupada** faz o `start` recusar. Descobrir quem está nela antes de mexer em qualquer coisa.
 - **Ninja e LLVM**: o `build` põe no PATH o LLVM de `C:\Program Files\LLVM\bin` e o Ninja das Build Tools. Faltando um, ele diz qual.
 

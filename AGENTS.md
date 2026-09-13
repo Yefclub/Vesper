@@ -113,7 +113,7 @@ O produto promete privacidade. Regressão aqui é quebra de promessa, não bug d
 
 Dois, em momentos diferentes:
 
-- **Antes da PR — build QA** (`npm run qa`, só Windows). A branch roda como a Vesper instalada roda — release, `gpu-vulkan`, os mesmos modelos —, mas como outra aplicação: identificador `com.yefclub.vesper.qa`, dados em `%APPDATA%\Vesper QA`, chave de API em outra entrada do cofre, sem atalho global e sem updater. Modelos e backends baixados entram por hard link da Vesper instalada: nada é baixado de novo, e o que a QA apagar ou substituir some só dela. O agente sobe quando a mudança precisa ser vista rodando, **sem pedir**. Como usar: skill `qa`.
+- **Antes da PR — build QA** (`npm run qa`, só Windows). A branch roda como a Vesper instalada roda — release, `gpu-vulkan`, os mesmos modelos —, mas como outra aplicação: identificador `com.yefclub.vesper.qa`, dados em `%APPDATA%\Vesper QA`, chave de API em outra entrada do cofre, sem atalho global e sem updater. Modelos e backends baixados são copiados da Vesper instalada na primeira subida: nada é baixado de novo, e nada que a QA faça com eles chega na instalada. Cópia, não hard link — o unpacker de backend e os marcadores de digest reescrevem arquivo no lugar, e através de um link reescreveriam o da instalada. O agente sobe quando a mudança precisa ser vista rodando, **sem pedir**. Como usar: skill `qa`.
 - **Depois do merge — canal dev**: a tag `dev-*` publica a Vesper Dev, que atualiza a app instalada de quem testa.
 
 A QA roda na máquina de alguém que está usando ela. Por isso:
