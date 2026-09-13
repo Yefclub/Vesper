@@ -1,6 +1,7 @@
 mod audio;
 mod commands;
 mod db;
+mod dictation;
 mod domain;
 mod llm;
 mod models;
@@ -102,6 +103,9 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(state)
         .setup(|app| {
+            // Before a shortcut can start another take: what the last run left
+            // in the middle of one is settled first.
+            dictation::recover(&app.state::<Arc<AppState>>());
             #[cfg(desktop)]
             {
                 // Registration fails when another application already owns the
@@ -125,6 +129,27 @@ pub fn run() {
                     registered,
                     accelerator,
                 )));
+
+                // Dictation's own combination, beside that one and never one
+                // of its choices. Refused the same way: reported, not fatal.
+                let state = app.state::<Arc<AppState>>();
+                let dictation_accelerator = domain::shortcut::dictation_chosen_or_default(
+                    &state.settings.lock().dictation_shortcut,
+                );
+                let dictation_registered =
+                    commands::register_dictation_shortcut(app.handle(), dictation_accelerator);
+                if let Err(e) = &dictation_registered {
+                    tracing::warn!("dictation shortcut unavailable: {e}");
+                }
+                state
+                    .dictation
+                    .set_shortcut_status(domain::shortcut::dictation_status_from(
+                        dictation_registered
+                            .as_ref()
+                            .map(|_| ())
+                            .map_err(String::as_str),
+                        dictation_accelerator,
+                    ));
             }
 
             let show_i = MenuItem::with_id(app, "show", "Show Vesper", true, None::<&str>)?;
@@ -135,8 +160,18 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
+            // The route to dictation that is neither the shortcut nor the
+            // indicator. What it starts is kept, not typed: opening this menu
+            // took the keyboard from wherever it was.
+            let dictate_i = MenuItem::with_id(
+                app,
+                "toggle_dictation",
+                "Start/Stop Dictation",
+                true,
+                None::<&str>,
+            )?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &rec_i, &quit_i])?;
+            let menu = Menu::with_items(app, &[&show_i, &rec_i, &dictate_i, &quit_i])?;
             // The product name, not a literal: a QA build running beside the
             // installed app must not be a second icon called "Vesper".
             let tooltip = app.package_info().name.clone();
@@ -162,6 +197,7 @@ pub fn run() {
                     "toggle_record" => {
                         let _ = app.emit("hotkey://toggle-record", ());
                     }
+                    "toggle_dictation" => dictation::toggle(app, dictation::Route::Window),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -234,14 +270,21 @@ pub fn run() {
                     }
                     // A hidden window is still a window and Tauri only exits once
                     // every one is destroyed, so closing the main window has to
-                    // take the card with it or Vesper keeps running invisibly.
+                    // take the card and the dictation indicator with it or Vesper
+                    // keeps running invisibly.
                     if matches!(event, tauri::WindowEvent::Destroyed) {
                         if let Some(o) = handle.get_webview_window("overlay") {
                             let _ = o.close();
                         }
+                        if let Some(d) = handle.get_webview_window("dictation") {
+                            let _ = d.close();
+                        }
                     }
                 });
             }
+
+            // The indicator's resting place on the screen edge, when it is wanted.
+            dictation::sync_indicator(app.handle(), &app.state::<Arc<AppState>>());
 
             Ok(())
         })
@@ -306,6 +349,17 @@ pub fn run() {
             commands::list_models_cmd,
             commands::download_model_cmd,
             commands::check_updates_config,
+            commands::dictation_shortcut_status,
+            commands::set_dictation_shortcut,
+            commands::dictation_support,
+            commands::dictation_status,
+            commands::toggle_dictation,
+            commands::list_dictations,
+            commands::delete_dictation,
+            commands::retry_dictation_insertion,
+            commands::retry_dictation_transcription,
+            commands::export_dictation_cmd,
+            commands::set_dictation_indicator_expanded,
         ])
         .run(context)
         .expect("error while running Vesper");

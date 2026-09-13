@@ -14,7 +14,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import { clsx } from "clsx";
-import { FileUp, HistoryIcon, Moon, PanelLeftClose, PanelLeftOpen, Search, Settings, Sparkles, SquarePen, Sun, TriangleAlert } from "lucide-react";
+import { FileUp, HistoryIcon, Mic, Moon, PanelLeftClose, PanelLeftOpen, Search, Settings, Sparkles, SquarePen, Sun, TriangleAlert } from "lucide-react";
 import {
   api,
   AppSettings,
@@ -58,6 +58,7 @@ import { RecordTransport } from "./components/RecordTransport";
 import { Sidebar, type SidebarHandle } from "./components/Sidebar";
 import { WindowControls } from "./components/WindowControls";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { DictationPanel } from "./components/DictationPanel";
 import { Onboarding } from "./components/Onboarding";
 import logo from "./assets/logo.png";
 
@@ -223,6 +224,8 @@ function AppShell({
   // This one clears itself the moment a tick succeeds.
   const [liveSttError, setLiveSttError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showDictations, setShowDictations] = useState(false);
+  const closeDictations = useCallback(() => setShowDictations(false), []);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [updateNote, setUpdateNote] = useState<string | null>(null);
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
@@ -736,6 +739,10 @@ function AppShell({
         }),
       );
       track(
+        // A dictation holds the microphone, so the dock's answer changes with it.
+        await listen("dictation://state", () => void refreshGate()),
+      );
+      track(
         await listen("hotkey://toggle-record", async () => {
           try {
             const st = await api.recorderStatus();
@@ -751,7 +758,7 @@ function AppShell({
       live = false;
       unsubs.forEach((u) => u());
     };
-  }, [handleStop, requestStart, refreshMeetings, loadMeeting]);
+  }, [handleStop, requestStart, refreshMeetings, loadMeeting, refreshGate]);
 
   /// The in-app half of the record shortcut, and the half that actually works.
   ///
@@ -777,7 +784,9 @@ function AppShell({
       }
       // A dialog or the drawer is a question waiting for an answer. Starting a
       // recording underneath one is not an answer.
-      if (confirmingRecord || pendingDelete || showSettings || showOnboarding) return;
+      if (confirmingRecord || pendingDelete || showSettings || showDictations || showOnboarding) {
+        return;
+      }
       // Not optional: Ctrl+Shift+R is WebView2's hard reload. Without it the
       // dev build reloads the page and loses the recording in flight — and
       // release builds disable the accelerator, so it looks correct in
@@ -801,6 +810,7 @@ function AppShell({
     confirmingRecord,
     pendingDelete,
     showSettings,
+    showDictations,
     showOnboarding,
     handleStop,
     requestStart,
@@ -1370,9 +1380,23 @@ function AppShell({
           >
             {settings.theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
           </Button>
+          {/* Dictation's route inside the app, in the header and not the rail:
+              it has to be reachable with the list open or collapsed, and from a
+              build without the rail at all. */}
           <Button
             variant="ghost"
             size="icon"
+            data-testid="btn-dictations"
+            onClick={() => setShowDictations(true)}
+            title={t("dictation.open")}
+            aria-label={t("dictation.open")}
+          >
+            <Mic size={16} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid="btn-settings"
             onClick={() => setShowSettings(true)}
             title={t("nav.settings")}
             aria-label={t("nav.settings")}
@@ -2519,6 +2543,10 @@ function AppShell({
             }}
           />
         )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showDictations && <DictationPanel onClose={closeDictations} />}
       </AnimatePresence>
     </div>
   );

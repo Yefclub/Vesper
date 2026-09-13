@@ -1,4 +1,5 @@
-//! The record accelerator — one source of truth, and whether the OS took it.
+//! The global accelerators — record and dictation — as one source of truth,
+//! and whether the OS took them.
 
 use serde::{Deserialize, Serialize};
 
@@ -75,9 +76,108 @@ pub fn status_from<E>(result: Result<(), E>, accelerator: &str) -> ShortcutStatu
     }
 }
 
+/// The dictation combination as the window writes it.
+pub const DICTATION_ACCELERATOR: &str = "Ctrl+Alt+D";
+
+/// The combinations dictation may use.
+///
+/// Never one of `CHOICES`, and a test holds the two lists apart: a combination
+/// both could use would let the key that starts a meeting start a dictation, or
+/// the reverse. No Option-and-Shift-only chord either, which macOS 15 refuses to
+/// register.
+pub const DICTATION_CHOICES: [&str; 4] =
+    ["Ctrl+Alt+D", "Ctrl+Alt+H", "Ctrl+Alt+J", "Ctrl+Shift+F10"];
+
+/// `is_offered`, for dictation.
+pub fn is_offered_for_dictation(accelerator: &str) -> bool {
+    DICTATION_CHOICES.contains(&accelerator)
+}
+
+/// `chosen_or_default`, for dictation.
+pub fn dictation_chosen_or_default(stored: &str) -> &'static str {
+    DICTATION_CHOICES
+        .iter()
+        .find(|c| **c == stored)
+        .copied()
+        .unwrap_or(DICTATION_ACCELERATOR)
+}
+
+/// `status_from`, for dictation.
+///
+/// A refusal this app made itself — a desktop with no global keys to give —
+/// arrives as its own reason key and is kept; anything the OS answered is the
+/// combination being taken.
+pub fn dictation_status_from(result: Result<(), &str>, accelerator: &str) -> ShortcutStatus {
+    ShortcutStatus {
+        registered: result.is_ok(),
+        accelerator: accelerator.to_string(),
+        reason_key: result.err().map(|e| {
+            if e.starts_with("dictation.") {
+                e
+            } else {
+                "dictation.shortcut.unavailable"
+            }
+            .to_string()
+        }),
+        choices: DICTATION_CHOICES.iter().map(|c| c.to_string()).collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One combination on both lists would let the record key start a
+    /// dictation, or the dictation key start a meeting.
+    #[test]
+    fn dictation_and_record_never_share_a_combination() {
+        for c in DICTATION_CHOICES {
+            assert!(!is_offered(c), "{c} is offered for both");
+        }
+    }
+
+    #[test]
+    fn every_dictation_choice_is_a_combination_the_app_can_register() {
+        use tauri_plugin_global_shortcut::Shortcut;
+        for c in DICTATION_CHOICES {
+            assert!(
+                c.parse::<Shortcut>().is_ok(),
+                "{c} is offered but cannot be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn the_dictation_default_is_one_of_its_choices_and_the_fallback() {
+        assert!(is_offered_for_dictation(DICTATION_ACCELERATOR));
+        assert_eq!(dictation_chosen_or_default("Ctrl+Alt+H"), "Ctrl+Alt+H");
+        assert_eq!(
+            dictation_chosen_or_default(RECORD_ACCELERATOR),
+            DICTATION_ACCELERATOR
+        );
+        assert_eq!(
+            dictation_status_from(Ok(()), DICTATION_ACCELERATOR).choices[0],
+            DICTATION_CHOICES[0]
+        );
+    }
+
+    /// The record shortcut's reason names Ctrl+Shift+R, so dictation carries
+    /// its own — and a desktop's refusal is not reported as a taken key.
+    #[test]
+    fn a_dictation_refusal_names_its_own_reason() {
+        let taken = dictation_status_from(Err("HotKey already registered"), "Ctrl+Alt+H");
+        assert!(!taken.registered);
+        assert_eq!(
+            taken.reason_key.as_deref(),
+            Some("dictation.shortcut.unavailable")
+        );
+        let wayland = dictation_status_from(Err("dictation.shortcut.wayland"), "Ctrl+Alt+H");
+        assert_eq!(
+            wayland.reason_key.as_deref(),
+            Some("dictation.shortcut.wayland")
+        );
+        assert_eq!(dictation_status_from(Ok(()), "Ctrl+Alt+H").reason_key, None);
+    }
 
     /// The window reads these names off the IPC payload and nothing checks that
     /// contract across the boundary — the front end is a separate branch in

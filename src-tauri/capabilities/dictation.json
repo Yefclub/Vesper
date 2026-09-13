@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dictation",
+  "description": "The dictation indicator. Listens for dictation events and asks to start, stop or resize; it has no reason to reach the filesystem, the updater or the shell.",
+  "windows": [
+    "dictation"
+  ],
+  "permissions": [
+    "core:event:default"
+  ]
+}

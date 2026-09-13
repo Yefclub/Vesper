@@ -1,0 +1,25 @@
+<!doctype html>
+<!-- `overlay` for the reason `overlay.html` carries it: this window floats over
+     other applications and must paint nothing but its own controls. Both
+     `index.css` and `boot-theme.js` read the class. -->
+<html lang="en" class="overlay">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vesper</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+    </style>
+    <!-- A file, never an inline block: the production CSP blocks inline
+         scripts. -->
+    <script src="/boot-theme.js"></script>
+  </head>
+  <body class="antialiased">
+    <div id="root"></div>
+    <script type="module" src="/src/dictation/main.tsx"></script>
+  </body>
+</html>

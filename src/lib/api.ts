@@ -120,7 +120,58 @@ export interface AppSettings {
   default_speaker_me?: string | null;
   default_speaker_others?: string | null;
 
+  /** The global dictation accelerator. Written only by `set_dictation_shortcut`
+   *  — a whole-settings Save carries the stored one back, whatever this says. */
+  dictation_shortcut?: string;
+  /** Dictation may send the microphone to the cloud transcriber. Off by
+   *  default, and a separate consent from choosing the provider for meetings. */
+  dictation_cloud_consent?: boolean;
+  /** The dictation indicator rests on the screen edge. */
+  dictation_indicator?: boolean;
 }
+
+/** Where a dictation is. The names are the Rust `snake_case` variants. */
+export type DictationState =
+  | "idle"
+  | "listening"
+  | "transcribing"
+  | "inserting"
+  | "saved"
+  | "inserted"
+  | "unconfirmed"
+  | "insertion_failed"
+  | "transcription_failed";
+
+/** A dictation as the history lists it. `failure` names a
+ *  `dictation.failure.*` key, never a message from the system. */
+export interface DictationRecord {
+  id: string;
+  created_at: string;
+  state: DictationState;
+  failure?: string | null;
+  duration_ms: number;
+  text: string;
+  /** A failed transcription still has its audio to retry from. */
+  has_audio: boolean;
+}
+
+/** Payload of `dictation://state`, and what `dictation_status` answers. */
+export interface DictationStatus {
+  id?: string | null;
+  state: DictationState;
+  reason_key?: string | null;
+  /** Set while a retried insertion counts down. */
+  countdown_ms?: number | null;
+}
+
+export interface DictationSupport {
+  can_insert: boolean;
+  shortcut_refusal_key?: string | null;
+  platform: string;
+}
+
+/** Where a start or stop comes from. The shortcut is the backend's own. */
+export type DictationRoute = "indicator" | "window";
 
 /** Which selected channels have produced no sound at all since the recording
  *  began — a dead input rather than a quiet room. */
@@ -492,6 +543,32 @@ export const api = {
   // the artifact's checksum before it reaches whisper.cpp / llama.cpp.
   downloadModel: (modelId: string) => invoke<string>("download_model_cmd", { modelId }),
   updatesConfig: () => invoke<Record<string, unknown>>("check_updates_config"),
+  dictationStatus: () => invoke<DictationStatus>("dictation_status"),
+  /// Resolves as soon as the request is taken; `dictation://state` says what
+  /// became of it.
+  toggleDictation: (route: DictationRoute) =>
+    invoke<void>("toggle_dictation", { route }),
+  /// Newest first, or the matches for a search.
+  listDictations: (query?: string) =>
+    invoke<DictationRecord[]>("list_dictations", { query }),
+  deleteDictation: (id: string) => invoke<void>("delete_dictation", { id }),
+  /// Types a kept dictation again after a short countdown — time for the user
+  /// to click where it should go. Resolves once the attempt is over.
+  retryDictationInsertion: (id: string) =>
+    invoke<void>("retry_dictation_insertion", { id }),
+  retryDictationTranscription: (id: string) =>
+    invoke<void>("retry_dictation_transcription", { id }),
+  /// Asks where to save in a native dialog the backend opens itself, and
+  /// resolves with the path written — or null when the dialog was cancelled.
+  exportDictation: (id: string) =>
+    invoke<string | null>("export_dictation_cmd", { id }),
+  dictationShortcutStatus: () =>
+    invoke<ShortcutStatus>("dictation_shortcut_status"),
+  setDictationShortcut: (accelerator: string) =>
+    invoke<ShortcutStatus>("set_dictation_shortcut", { accelerator }),
+  dictationSupport: () => invoke<DictationSupport>("dictation_support"),
+  setDictationIndicatorExpanded: (expanded: boolean) =>
+    invoke<void>("set_dictation_indicator_expanded", { expanded }),
 };
 
 /** Rolls the hour out of the minutes field once there is one. Without it a

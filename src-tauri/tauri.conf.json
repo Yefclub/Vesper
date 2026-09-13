@@ -39,6 +39,22 @@
         "visible": false,
         "focus": false,
         "focusable": false
+      },
+      {
+        "label": "dictation",
+        "url": "dictation.html",
+        "title": "Vesper",
+        "width": 12,
+        "height": 72,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "visible": false,
+        "focus": false,
+        "focusable": false
       }
     ],
     "security": {
