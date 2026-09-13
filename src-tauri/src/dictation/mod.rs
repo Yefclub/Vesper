@@ -546,6 +546,12 @@ async fn transcribe(
     sample_rate: u32,
     offset_ms: u64,
 ) -> Vec<Utterance> {
+    // The provider as it is now, not as it was when the take started: a switch
+    // to the cloud halfway through a local dictation sends it nothing the start
+    // would have refused. Untried is kept — the audio stays for a retry.
+    if crate::domain::dictation::transcriber_refusal(settings).is_some() {
+        return utterances;
+    }
     let mut prompt = match state.db.dictation(id) {
         Ok(Some(d)) => prompt_tail(&d.text),
         _ => String::new(),
@@ -807,10 +813,19 @@ pub async fn retry_insertion(app: &AppHandle, state: &AppState, id: String) -> R
         }
     };
     retryable(state)?;
+    // Never beside a meeting, like every other way into dictation.
+    if meeting_active(state) {
+        return Err("dictation.gate.meeting".into());
+    }
     state.dictation.claim(&id, DictationState::Inserting)?;
     // Read again with the claim held: a delete that landed in between is refused
-    // from here on, and must not be typed out three seconds after it.
+    // from here on, and must not be typed out three seconds after it — and a
+    // meeting that started in between either sees this claim or is seen here.
     let text = match retryable(state) {
+        Ok(_) if meeting_active(state) => {
+            state.dictation.release(&id);
+            return Err("dictation.gate.meeting".into());
+        }
         Ok(text) => text,
         Err(e) => {
             state.dictation.release(&id);

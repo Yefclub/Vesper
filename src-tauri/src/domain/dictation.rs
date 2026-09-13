@@ -229,6 +229,10 @@ pub struct Target {
     pub window: u64,
     /// `0` where the platform cannot name the focused control.
     pub control: u64,
+    /// The focused text field itself, where the platform can name it: rich
+    /// editors and browsers keep many fields inside one window and one control.
+    /// `0` where it cannot.
+    pub element: u64,
     pub process: u32,
     /// `0` where the platform cannot say. Otherwise it tells a program apart from
     /// a later one that was handed the same process id.
@@ -260,6 +264,11 @@ pub fn still_the_target(
     // An unknown control at the start cannot be compared, and refusing on it
     // would refuse every application that does not expose one.
     if captured.control != 0 && now.control != captured.control {
+        return Err(FailureReason::TargetChanged);
+    }
+    // The field, where it was named at the start. One that cannot be named now
+    // is not the same field as far as anything here can tell.
+    if captured.element != 0 && now.element != captured.element {
         return Err(FailureReason::TargetChanged);
     }
     Ok(())
@@ -301,6 +310,25 @@ pub struct DictationGate {
     pub reason_key: Option<String>,
 }
 
+/// Why the transcriber may not hear a dictation, when it may not: the cloud,
+/// without its own consent or with the network switched off.
+///
+/// Asked before every pass, not only at the start. Settings can change while a
+/// dictation is listening, and a provider switched to the cloud halfway through
+/// must not receive the rest of a take the start would have refused.
+pub fn transcriber_refusal(settings: &AppSettings) -> Option<&'static str> {
+    if settings.stt_provider != SttProvider::OpenRouter {
+        return None;
+    }
+    if settings.offline_mode {
+        return Some("dictation.gate.offline");
+    }
+    if !settings.dictation_cloud_consent {
+        return Some("dictation.gate.cloud_consent");
+    }
+    None
+}
+
 /// Whether a dictation may start.
 ///
 /// A meeting in progress holds the microphone and the transcriber, and the two
@@ -324,13 +352,8 @@ pub fn can_start(
     if meeting_active {
         return refuse("dictation.gate.meeting");
     }
-    if settings.stt_provider == SttProvider::OpenRouter {
-        if settings.offline_mode {
-            return refuse("dictation.gate.offline");
-        }
-        if !settings.dictation_cloud_consent {
-            return refuse("dictation.gate.cloud_consent");
-        }
+    if let Some(key) = transcriber_refusal(settings) {
+        return refuse(key);
     }
     // With the microphone switched on: a meeting switch turned off says nothing
     // about dictation, which only ever records the microphone.
@@ -441,6 +464,7 @@ mod tests {
         Target {
             window: 0x10,
             control: 0x20,
+            element: 0x30,
             process: 42,
             process_started: 1_000,
         }
@@ -617,16 +641,40 @@ mod tests {
     }
 
     #[test]
-    fn the_same_window_and_control_is_still_the_target() {
+    fn the_same_window_control_and_field_is_still_the_target() {
         assert_eq!(still_the_target(target(), Some(target()), OWN), Ok(()));
     }
 
+    /// Asked of every pass as well as of the start, so a provider switched to
+    /// the cloud in the middle of a dictation is caught by the next pass.
     #[test]
-    fn any_change_of_window_control_or_program_refuses() {
+    fn only_the_cloud_without_consent_or_network_refuses_a_pass() {
+        let mut s = ready();
+        assert_eq!(transcriber_refusal(&s), None);
+        s.offline_mode = true;
+        assert_eq!(transcriber_refusal(&s), None, "local needs no network");
+        s.stt_provider = SttProvider::OpenRouter;
+        assert_eq!(transcriber_refusal(&s), Some("dictation.gate.offline"));
+        s.offline_mode = false;
+        assert_eq!(
+            transcriber_refusal(&s),
+            Some("dictation.gate.cloud_consent")
+        );
+        s.dictation_cloud_consent = true;
+        assert_eq!(transcriber_refusal(&s), None);
+    }
+
+    #[test]
+    fn any_change_of_window_control_field_or_program_refuses() {
         let t = target();
         for now in [
             Target { window: 0x11, ..t },
             Target { control: 0x21, ..t },
+            // Another field behind the same window and control, the way a
+            // browser's inputs all are.
+            Target { element: 0x31, ..t },
+            // A field that cannot be named now is not the one named at the start.
+            Target { element: 0, ..t },
             Target { process: 43, ..t },
             // A program that quit and a new one handed the same pid.
             Target {

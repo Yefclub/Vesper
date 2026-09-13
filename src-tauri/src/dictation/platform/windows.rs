@@ -4,6 +4,7 @@
 use crate::dictation::encode::{batches, occurrences, unicode_keys};
 use crate::dictation::verdict::{refuses_text, wait_until, TypingClaim};
 use crate::domain::dictation::{FailureReason, InsertionOutcome, Target};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem::size_of;
 use std::time::Duration;
 use windows::core::{IUnknown, Interface};
@@ -15,13 +16,16 @@ use windows::Win32::Security::{
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
+use windows::Win32::System::Ole::{
+    SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
+};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationTextPattern,
-    IUIAutomationValuePattern, UIA_TextPatternId, UIA_ValuePatternId,
+    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationTextPattern,
+    IUIAutomationValuePattern, UIA_EditControlTypeId, UIA_TextPatternId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -68,6 +72,9 @@ pub fn capture_target() -> Option<Target> {
         Some(Target {
             window: handle_id(window),
             control,
+            element: FocusedText::new()
+                .and_then(|reader| reader.focused_field())
+                .unwrap_or(0),
             process,
             process_started: process_started(process).unwrap_or(0),
         })
@@ -95,6 +102,13 @@ pub fn insert(target: Target, text: &str, claim: &TypingClaim) -> InsertionOutco
     }
     let reader = FocusedText::new();
     let focused = reader.as_ref().and_then(FocusedText::inspect);
+    // Bound to the field the dictation was aimed at, by the same inspection
+    // that is about to be typed into. Many fields share one window handle — a
+    // browser's all do — so a field that took the focus after the window was
+    // checked is not the target, whatever window it sits in.
+    if target.element != 0 && focused.as_ref().and_then(|f| f.element) != Some(target.element) {
+        return InsertionOutcome::Failed(FailureReason::TargetChanged);
+    }
     if focused
         .as_ref()
         .is_some_and(|f| refuses_text(f.control_type, f.read_only))
@@ -238,6 +252,39 @@ unsafe fn integrity(process: HANDLE) -> Option<u32> {
     Some(*GetSidSubAuthority(sid, u32::from(count) - 1))
 }
 
+/// A UI Automation runtime id folded into one number: unique to its element for
+/// as long as the element exists, which is as long as a dictation needs it.
+///
+/// # Safety
+/// `element` must be a live UI Automation element.
+unsafe fn runtime_id(element: &IUIAutomationElement) -> Option<u64> {
+    let array = element.GetRuntimeId().ok()?;
+    if array.is_null() {
+        return None;
+    }
+    let mut hasher = DefaultHasher::new();
+    let mut whole = true;
+    match (SafeArrayGetLBound(array, 1), SafeArrayGetUBound(array, 1)) {
+        (Ok(lower), Ok(upper)) => {
+            for index in lower..=upper {
+                let mut part = 0i32;
+                if SafeArrayGetElement(array, &index, (&mut part as *mut i32).cast()).is_err() {
+                    whole = false;
+                    break;
+                }
+                part.hash(&mut hasher);
+            }
+        }
+        _ => whole = false,
+    }
+    let _ = SafeArrayDestroy(array);
+    if whole {
+        Some(hasher.finish().max(1))
+    } else {
+        None
+    }
+}
+
 /// What UI Automation says about the focused element.
 ///
 /// `text` is read only to count the dictated text in it before and after, and
@@ -245,6 +292,7 @@ unsafe fn integrity(process: HANDLE) -> Option<u32> {
 struct Focused {
     control_type: Option<i32>,
     read_only: Option<bool>,
+    element: Option<u64>,
     text: Option<String>,
 }
 
@@ -265,6 +313,32 @@ impl FocusedText {
                 let _ = bounded.SetTransactionTimeout(UIA_TIMEOUT_MS);
             }
             Some(Self { automation })
+        }
+    }
+
+    /// The focused element's identity, when it is a field UI Automation names
+    /// as one — an edit control, or anything with a value that can be written.
+    ///
+    /// Nothing else is named. A browser that has only just been asked answers
+    /// with its whole page while it builds the tree behind it, and the field
+    /// named a few seconds later would read as a different target.
+    fn focused_field(&self) -> Option<u64> {
+        // SAFETY: plain COM calls on interfaces owned by this struct.
+        unsafe {
+            let element = self.automation.GetFocusedElement().ok()?;
+            let edit = element
+                .CurrentControlType()
+                .is_ok_and(|c| c == UIA_EditControlTypeId);
+            let writable = element
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                .ok()
+                .and_then(|v| v.CurrentIsReadOnly().ok())
+                .is_some_and(|read_only| !read_only.as_bool());
+            if edit || writable {
+                runtime_id(&element)
+            } else {
+                None
+            }
         }
     }
 
@@ -292,6 +366,7 @@ impl FocusedText {
             Some(Focused {
                 control_type,
                 read_only,
+                element: runtime_id(&element),
                 text,
             })
         }

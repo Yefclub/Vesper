@@ -172,7 +172,12 @@ function Handle() {
           domain/dictation.rs; both footprints are centred on the same edge. */}
       <div
         aria-hidden
-        className="absolute right-0 top-1/2 flex h-[72px] w-[12px] -translate-y-1/2 items-center justify-center"
+        // Hidden under the open controls, which say the same thing larger, and
+        // back the moment they start to leave.
+        className={clsx(
+          "absolute right-0 top-1/2 flex h-[72px] w-[12px] -translate-y-1/2 items-center justify-center",
+          expanded && "invisible",
+        )}
       >
         <span
           className={clsx(

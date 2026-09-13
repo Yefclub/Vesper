@@ -558,8 +558,10 @@ export const api = {
     invoke<void>("retry_dictation_insertion", { id }),
   retryDictationTranscription: (id: string) =>
     invoke<void>("retry_dictation_transcription", { id }),
-  exportDictation: (id: string, path: string) =>
-    invoke<string>("export_dictation_cmd", { id, path }),
+  /// Asks where to save in a native dialog the backend opens itself, and
+  /// resolves with the path written — or null when the dialog was cancelled.
+  exportDictation: (id: string) =>
+    invoke<string | null>("export_dictation_cmd", { id }),
   dictationShortcutStatus: () =>
     invoke<ShortcutStatus>("dictation_shortcut_status"),
   setDictationShortcut: (accelerator: string) =>

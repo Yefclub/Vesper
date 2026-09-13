@@ -3088,31 +3088,48 @@ pub async fn retry_dictation_transcription(
     crate::dictation::retry_transcription(&app, &state, id).await
 }
 
-/// Writes a dictation's text to the file the save dialog named — the same
-/// contract as a meeting's export.
+/// Asks where to save a dictation, and writes its text there. `None` when the
+/// dialog was cancelled.
+///
+/// The dialog is opened here rather than by the window. A path handed over IPC
+/// is only as trustworthy as whatever runs in the WebView, and trusting it would
+/// let that overwrite any text file the user owns with a transcript; a path
+/// that comes back from a native dialog is one a person picked.
 #[tauri::command]
-pub fn export_dictation_cmd(
+pub async fn export_dictation_cmd(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     id: String,
-    path: String,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
     let record = state
         .db
         .dictation(&id)?
         .ok_or_else(|| "dictation not found".to_string())?;
-    let path = PathBuf::from(path);
-    // Text into a text file and nothing else: the path comes from the WebView,
-    // and without this the same command writes a `.bat` as readily as a `.txt`.
-    let text_file = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("md"));
-    if !text_file {
-        return Err("a dictation is exported as .txt or .md".into());
-    }
+    let name = format!(
+        "dictation-{}.txt",
+        record.created_at.get(..10).unwrap_or("export")
+    );
+    let dialog = app
+        .dialog()
+        .file()
+        .add_filter("Text", &["txt", "md"])
+        .set_file_name(name);
+    // The meeting card must not float over Vesper's own chooser, which is what
+    // the window's `set_modal_open` says for the choosers it opens itself.
+    state.modal_open.store(true, Ordering::SeqCst);
+    sync_overlay_for(&app, &state);
+    // Off the async runtime: the dialog blocks its caller until it closes.
+    let picked = tokio::task::spawn_blocking(move || dialog.blocking_save_file()).await;
+    state.modal_open.store(false, Ordering::SeqCst);
+    sync_overlay_for(&app, &state);
+    let Some(picked) = picked.map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
     std::fs::write(&path, format!("{}\n", record.text))
         .map_err(|e| format!("the dictation could not be written: {e}"))?;
-    Ok(path.display().to_string())
+    Ok(Some(path.display().to_string()))
 }
 
 /// The indicator asking to grow or shrink as the pointer arrives and leaves.

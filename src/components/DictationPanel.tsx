@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
 import { clsx } from "clsx";
 import { Download, Mic, Search, Square, Trash2, X } from "lucide-react";
 import {
@@ -188,19 +187,12 @@ export function DictationPanel({ onClose }: { onClose: () => void }) {
 
   async function exportOne(d: DictationRecord) {
     setError(null);
-    // The floating card must not appear over a chooser Vesper itself opened.
-    await api.setModalOpen(true);
     try {
-      const path = await save({
-        defaultPath: `dictation-${d.created_at.slice(0, 10)}.txt`,
-        filters: [{ name: "Text", extensions: ["txt", "md"] }],
-      });
-      if (!path) return;
-      await api.exportDictation(d.id, path);
+      // The backend opens the save dialog itself: a path sent from here is one
+      // it could not tell apart from a path nobody picked.
+      await api.exportDictation(d.id);
     } catch (e) {
       setError(String(e));
-    } finally {
-      await api.setModalOpen(false);
     }
   }
 

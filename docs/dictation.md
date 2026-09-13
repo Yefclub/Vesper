@@ -16,8 +16,9 @@ pressed. Meetings keep `Ctrl+Shift+R`; dictation has its own combination
   dictation ends as `transcription_failed`: what was stored stays, and so does
   the audio, so *Transcribe again* resumes after the last stored sentence.
 - **Inserting.** Only once the text is stored. The target is checked again right
-  before typing — same window, same control, same process — and anything else
-  ends as `insertion_failed` with the reason, never as text in the wrong place.
+  before typing — same window, same field where the platform can name it, same
+  process — and anything else ends as `insertion_failed` with the reason, never
+  as text in the wrong place.
 - **Saved.** Nothing to type into: nothing was said, the dictation was started
   from Vesper's own window or tray (which keeps the text by design), or this
   desktop cannot type into other applications.
@@ -37,11 +38,18 @@ resumes after a restart.
 - Local transcription is the default. With OpenRouter selected, dictation stays
   refused until *Let dictation use cloud transcription* is on — choosing a cloud
   provider for meetings is not that consent — and offline mode refuses it too.
+  The check runs before every transcription pass, so changing the provider while
+  a dictation is listening cannot send the rest of it anywhere the start would
+  have refused.
 - Nothing about a dictation is logged: not the text, not the audio, not the
-  target. The target is four opaque numbers held in memory for one dictation.
+  target. The target is a handful of opaque numbers held in memory for one
+  dictation; on macOS its window and field are described by frame and role, and
+  no title or value ever leaves the script that reads them.
 - The audio exists only while a transcription may need it. Once transcribed it
   is deleted; a failed transcription keeps it for the retry.
 - Nothing is summarised and no model is called beyond the transcriber.
+- Export opens the save dialog from the backend and writes only where a person
+  picked. The window cannot hand it a path.
 
 ## Where to find it
 
@@ -55,12 +63,15 @@ resumes after a restart.
 - **Tray**: *Start/Stop Dictation*, also kept rather than typed.
 - **Settings → Dictation**: shortcut, indicator, cloud consent.
 
+Dictation and meeting recording never run together: each refuses to start while
+the other is running, *Type again* included.
+
 ## Platform support
 
 | | Windows | macOS | Linux X11 | Linux Wayland |
 |---|---|---|---|---|
 | Global shortcut | yes | yes | yes | no |
-| Target check | window, focused control, process and its start time | frontmost process | active window and process | — |
+| Target check | window, focused control, the text field when UI Automation names one, process and its start time | frontmost process, its focused window and element by frame and role | active window, input-focus window and process | — |
 | How text goes in | `SendInput` Unicode | Accessibility selected text; otherwise Cmd+V, clipboard put back | XTest (enigo) | not typed, kept |
 | Confirmation | UI Automation read-back | Accessibility read-back | none: `unconfirmed` | — |
 | Refused | targets running as administrator, read-only fields, non-text controls | missing Accessibility or Automation permission, password fields | — | — |
@@ -69,20 +80,26 @@ resumes after a restart.
 The clipboard is used only on macOS, only when the focused element does not take
 selected text (Chromium and Electron fields). Every item and type on it is copied
 out first and put back once the paste has been read, unless something else wrote
-to the clipboard in the meantime. If the copy cannot be made, nothing is pasted
-(`clipboard_unsafe`).
+to the clipboard in the meantime. If any of it cannot be copied — a type that
+promises data it will not hand over — nothing is pasted (`clipboard_unsafe`).
 
 ## Known limits
 
 - **macOS**: clicking the indicator can activate Vesper (tauri#14102), which
   makes Vesper the target and keeps the text instead of typing it. The shortcut
-  is unaffected. No CI job builds macOS; the scripts are checked by tests on
-  every platform but only run on a Mac.
+  is unaffected. A window moved or a page scrolled while dictating reads as a
+  different target, and the text is kept. No CI job builds macOS; the scripts are
+  checked by tests on every platform but only run on a Mac.
+- **Windows**: a field is told apart from its neighbours only when UI Automation
+  names it as a field — an edit control or a writable value. Rich editors that
+  describe themselves as a document are checked by window and control.
 - **Linux Wayland**: GNOME and KDE give applications no global shortcut and no
   way to type into another application. Dictation works from the tray and from
   Dictations, and the text is copied from there.
-- **Linux X11**: nothing reads a field back without the accessibility bus, so a
-  successful insertion is `unconfirmed`.
+- **Linux X11**: nothing names a field inside a window without the accessibility
+  bus, so moving to another field of the same window before stopping types into
+  that field. Nothing reads a field back either, so a successful insertion is
+  `unconfirmed`.
 
 ## Manual checks
 
@@ -102,9 +119,9 @@ transcription, an ordinary text editor unless the step says otherwise.
    *Not typed* with Copy and *Type again*.
 4. *Type again*, then click into a field within three seconds. The text is typed
    once.
-5. Start a meeting. The indicator disappears; the dictation shortcut is refused
-   with a notification. Stop the meeting: the indicator comes back. While
-   dictating, Record is refused with a reason.
+5. Start a meeting. The indicator disappears; the dictation shortcut and *Type
+   again* are refused with a reason. Stop the meeting: the indicator comes back.
+   While dictating, Record is refused with a reason.
 6. `Ctrl+Shift+R` still starts and stops meetings and never starts dictation.
 7. Hold the dictation shortcut for two seconds: one dictation starts, nothing
    stops it.
@@ -113,9 +130,10 @@ transcription, an ordinary text editor unless the step says otherwise.
    *Transcription failed* with *Transcribe again*, which finishes it.
 9. Select OpenRouter for transcription with the consent off: dictation is refused
    and the message points at Settings. Consent on: it works. Offline mode on: it
-   is refused.
+   is refused. Start a local dictation, switch to OpenRouter with the consent off
+   while it listens, stop: *Transcription failed*, and nothing reached the cloud.
 10. Dictations: search finds a word from one dictation and not the others;
-    export writes a `.txt`; delete asks, then removes it.
+    export opens a save dialog and writes a `.txt`; delete asks, then removes it.
 11. Hover the indicator while typing in the editor: it opens and the editor keeps
     the caret. Turn *Show the dictation indicator* off and save: it disappears at
     rest and appears while dictating.
@@ -125,7 +143,9 @@ transcription, an ordinary text editor unless the step says otherwise.
 - Notepad run as administrator: *Not typed* — the app runs as administrator.
 - File Explorer with a file selected: *Not typed* — no text field. No file is
   renamed or opened.
-- Edge or Chrome text field: *Typed* or *Sent, not confirmed*, text present once.
+- Edge or Chrome: start in one `<input>`, click into another input of the same
+  page, stop. *Not typed* — another field had the keyboard. Start and stop in
+  the same input: *Typed*, text present once.
 - Touch screen: a tap opens the indicator; it closes by itself after five seconds.
 
 ### macOS
@@ -136,6 +156,7 @@ transcription, an ordinary text editor unless the step says otherwise.
 - TextEdit: *Typed*.
 - Chrome, Slack or VS Code: text arrives through the paste. Copy an image before
   dictating; after the dictation, pasting gives the image back.
+- Two TextEdit windows: start in one, click into the other, stop. *Not typed*.
 - A password field focused: *Not typed* — a password field has the keyboard.
 - Click the indicator's record button while an editor is frontmost: note whether
   the editor loses focus (known limit above).

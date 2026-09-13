@@ -58,9 +58,19 @@ pub fn capture_target() -> Option<Target> {
         .value32()
         .and_then(|mut v| v.next())
         .unwrap_or(0);
+    // The window the server sends keys to: the top-level itself for most
+    // toolkits, a child for the few that give a field a window of its own.
+    // `None` and `PointerRoot` are 0 and 1 and name no window. Nothing on X11
+    // names a field inside a window without the accessibility bus.
+    let focus = conn
+        .get_input_focus()
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map_or(0, |reply| reply.focus);
     Some(Target {
         window: u64::from(window),
-        control: 0,
+        control: if focus > 1 { u64::from(focus) } else { 0 },
+        element: 0,
         process: pid,
         process_started: 0,
     })

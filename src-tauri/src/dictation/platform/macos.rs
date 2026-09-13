@@ -51,25 +51,61 @@ fn osascript(language: Language, script: &str) -> Result<String, String> {
     }
 }
 
+/// The frontmost process, then the frame of its focused window, then the role
+/// and frame of its focused element — one per line, and an empty line for what
+/// Accessibility would not describe. Geometry and roles only: no title and no
+/// value ever comes back.
+const CAPTURE_SCRIPT: &str = "on frameOf(x)\n\
+    tell application \"System Events\"\n\
+    set {px, py} to value of attribute \"AXPosition\" of x\n\
+    set {sx, sy} to value of attribute \"AXSize\" of x\n\
+    end tell\n\
+    return (px as text) & \",\" & (py as text) & \",\" & (sx as text) & \",\" & (sy as text)\n\
+    end frameOf\n\
+    with timeout of 3 seconds\n\
+    tell application \"System Events\"\n\
+    set p to first application process whose frontmost is true\n\
+    set pid to unix id of p\n\
+    set w to \"\"\n\
+    set e to \"\"\n\
+    try\n\
+    set w to my frameOf(value of attribute \"AXFocusedWindow\" of p)\n\
+    end try\n\
+    try\n\
+    set el to value of attribute \"AXFocusedUIElement\" of p\n\
+    set e to ((value of attribute \"AXRole\" of el) as text) & \" \" & my frameOf(el)\n\
+    end try\n\
+    end tell\n\
+    end timeout\n\
+    return (pid as text) & linefeed & w & linefeed & e";
+
 pub fn capture_target() -> Option<Target> {
-    let pid = osascript(
-        Language::AppleScript,
-        "with timeout of 3 seconds\n\
-         tell application \"System Events\" to get unix id of first application process whose frontmost is true\n\
-         end timeout",
-    )
-    .ok()?
-    .parse::<u32>()
-    .ok()?;
-    // Only the process: System Events names no window or control a later call
-    // could compare, and a window id guessed here would be a check that passes
-    // for the wrong window.
+    let out = osascript(Language::AppleScript, CAPTURE_SCRIPT).ok()?;
+    let mut lines = out.lines();
+    let pid = lines.next()?.trim().parse::<u32>().ok()?;
+    // Windows and fields named by where they are and what they are, since
+    // System Events hands out no identifier a later call could compare. A window
+    // moved or a page scrolled while dictating reads as a different target,
+    // which keeps the text rather than typing it somewhere else.
     Some(Target {
-        window: 0,
+        window: fingerprint(lines.next().unwrap_or("")),
         control: 0,
+        element: fingerprint(lines.next().unwrap_or("")),
         process: pid,
         process_started: 0,
     })
+}
+
+/// A described frame folded into one number; `0` for nothing described.
+fn fingerprint(described: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let described = described.trim();
+    if described.is_empty() {
+        return 0;
+    }
+    let mut hasher = DefaultHasher::new();
+    described.hash(&mut hasher);
+    hasher.finish().max(1)
 }
 
 /// Shift, Control, Option and Command in `NSEvent.modifierFlags`.
@@ -193,7 +229,8 @@ fn paste_script(text: &str) -> String {
              for (let j = 0; j < types.count; j++) {{\n\
                const type = types.objectAtIndex(j);\n\
                const data = item.dataForType(type);\n\
-               if (!data.isNil()) entry.push([type, data]);\n\
+               if (data.isNil()) throw new Error('clipboard_unsafe');\n\
+               entry.push([type, data]);\n\
              }}\n\
              saved.push(entry);\n\
            }}\n\
