@@ -21,6 +21,8 @@ npm install                    # instalar dependências do front
 npm run tauri dev              # subir a app em desenvolvimento
 npm run build                  # tsc --noEmit && vite build
 npm run tauri build            # bundle desktop de produção
+npm run qa -- build            # build QA da branch: release + gpu-vulkan, como app própria (só Windows)
+npm run qa -- start            # sobe a QA em segundo plano; testar com `npm run qa -- cdp`
 npm run typecheck              # tsc --noEmit
 npm run lint                   # alias de typecheck — não há ESLint configurado
 cd src-tauri && cargo test     # testes Rust
@@ -107,13 +109,23 @@ O produto promete privacidade. Regressão aqui é quebra de promessa, não bug d
 - O banco é o **arquivo local do usuário** (`%APPDATA%/Vesper/vesper.db` no Windows, equivalente em `dirs::data_dir()` nos outros SOs). Não existe ambiente onde "é só recriar": mudança destrutiva de schema apaga reunião de gente real.
 - Alteração destrutiva (drop, rename, mudança de tipo com perda) exige confirmação humana explícita **e** caminho de migração dos dados existentes.
 
-## Ambiente de QA/staging
+## Ambiente de QA
 
-**Não existe** — é aplicativo desktop, não serviço deployado. Validação visual exige rodar a app localmente, o que é exceção sob pedido explícito. Sem isso, verificar por teste e build, e **dizer no relato** que o visual não foi conferido.
+Dois, em momentos diferentes:
+
+- **Antes da PR — build QA** (`npm run qa`, só Windows). A branch roda como a Vesper instalada roda — release, `gpu-vulkan`, os mesmos modelos —, mas como outra aplicação: identificador `com.yefclub.vesper.qa`, dados em `%APPDATA%\Vesper QA`, chave de API em outra entrada do cofre, sem atalho global e sem updater. Modelos e backends baixados entram por hard link da Vesper instalada: nada é baixado de novo, e o que a QA apagar ou substituir some só dela. O agente sobe quando a mudança precisa ser vista rodando, **sem pedir**. Como usar: skill `qa`.
+- **Depois do merge — canal dev**: a tag `dev-*` publica a Vesper Dev, que atualiza a app instalada de quem testa.
+
+A QA roda na máquina de alguém que está usando ela. Por isso:
+
+- **Só pelo DevTools do WebView** (`npm run qa -- cdp`). Nunca mouse, teclado, foco ou captura de tela do sistema: clique sintético em coordenada de tela já fechou o editor de quem estava trabalhando.
+- **Gravação real** só quando a mudança mexe em áudio: curta, transcrição local, gravação apagada ao fim, e o que foi dito não é lido nem relatado. Precisão de transcrição se confere importando áudio de exemplo.
+- **Janela aberta ao terminar** só quando for para uma pessoa conferir. Teste do próprio agente termina com `npm run qa -- stop`.
+- Mudança que só existe em macOS ou Linux não passa pela QA: verificar por teste e build, e **dizer no relato** que não foi vista rodando.
 
 ## O que o agente não faz sem pedir
 
-- Subir a app, servidor de desenvolvimento ou processo de watch por iniciativa própria
+- Subir a app, servidor de desenvolvimento ou processo de watch por iniciativa própria — **exceto o build QA** (ver "Ambiente de QA")
 - Deletar arquivo, branch, tabela ou dado
 - Mexer em configuração de CI/CD
 - Mergear para `main`

@@ -1,9 +1,26 @@
+use crate::domain::profile::Profile;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+static PROFILE: OnceLock<Profile> = OnceLock::new();
+
+/// Fix which copy of the app this process is. `run()` calls it before the log
+/// file, the database or the keychain is opened, because the answer decides
+/// whose files those are.
+pub fn set_profile(profile: Profile) {
+    let _ = PROFILE.set(profile);
+}
+
+/// The profile `set_profile` fixed. Standard when nothing did, which is every
+/// test.
+pub fn profile() -> Profile {
+    PROFILE.get().copied().unwrap_or(Profile::Standard)
+}
 
 pub fn app_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Vesper")
+        .join(profile().data_dir_name())
 }
 
 pub fn models_dir() -> PathBuf {

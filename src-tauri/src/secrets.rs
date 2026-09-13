@@ -11,11 +11,15 @@
 //! without remembering the key between launches. Failures are logged without the
 //! value.
 
-const SERVICE: &str = "com.yefclub.vesper";
 const OPENROUTER_ACCOUNT: &str = "openrouter-api-key";
 
+/// The QA build asks under a service of its own, so a branch under test can
+/// never read, overwrite or delete the key the installed app holds.
 fn entry() -> Result<keyring::Entry, keyring::Error> {
-    keyring::Entry::new(SERVICE, OPENROUTER_ACCOUNT)
+    keyring::Entry::new(
+        crate::paths::profile().keychain_service(),
+        OPENROUTER_ACCOUNT,
+    )
 }
 
 /// Reads the stored key. `None` covers both "never stored" and "keychain
