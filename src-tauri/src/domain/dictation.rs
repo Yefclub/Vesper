@@ -479,8 +479,8 @@ mod tests {
 
     #[test]
     fn a_dictation_never_captures_system_audio() {
-        assert!(CAPTURE.me);
-        assert!(!CAPTURE.others);
+        // Checked when the tests compile: `CAPTURE` is a constant.
+        const { assert!(CAPTURE.me && !CAPTURE.others) };
     }
 
     #[test]
