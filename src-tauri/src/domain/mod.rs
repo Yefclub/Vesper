@@ -6,6 +6,7 @@ pub mod chat;
 pub mod context;
 pub mod cost;
 pub mod deaf;
+pub mod dictation;
 pub mod download;
 pub mod endpoint;
 pub mod export;

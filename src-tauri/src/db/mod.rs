@@ -1,3 +1,4 @@
+use crate::domain::dictation::{joined, DictationRecord, DictationState, FailureReason};
 use crate::domain::job::{MeetingRecord, MeetingStatus};
 use crate::domain::refine::SummaryVersion;
 use crate::domain::search::SearchHit;
@@ -6,6 +7,7 @@ use crate::domain::speaker::{Speaker, SpeakerNames};
 use crate::domain::summary::MeetingInsights;
 use crate::domain::transcript::{LiveTranscript, TranscriptSegment};
 use rusqlite::{params, Connection};
+use serde::{de::DeserializeOwned, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -22,11 +24,20 @@ pub struct Database {
 /// `<recordings>/../../something` satisfies it and the delete would reach outside
 /// — turning a tampered database row into an arbitrary file deletion.
 fn delete_recording(path: &Path) -> Result<(), String> {
+    delete_inside(path, &crate::paths::recordings_dir())
+}
+
+/// `delete_recording`, for a dictation's take and its own directory.
+fn delete_dictation_audio(path: &Path) -> Result<(), String> {
+    delete_inside(path, &crate::paths::dictation_audio_dir())
+}
+
+/// Deletes `path`, but only when it resolves inside `root`.
+fn delete_inside(path: &Path, root: &Path) -> Result<(), String> {
     if !path.is_file() {
         // Already gone, or never written. Nothing to remove and nothing to report.
         return Ok(());
     }
-    let root = crate::paths::recordings_dir();
     let (Ok(root), Ok(resolved)) = (root.canonicalize(), path.canonicalize()) else {
         return Err("could not resolve the recording's location".into());
     };
@@ -64,6 +75,20 @@ fn fts_match_expression(query: &str) -> Option<String> {
         return None;
     }
     Some(terms.join(" OR "))
+}
+
+/// A dictation state or failure as it is stored: its serde name, so the table
+/// and the window spell it the same way.
+fn stored_name<T: Serialize>(value: T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(name)) => name,
+        _ => String::new(),
+    }
+}
+
+fn from_stored_name<T: DeserializeOwned>(name: &str) -> Result<T, String> {
+    serde_json::from_value(serde_json::Value::String(name.into()))
+        .map_err(|e| format!("unknown stored value `{name}`: {e}"))
 }
 
 /// Where the API key is safe to leave when settings are written.
@@ -305,6 +330,45 @@ impl Database {
                 return Err(message);
             }
         }
+        // What was dictated into other applications. Tables of their own rather
+        // than rows in `meetings`: a dictation has no title, speakers or
+        // summary, and every screen, export and search over meetings would have
+        // to learn to skip one.
+        //
+        // A segment is written the moment the transcriber accepts it, so a crash
+        // or a failed transcription after the third sentence still has the first
+        // three. `failure` is a `domain::dictation::FailureReason` by name and
+        // nothing freer: a platform's own message could carry a window title.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS dictations (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                state TEXT NOT NULL,
+                failure TEXT,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                audio_path TEXT
+            );
+            CREATE TABLE IF NOT EXISTS dictation_segments (
+                dictation_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                PRIMARY KEY (dictation_id, seq),
+                FOREIGN KEY(dictation_id) REFERENCES dictations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_dictations_created ON dictations(created_at);
+            CREATE VIRTUAL TABLE IF NOT EXISTS dictations_fts USING fts5(
+                dictation_id UNINDEXED,
+                body,
+                prefix='2 3',
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
         drop(conn);
         self.backfill_search_index()
     }
@@ -1159,6 +1223,244 @@ impl Database {
         Ok(())
     }
 
+    /// Starts a dictation's row, listening, before the microphone opens: a take
+    /// that crashes in its first second still leaves a row recovery can find.
+    pub fn create_dictation(&self, id: &str) -> Result<(), String> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO dictations (id, created_at, updated_at, state) VALUES (?1, ?2, ?2, ?3)",
+            params![id, now, stored_name(DictationState::Listening)],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Appends one accepted utterance and re-indexes the dictation in the same
+    /// transaction, so what search finds is what is stored.
+    pub fn add_dictation_segment(
+        &self,
+        id: &str,
+        text: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO dictation_segments (dictation_id, seq, text, start_ms, end_ms)
+             VALUES (?1,
+                     (SELECT COALESCE(MAX(seq), -1) + 1 FROM dictation_segments WHERE dictation_id = ?1),
+                     ?2, ?3, ?4)",
+            params![id, text, start_ms, end_ms],
+        )
+        .map_err(|e| e.to_string())?;
+        let body = Self::dictation_text(&tx, id)?;
+        tx.execute(
+            "DELETE FROM dictations_fts WHERE dictation_id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO dictations_fts (dictation_id, body) VALUES (?1, ?2)",
+            params![id, body],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE dictations SET updated_at = ?2 WHERE id = ?1",
+            params![id, chrono::Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn set_dictation_state(
+        &self,
+        id: &str,
+        state: DictationState,
+        failure: Option<FailureReason>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE dictations SET state = ?2, failure = ?3, updated_at = ?4 WHERE id = ?1",
+            params![
+                id,
+                stored_name(state),
+                failure.map(stored_name),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The take's length, and where its audio is while a transcription retry
+    /// may still need it. `None` records that it is gone.
+    pub fn set_dictation_audio(
+        &self,
+        id: &str,
+        audio: Option<&Path>,
+        duration_ms: i64,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE dictations SET audio_path = ?2, duration_ms = ?3, updated_at = ?4 WHERE id = ?1",
+            params![
+                id,
+                audio.map(|p| p.to_string_lossy().to_string()),
+                duration_ms,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn dictation_audio(&self, id: &str) -> Result<Option<PathBuf>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let path: Option<Option<String>> = conn
+            .query_row(
+                "SELECT audio_path FROM dictations WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other.to_string()),
+            })?;
+        Ok(path.flatten().map(PathBuf::from))
+    }
+
+    pub fn dictation(&self, id: &str) -> Result<Option<DictationRecord>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Ok(Self::dictation_rows(
+            &conn,
+            "SELECT id, created_at, state, failure, duration_ms, audio_path
+             FROM dictations WHERE id = ?1",
+            params![id],
+        )?
+        .into_iter()
+        .next())
+    }
+
+    /// Newest first.
+    pub fn list_dictations(&self, limit: usize) -> Result<Vec<DictationRecord>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::dictation_rows(
+            &conn,
+            "SELECT id, created_at, state, failure, duration_ms, audio_path
+             FROM dictations ORDER BY created_at DESC LIMIT ?1",
+            params![limit as i64],
+        )
+    }
+
+    /// The meeting search's own matching — prefix terms, accents ignored — over
+    /// what was dictated.
+    pub fn search_dictations(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<DictationRecord>, String> {
+        let Some(match_expr) = fts_match_expression(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::dictation_rows(
+            &conn,
+            "SELECT d.id, d.created_at, d.state, d.failure, d.duration_ms, d.audio_path
+             FROM dictations_fts JOIN dictations d ON d.id = dictations_fts.dictation_id
+             WHERE dictations_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+            params![match_expr, limit as i64],
+        )
+    }
+
+    /// Dictations a process was in the middle of, for launch to recover.
+    pub fn unfinished_dictations(&self) -> Result<Vec<DictationRecord>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        Self::dictation_rows(
+            &conn,
+            "SELECT id, created_at, state, failure, duration_ms, audio_path
+             FROM dictations WHERE state IN (?1, ?2, ?3)",
+            params![
+                stored_name(DictationState::Listening),
+                stored_name(DictationState::Transcribing),
+                stored_name(DictationState::Inserting)
+            ],
+        )
+    }
+
+    /// Deletes a dictation with its segments, its index entry and any audio it
+    /// still holds. The audio goes first: a row kept over an undeletable file is
+    /// a dictation the user can try again, and the reverse is a file nothing
+    /// points at any more.
+    pub fn delete_dictation(&self, id: &str) -> Result<(), String> {
+        if let Some(path) = self.dictation_audio(id)? {
+            delete_dictation_audio(&path)?;
+        }
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM dictations_fts WHERE dictation_id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM dictations WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    fn dictation_text(conn: &Connection, id: &str) -> Result<String, String> {
+        let mut stmt = conn
+            .prepare("SELECT text FROM dictation_segments WHERE dictation_id = ?1 ORDER BY seq")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut texts = Vec::new();
+        for r in rows {
+            texts.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(joined(texts.iter().map(String::as_str)))
+    }
+
+    fn dictation_rows(
+        conn: &Connection,
+        sql: &str,
+        args: impl rusqlite::Params,
+    ) -> Result<Vec<DictationRecord>, String> {
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(args, |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, created_at, state, failure, duration_ms, audio) =
+                r.map_err(|e| e.to_string())?;
+            out.push(DictationRecord {
+                text: Self::dictation_text(conn, &id)?,
+                state: from_stored_name(&state)?,
+                failure: failure.as_deref().map(from_stored_name).transpose()?,
+                has_audio: audio.is_some(),
+                id,
+                created_at,
+                duration_ms,
+            });
+        }
+        Ok(out)
+    }
+
     /// Persists settings, dropping the API key when the keychain is holding it.
     pub fn save_settings_with(&self, settings: &AppSettings, home: KeyHome) -> Result<(), String> {
         let mut on_disk = settings.clone();
@@ -1328,6 +1630,90 @@ mod tests {
 
     fn english() -> SpeakerNames {
         SpeakerNames::resolve(None, None, Locale::En)
+    }
+
+    /// A crash between two segments is a reopen: the first one must still be
+    /// there, and the dictation must still read as unfinished for recovery.
+    #[test]
+    fn a_dictation_keeps_every_accepted_segment_across_a_reopen() {
+        let dir = tempdir().unwrap();
+        {
+            let db = Database::open(dir.path()).unwrap();
+            db.create_dictation("d1").unwrap();
+            db.add_dictation_segment("d1", " First sentence.", 0, 1200)
+                .unwrap();
+            db.add_dictation_segment("d1", " Second one. ", 1200, 2400)
+                .unwrap();
+        }
+        let db = Database::open(dir.path()).unwrap();
+        let d = db.dictation("d1").unwrap().unwrap();
+        assert_eq!(d.text, "First sentence. Second one.");
+        assert_eq!(d.state, DictationState::Listening);
+        assert!(!d.has_audio);
+        assert_eq!(db.unfinished_dictations().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_dictation_state_failure_and_audio_round_trip() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.create_dictation("d1").unwrap();
+        db.set_dictation_audio("d1", Some(Path::new("take.wav")), 3400)
+            .unwrap();
+        db.set_dictation_state(
+            "d1",
+            DictationState::InsertionFailed,
+            Some(FailureReason::TargetChanged),
+        )
+        .unwrap();
+        let d = db.dictation("d1").unwrap().unwrap();
+        assert_eq!(d.state, DictationState::InsertionFailed);
+        assert_eq!(d.failure, Some(FailureReason::TargetChanged));
+        assert_eq!(d.duration_ms, 3400);
+        assert!(d.has_audio);
+        assert!(db.unfinished_dictations().unwrap().is_empty());
+
+        db.set_dictation_audio("d1", None, 3400).unwrap();
+        assert!(!db.dictation("d1").unwrap().unwrap().has_audio);
+        assert_eq!(db.dictation("nope").unwrap(), None);
+    }
+
+    /// Found by its own search, accents and all — and never by the meeting
+    /// search, which lists meetings only.
+    #[test]
+    fn dictations_are_searchable_apart_from_meetings() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.create_dictation("d1").unwrap();
+        db.add_dictation_segment("d1", "Orçamento do terceiro trimestre", 0, 1500)
+            .unwrap();
+        let hits = db.search_dictations("orcamento", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "d1");
+        assert!(db.search("orcamento", 10).unwrap().is_empty());
+        assert!(db.search_dictations("", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_dictation_takes_its_segments_and_index_entry() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.create_dictation("d1").unwrap();
+        db.add_dictation_segment("d1", "gone soon", 0, 900).unwrap();
+        db.delete_dictation("d1").unwrap();
+        assert_eq!(db.dictation("d1").unwrap(), None);
+        assert!(db.search_dictations("gone", 10).unwrap().is_empty());
+        let segments: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM dictation_segments WHERE dictation_id = 'd1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(segments, 0);
     }
 
     #[test]

@@ -31,6 +31,15 @@ pub fn recordings_dir() -> PathBuf {
     app_data_dir().join("recordings")
 }
 
+/// A dictation's take, kept only while a failed transcription may be retried.
+///
+/// Apart from `recordings` so nothing that lists, exports or wipes meetings ever
+/// mistakes one for a meeting's audio — and so the delete that clears one can be
+/// confined to this directory alone.
+pub fn dictation_audio_dir() -> PathBuf {
+    app_data_dir().join("dictation-audio")
+}
+
 /// Compute backends the user chose to download, beside the models they chose
 /// to download.
 ///

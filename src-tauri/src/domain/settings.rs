@@ -110,6 +110,21 @@ pub struct AppSettings {
     /// user with no shortcut at all.
     #[serde(default = "default_shortcut")]
     pub record_shortcut: String,
+    /// The global dictation accelerator, as one of
+    /// `domain::shortcut::DICTATION_CHOICES`.
+    ///
+    /// Separate from `record_shortcut` and never one of its choices, so the key
+    /// that starts a meeting cannot start a dictation.
+    #[serde(default = "default_dictation_shortcut")]
+    pub dictation_shortcut: String,
+    /// Dictation may send the microphone to the cloud transcriber chosen above.
+    ///
+    /// Its own consent, off by default and for rows written before it existed:
+    /// choosing a cloud provider for meetings — which the user starts, in this
+    /// window, and can see recording — is not agreeing that a shortcut pressed
+    /// in another application sends the microphone out of the machine.
+    #[serde(default)]
+    pub dictation_cloud_consent: bool,
     /// Where the floating record card docks: `right_top`, `right_center`,
     /// `right_bottom` or `top`.
     ///
@@ -186,6 +201,9 @@ fn default_backend() -> String {
 fn default_shortcut() -> String {
     crate::domain::shortcut::RECORD_ACCELERATOR.into()
 }
+fn default_dictation_shortcut() -> String {
+    crate::domain::shortcut::DICTATION_ACCELERATOR.into()
+}
 fn default_overlay_position() -> String {
     crate::domain::overlay::OverlayPosition::default()
         .id()
@@ -220,6 +238,8 @@ impl Default for AppSettings {
             compute_backend: "auto".into(),
             confirm_before_recording: true,
             record_shortcut: default_shortcut(),
+            dictation_shortcut: default_dictation_shortcut(),
+            dictation_cloud_consent: false,
             overlay_position: default_overlay_position(),
             close_to_tray: false,
             recent_openrouter_llm_models: Vec::new(),
